@@ -12,18 +12,21 @@ enabled: false # You can turn off the bot w/o removing its config
 separate_process: true
 
 # Execution policy. As checked in, this sample cannot submit transactions.
-# The only bot execution modes are "dry_run" and "live"; dry-run does not prove
-# a later live transaction will succeed. Live mode additionally requires an exact
-# wallet, raw-unit caps, and the separate --authorize-live acknowledgement.
-# This pump_fun sample is additionally blocked from live execution until the
-# dynamic protocol and creator fee schedule is sourced into executable quotes.
+# Live mode requires the exact wallet, one unique risk session id, per-wire caps,
+# cumulative session caps, and the separate --authorize-live acknowledgement.
+# max_session_quote_raw is enforced independently for each quote mint. Changing
+# risk_session_id starts a fresh budget; never rotate it merely to continue
+# buying after a cap. Use a dedicated exit-only session if liquidation requires it.
 # Recovery state is stored under .state/ relative to the working directory;
 # do not delete it while a position or transaction outcome is unresolved.
 execution:
   mode: "dry_run"
   expected_wallet: null # Set the exact signer public key before any live review
-  #max_trade_quote_raw: 100_000 # Required for live; integer raw quote units
-  #max_total_fee_lamports: 10_000 # Required for live; integer lamports
+  #risk_session_id: "replace-with-unique-session-id" # Required for live
+  #max_trade_quote_raw: 200_000 # Covers 0.0001 SOL plus 30% slippage
+  #max_total_fee_lamports: 250_000 # Covers base + configured priority fee
+  #max_session_quote_raw: 1_000_000 # Per quote mint, durable across restarts
+  #max_session_fee_lamports: 1_250_000 # All signed wires in this session
   allow_skip_preflight: false
   allow_force_burn: false
 
@@ -95,19 +98,15 @@ priority_fees:
   hard_cap: 200_000 # Maximum allowable fee in microlamports to prevent excessive spending
 
 # Compute unit limits for transaction processing
-# Operation-specific defaults are used if not specified: buy=100K, sell=60K
+# Pump v2 defaults are buy=180K and sell=160K; override only from simulation data.
 compute_units: {}
-  # Override default CU limits for this platform
-  # buy: 100_000    # Buy operations (ATA creation + trading)
-  # sell: 60_000    # Sell operations (just trading)
+  # buy: 180_000
+  # sell: 160_000
 
-  # Account data size optimization (reduces CU cost and improves tx priority)
-  # Reduces CU cost from 16k to ~128 CU by limiting loaded account data.
-  # Default is 64MB (16k CU). Setting to 512KB significantly reduces overhead.
-  # Note: Savings don't show in "consumed CU" but improve tx priority/cost.
-  # Note (Nov 23, 2025): with data size set to 512KB, transactions fail - increasing to 12.5MB resolves the issue.
-  # Reference: https://www.anza.xyz/blog/cu-optimization-with-setloadedaccountsdatasizelimit
-  # account_data_size: 12_500_000  # Disabled: causes MaxLoadedAccountsDataSizeExceeded with Token-2022
+  # Keep loaded-account data at 16 MiB for Token-2022 mints with extensions.
+  # Mainnet simulation reaches the instruction at 16 MiB; 512 KiB and 4 MiB
+  # fail before execution with MaxLoadedAccountsDataSizeExceeded.
+  # account_data_size: 16_777_216
 
 # Filters for token selection
 filters:

@@ -41,7 +41,10 @@ from core.pubkeys import (
     resolve_quote_amounts,
     resolve_quote_mint,
 )
-from core.transaction_ledger import TransactionLedger
+from core.transaction_ledger import (
+    TransactionLedger,
+    resolve_transaction_ledger_path,
+)
 from core.wallet import Wallet
 from interfaces.core import Platform, TokenInfo
 from monitoring.listener_factory import ListenerFactory
@@ -257,22 +260,11 @@ class UniversalTrader:
         self.execution_policy.validate_wallet(self.wallet.pubkey)
         self.platform = Platform(platform) if isinstance(platform, str) else platform
         self.transaction_ledger: TransactionLedger | None = None
-        if self.execution_policy.mode is ExecutionMode.LIVE:
-            ledger_path = (
-                Path(transaction_ledger_path)
-                if transaction_ledger_path
-                else (
-                    Path(".state")
-                    / "transaction-ledgers"
-                    / f"{self.wallet.pubkey}-{self.platform.value}.sqlite3"
-                )
-            )
-            self.transaction_ledger = TransactionLedger(ledger_path)
         self.solana_client = SolanaClient(
             rpc_endpoint,
             max_rps=max_rps,
             execution_policy=self.execution_policy,
-            ledger=self.transaction_ledger,
+            ledger=None,
         )
         self.priority_fee_manager = PriorityFeeManager(
             client=self.solana_client,
@@ -391,6 +383,7 @@ class UniversalTrader:
         self._position_tasks: set[asyncio.Task] = set()
         self._position_monitor_tasks: set[asyncio.Task] = set()
         self._fatal_monitor_errors: asyncio.Queue[BaseException] = asyncio.Queue()
+        self._unresolved_buy_state_changed = asyncio.Event()
         self._active_positions: dict[str, tuple[TokenInfo, Position]] = {}
         self._unresolved_buys: dict[str, dict] = {}
         self._pending_recovery_tokens: list[TokenInfo] = []
@@ -402,32 +395,33 @@ class UniversalTrader:
             / f"{self.wallet.pubkey}-{self.platform.value}.json"
         )
         self._journal_lock_handle = None
-        if self.execution_policy.mode is ExecutionMode.LIVE:
-            if fcntl is None:
-                if self.transaction_ledger is not None:
-                    self.transaction_ledger.close()
-                raise RuntimeError(
-                    "Live recovery journal locking is unavailable on this platform"
-                )
-            self._journal_path.parent.mkdir(parents=True, exist_ok=True)
-            lock_path = self._journal_path.with_suffix(
-                f"{self._journal_path.suffix}.lock"
-            )
-            self._journal_lock_handle = lock_path.open("a+b")
-            try:
-                fcntl.flock(
-                    self._journal_lock_handle.fileno(),
-                    fcntl.LOCK_EX | fcntl.LOCK_NB,
-                )
-            except BlockingIOError as exc:
-                self._journal_lock_handle.close()
-                if self.transaction_ledger is not None:
-                    self.transaction_ledger.close()
-                self._journal_lock_handle = None
-                raise RuntimeError(
-                    f"Another live trader owns recovery journal {self._journal_path}"
-                ) from exc
         try:
+            if self.execution_policy.mode is ExecutionMode.LIVE:
+                if fcntl is None:
+                    raise RuntimeError(  # noqa: TRY003, TRY301
+                        "Live recovery journal locking is unavailable on this platform"
+                    )
+                ledger_path = (
+                    Path(transaction_ledger_path)
+                    if transaction_ledger_path is not None
+                    else resolve_transaction_ledger_path(self.wallet.pubkey)
+                )
+                self.transaction_ledger = TransactionLedger(ledger_path)
+                self.solana_client.ledger = self.transaction_ledger
+                self._journal_path.parent.mkdir(parents=True, exist_ok=True)
+                lock_path = self._journal_path.with_suffix(
+                    f"{self._journal_path.suffix}.lock"
+                )
+                self._journal_lock_handle = lock_path.open("a+b")
+                try:
+                    fcntl.flock(
+                        self._journal_lock_handle.fileno(),
+                        fcntl.LOCK_EX | fcntl.LOCK_NB,
+                    )
+                except BlockingIOError as exc:
+                    raise RuntimeError(  # noqa: TRY003
+                        f"Another live trader owns recovery journal {self._journal_path}"
+                    ) from exc
             self._load_recovery_journal()
             self._hydrate_submission_recovery()
         except BaseException:
@@ -447,6 +441,7 @@ class UniversalTrader:
 
         ledger = self.transaction_ledger
         self.transaction_ledger = None
+        self.solana_client.ledger = None
         if ledger is not None:
             try:
                 ledger.close()
@@ -516,6 +511,8 @@ class UniversalTrader:
             "user",
             "creator",
             "creator_vault",
+            "protocol_fee_recipient",
+            "buyback_fee_recipient",
             "token_program_id",
             "quote_mint",
             "quote_token_program_id",
@@ -527,6 +524,7 @@ class UniversalTrader:
             "platform": token_info.platform.value,
             "is_mayhem_mode": token_info.is_mayhem_mode,
             "is_cashback_coin": token_info.is_cashback_coin,
+            "pool_needs_extension": token_info.pool_needs_extension,
             "virtual_token_reserves": UniversalTrader._validate_optional_raw_u64(
                 token_info.virtual_token_reserves,
                 "virtual_token_reserves",
@@ -569,7 +567,7 @@ class UniversalTrader:
         return payload
 
     @staticmethod
-    def _token_from_dict(payload: dict) -> TokenInfo:
+    def token_from_dict(payload: dict) -> TokenInfo:
         """Restore TokenInfo without guessing missing protocol metadata."""
         if not isinstance(payload, dict):
             raise ValueError("Recovery token record must be an object")
@@ -586,6 +584,8 @@ class UniversalTrader:
             "creator",
             "creator_vault",
             "token_program_id",
+            "protocol_fee_recipient",
+            "buyback_fee_recipient",
             "quote_mint",
             "quote_token_program_id",
         )
@@ -602,6 +602,7 @@ class UniversalTrader:
             "is_cashback_coin",
             "state_from_event",
             "metadata_verified",
+            "pool_needs_extension",
         )
         for field_name in boolean_fields:
             value = payload.get(field_name, False)
@@ -649,6 +650,7 @@ class UniversalTrader:
             curve_complete=payload.get("curve_complete"),
             pool_tradeable=payload.get("pool_tradeable"),
             pool_status=payload.get("pool_status"),
+            pool_needs_extension=payload.get("pool_needs_extension", False),
             creation_timestamp=UniversalTrader._validate_creation_timestamp(
                 payload.get("creation_timestamp")
             ),
@@ -699,7 +701,7 @@ class UniversalTrader:
             for token_key, record in position_records.items():
                 if not isinstance(record, dict):
                     raise ValueError("position journal record must be an object")
-                token_info = self._token_from_dict(record["token"])
+                token_info = self.token_from_dict(record["token"])
                 position = Position.from_dict(record["position"])
                 if str(position.mint) != token_key or position.mint != token_info.mint:
                     raise ValueError("position journal mint mismatch")
@@ -720,7 +722,7 @@ class UniversalTrader:
             for token_key, record in unresolved_records.items():
                 if not isinstance(record, dict):
                     raise ValueError("unresolved buy journal record must be an object")
-                token_info = self._token_from_dict(record["token"])
+                token_info = self.token_from_dict(record["token"])
                 signature = record.get("signature")
                 if (
                     str(token_info.mint) != token_key
@@ -741,7 +743,7 @@ class UniversalTrader:
             for item in pending_records:
                 if not isinstance(item, dict):
                     raise ValueError("pending recovery token record must be an object")
-                pending_token = self._token_from_dict(item)
+                pending_token = self.token_from_dict(item)
                 if pending_token.platform is not self.platform:
                     raise ValueError("pending recovery token platform mismatch")
                 pending_recovery_tokens.append(pending_token)
@@ -835,8 +837,7 @@ class UniversalTrader:
         for intent_id, expected_signature in intents.items():
             try:
                 recovered = await self.solana_client.recover_active_submission(
-                    intent_id,
-                    skip_preflight=True,
+                    intent_id
                 )
             except TransactionSubmissionUnknown as exc:
                 recovered_signature = exc.signature
@@ -994,6 +995,206 @@ class UniversalTrader:
             except asyncio.CancelledError:
                 pass
 
+    async def _await_unresolved_buy_resolution(
+        self,
+        token_key: str,
+        lifecycle_failure_task: asyncio.Task,
+    ) -> None:
+        """Keep one-shot execution alive until its ambiguous buy is resolved."""
+        while token_key in self._unresolved_buys:
+            self._unresolved_buy_state_changed.clear()
+            if token_key not in self._unresolved_buys:
+                break
+            state_changed_task = asyncio.create_task(
+                self._unresolved_buy_state_changed.wait()
+            )
+            try:
+                done, _ = await asyncio.wait(
+                    {state_changed_task, lifecycle_failure_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if lifecycle_failure_task in done:
+                    raise await lifecycle_failure_task
+                await state_changed_task
+            finally:
+                if not state_changed_task.done():
+                    state_changed_task.cancel()
+                try:
+                    await state_changed_task
+                except asyncio.CancelledError:
+                    pass
+
+    async def _finalize_emergency_exit(
+        self,
+        token_info: TokenInfo,
+        position: Position,
+        *,
+        exit_price: float,
+        tx_signature: str | None,
+        sold_raw: int | None,
+    ) -> None:
+        """Close one journaled position after confirmed emergency sale."""
+        cleanup_raw = (
+            sold_raw
+            if (
+                position.account_balance_baseline_raw is not None
+                and token_info.token_program_id is not None
+            )
+            else None
+        )
+        staged_cleanup = (
+            stage_cleanup_after_sell(
+                self.solana_client,
+                self.wallet,
+                token_info.mint,
+                token_info.token_program_id,
+                self.priority_fee_manager,
+                self.cleanup_mode,
+                self.cleanup_with_priority_fee,
+                self.cleanup_force_close_with_burn,
+                cleanup_raw,
+            )
+            if cleanup_raw is not None
+            else None
+        )
+        position.close_position(exit_price, ExitReason.MANUAL)
+        self._log_trade(
+            "sell",
+            token_info,
+            exit_price,
+            position.quantity,
+            tx_signature,
+        )
+        self._remove_position(token_info.mint)
+        await handle_cleanup_after_sell(
+            self.solana_client,
+            self.wallet,
+            token_info.mint,
+            token_info.token_program_id,
+            self.priority_fee_manager,
+            self.cleanup_mode,
+            self.cleanup_with_priority_fee,
+            self.cleanup_force_close_with_burn,
+            confirmed_sold_raw=(cleanup_raw if staged_cleanup is None else None),
+            staged_manager=staged_cleanup,
+        )
+
+    async def emergency_exit(self, mint: Pubkey) -> TradeResult:  # noqa: C901
+        """Sell one recovered position without starting any token listener."""
+        try:
+            self.execution_policy.require_submission()
+            token_key = str(mint)
+            active = self._active_positions.get(token_key)
+            if active is None:
+                raise ValueError(  # noqa: TRY003
+                    f"No active position is journaled for mint {mint}"
+                )
+            token_info, position = active
+            curve_manager = self.platform_implementations.curve_manager
+
+            prepare_live_execution = getattr(
+                curve_manager, "prepare_live_execution", None
+            )
+            if callable(prepare_live_execution):
+                await prepare_live_execution()
+
+            if position.pending_exit_signature is not None:
+                outcome = await self.solana_client.confirm_transaction_outcome(
+                    position.pending_exit_signature
+                )
+                if outcome.status is TransactionStatus.UNKNOWN:
+                    return TradeResult(
+                        success=False,
+                        platform=token_info.platform,
+                        tx_signature=position.pending_exit_signature,
+                        error_message=outcome.error,
+                        amount=position.quantity,
+                        amount_raw=position.quantity_raw,
+                        price=position.pending_exit_price,
+                        slot=outcome.slot,
+                        status=TransactionStatus.UNKNOWN.value,
+                    )
+                if outcome.status is TransactionStatus.SUCCESS:
+                    exit_price = position.pending_exit_price or position.entry_price
+                    signature = position.pending_exit_signature
+                    await self._finalize_emergency_exit(
+                        token_info,
+                        position,
+                        exit_price=exit_price,
+                        tx_signature=signature,
+                        sold_raw=position.quantity_raw,
+                    )
+                    return TradeResult(
+                        success=True,
+                        platform=token_info.platform,
+                        tx_signature=signature,
+                        amount=position.quantity,
+                        amount_raw=position.quantity_raw,
+                        price=exit_price,
+                        slot=outcome.slot,
+                        status=TransactionStatus.SUCCESS.value,
+                    )
+                position.clear_pending_exit()
+                self._persist_position(token_info, position)
+
+            calculate_token_price = getattr(
+                curve_manager, "calculate_token_price", None
+            )
+            if callable(calculate_token_price):
+                current_price = await calculate_token_price(token_info)
+            else:
+                pool_address = self._get_pool_address(token_info)
+                current_price = await curve_manager.calculate_price(pool_address)
+            if (
+                isinstance(current_price, bool)
+                or not isinstance(current_price, int | float)
+                or not isfinite(current_price)
+                or current_price <= 0
+            ):
+                raise ValueError(  # noqa: TRY003
+                    "Platform returned an invalid emergency-exit price"
+                )
+            if not position.position_id:
+                raise ValueError(  # noqa: TRY003
+                    "Emergency exit requires a durable position id"
+                )
+            attempt_sequence = position.next_exit_attempt()
+            intent_id = f"emergency-sell:{position.position_id}:{attempt_sequence}"
+            position.mark_exit_intent(
+                intent_id,
+                ExitReason.MANUAL,
+                float(current_price),
+            )
+            self._persist_position(token_info, position)
+            result = await self.seller.execute(
+                token_info,
+                token_amount=position.quantity,
+                token_price=float(current_price),
+                token_amount_raw=position.quantity_raw,
+                intent_id=intent_id,
+            )
+            if result.success:
+                await self._finalize_emergency_exit(
+                    token_info,
+                    position,
+                    exit_price=result.price or float(current_price),
+                    tx_signature=result.tx_signature,
+                    sold_raw=result.amount_raw,
+                )
+                return result
+            if result.unresolved and result.tx_signature:
+                position.mark_exit_pending(
+                    result.tx_signature,
+                    ExitReason.MANUAL,
+                )
+                self._persist_position(token_info, position)
+                return result
+            position.clear_pending_exit()
+            self._persist_position(token_info, position)
+            return result
+        finally:
+            await self._cleanup_resources()
+
     async def start(self) -> None:
         """Start trading and propagate fatal failures after orderly cleanup."""
         logger.info(f"Starting Universal Trader for {self.platform.value}")
@@ -1082,6 +1283,11 @@ class UniversalTrader:
                         handled = await self._handle_token(token_info)
                     finally:
                         self._finish_token_reservation(token_info, handled)
+                    if str(token_info.mint) in self._unresolved_buys:
+                        await self._await_unresolved_buy_resolution(
+                            str(token_info.mint),
+                            monitor_failure_task,
+                        )
                 if monitor_failure_task.done():
                     monitor_error = await monitor_failure_task
                     raise monitor_error
@@ -1270,6 +1476,10 @@ class UniversalTrader:
                     await task
                 except asyncio.CancelledError:
                     pass
+
+    async def close(self) -> None:
+        """Close all runtime resources without starting the trading loop."""
+        await self._cleanup_resources()
 
     async def _cleanup_resources(self) -> None:
         """Persist unfinished work, then attempt every independent cleanup."""
@@ -1688,6 +1898,7 @@ class UniversalTrader:
                         self._reserved_mints.discard(token_key)
                         self.processed_tokens.add(token_key)
                         self._write_recovery_journal()
+                        self._unresolved_buy_state_changed.set()
                         continue
 
                     token_info = record["token"]
@@ -1768,6 +1979,7 @@ class UniversalTrader:
                         replace_unresolved=True,
                     )
                     self.processed_tokens.add(token_key)
+                    self._unresolved_buy_state_changed.set()
                 except Exception:
                     logger.exception(
                         f"Failed to reconcile unresolved buy for {token_key}"
@@ -1860,7 +2072,14 @@ class UniversalTrader:
                     position.clear_pending_exit()
                     self._persist_position(token_info, position)
 
-                current_price = await curve_manager.calculate_price(pool_address)
+                calculate_token_price = getattr(
+                    curve_manager, "calculate_token_price", None
+                )
+                if callable(calculate_token_price):
+                    current_price = await calculate_token_price(token_info)
+                    pool_address = self._get_pool_address(token_info)
+                else:
+                    current_price = await curve_manager.calculate_price(pool_address)
                 if current_price <= 0:
                     raise ValueError("Platform returned an invalid current price")
 

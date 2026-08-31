@@ -30,25 +30,25 @@ For the full walkthrough, see [Solana: Creating a trading and sniping pump.fun b
 `execution.mode: "dry_run"`. Dry-run never authorizes transaction submission,
 but it can still contact configured RPC/listener services and does not prove
 that a later live transaction will succeed.
-Live submission requires all of the following: one explicitly selected config,
-`execution.mode: "live"`, an exact `expected_wallet`, raw-unit trade and fee
-caps, and the separate `--authorize-live` runtime acknowledgement. Bulk startup
-never authorizes live bots. This README intentionally provides no copy-paste live
-command.
+Live submission requires one explicitly selected config, `execution.mode:
+"live"`, an exact `expected_wallet`, a unique `risk_session_id`, per-wire trade
+and fee caps, cumulative session caps, and the separate `--authorize-live`
+runtime acknowledgement. Bulk startup never authorizes live bots.
 
-**Current live capability boundary:** pump.fun bonding-curve buys and sells
-support only SOL/WSOL- and USDC-paired coins. Before any live listener or queue
-processor starts, the bot strictly decodes the Pump FeeConfig account and
-attests every regular and stable tier against the fee program's read-only
-`get_fees` instruction. Normal quotes batch the curve, mint where needed, and
-FeeConfig reads; verified CreateEvent fast-path quotes use event reserves plus
-the continuously refreshed, attested fee snapshot. Unknown quote assets,
-malformed or changed fee data, failed attestation, stale observations, and
-expired attestation all fail closed before submission. There is no hardcoded
-fee fallback. Dry-run initializes the same attested schedule so it exercises
-the executable quote path, while submission policy remains disabled. LetsBonk
-execution remains limited to authoritative `blocks` or `geyser` events,
-funding-state constant product pools, and WSOL.
+**Current live capability boundary:** pump.fun v2 buys start on the bonding
+curve; sells route through the bonding curve while it is active and through the
+canonical index-0 PumpSwap pool after migration. Both paths support only
+SOL/WSOL- and USDC-paired coins. Before any live listener or queue processor
+starts, the bot strictly decodes and attests the Pump FeeConfig account and the
+PumpSwap fee state used by migrated exits. Normal quotes batch the curve, mint
+where needed, and FeeConfig reads; verified CreateEvent fast-path quotes use
+event reserves plus the continuously refreshed, attested fee snapshot. Unknown
+quote assets, malformed or changed fee data, failed attestation, stale
+observations, and expired attestation all fail closed before submission. There
+is no hardcoded fee fallback. Dry-run initializes the same attested schedule so
+it exercises the executable quote path while submission remains disabled.
+LetsBonk execution remains limited to authoritative `blocks` or `geyser`
+events, funding-state constant product pools, and WSOL.
 
 ---
 
@@ -127,26 +127,105 @@ Logs land in `logs/{bot_name}_{timestamp}.log`.
 The YAML files are commented inline. The sections that matter most:
 
 - **`execution`** — defaults to `dry_run`. Live mode requires an exact
-  `expected_wallet`, `max_trade_quote_raw`, and `max_total_fee_lamports` (all
-  integer raw-unit caps), plus the separate `--authorize-live` acknowledgement.
-  Current LetsBonk buy and sell callers always submit with `skip_preflight=True`,
-  so `allow_skip_preflight: true` is mandatory for LetsBonk live execution; it
-  is an explicit live-risk grant, not an optional latency setting.
-  `allow_force_burn` should remain false unless destructive cleanup has been
-  separately reviewed.
-- **`trade`** — `buy_amount` (in SOL), slippage, `exit_strategy` (`time_based`, `tp_sl`, `manual`), and `extreme_fast_mode`, which skips the bonding-curve price check and buys a fixed token amount instead. Faster, less precise. See [Extreme fast mode](#extreme-fast-mode-zero-rpc-buys) for the zero-RPC behavior and its two knobs, `trust_create_event` and `curve_refresh_budget`.
+  `expected_wallet`; a unique `risk_session_id`; per-wire
+  `max_trade_quote_raw` and `max_total_fee_lamports`; and durable cumulative
+  `max_session_quote_raw` and `max_session_fee_lamports`. The quote session cap
+  is applied independently to each quote mint because SOL lamports and USDC raw
+  units are not comparable. Every signed wire reserves its worst-case quote
+  debit and fee before network submission; the reservation survives restarts.
+  Leave `allow_skip_preflight: false` unless transaction simulation has been
+  deliberately waived after a separate risk review. `allow_force_burn` should
+  remain false unless destructive cleanup has been separately reviewed.
+- **`trade`** — `buy_amount` is the SOL amount per buy;
+  `trade.quote_amounts` supplies whole-unit amounts for non-SOL quote mints.
+  Slippage, `exit_strategy` (`time_based`, `tp_sl`, `manual`), and
+  `extreme_fast_mode` control execution. Extreme-fast mode skips the
+  bonding-curve price read and buys a fixed token amount instead. See
+  [Extreme fast mode](#extreme-fast-mode-zero-rpc-buys) for its two provenance
+  controls, `trust_create_event` and `curve_refresh_budget`.
 - **`priority_fees`** — fixed or dynamic. Dynamic costs an extra RPC call, which slows the buy.
 - **`filters`** — `listener_type`, `max_token_age`, name/creator matching, `marry_mode` (buy only, never sell), `yolo_mode` (trade continuously).
 - **`retries`** — attempts and the wait windows around creation, buy, and the next token.
 - **`cleanup`** — defaults to `disabled`. `on_fail`, `after_sell`, and `post_session` may submit account-management transactions in authorized live mode. `force_close_with_burn` irreversibly destroys remaining tokens and is blocked unless both the cleanup request and `execution.allow_force_burn` are true.
 - **`node.max_rps`** — cap requests per second to match your provider's plan.
 
-Positions are journaled under
-`.state/positions/<wallet>-<platform>.json`; live transaction attempts use
-`.state/transaction-ledgers/<wallet>-<platform>.sqlite3`. These paths are
-relative to the working directory. Back them up and do not delete or share them
-while a position or transaction outcome is unresolved: they prevent unsafe
-re-execution and drive recovery after restart.
+Positions are journaled per venue under
+`.state/positions/<wallet>-<platform>.json`. Live transaction attempts and
+cumulative risk reservations share one wallet-wide ledger at
+`.state/transaction-ledgers/<wallet>.sqlite3`, so concurrent platform processes
+cannot each consume the full session cap. These paths are relative to the
+working directory. Back them up and do not delete, edit, or share them while a
+position or transaction outcome is unresolved: they prevent unsafe
+re-execution, enforce restart-stable budgets, and drive recovery.
+
+Versions before the wallet-wide risk cap wrote
+`.state/transaction-ledgers/<wallet>-pump_fun.sqlite3` and
+`<wallet>-lets_bonk.sqlite3`. The new runtime, `--status`, preflight, and cleanup
+tool fail closed while either legacy ledger exists; silently starting a new
+ledger could replay an unresolved wire or reset cumulative risk. Before
+upgrading, stop every bot, resolve all nonterminal submissions with the previous
+build, close every process using the SQLite WAL, and archive the verified
+terminal legacy ledgers. Never rename, copy, merge, or delete a live WAL merely
+to bypass this guard.
+
+## Live operations runbook
+
+Use a dedicated low-value wallet. Never use a funded primary wallet and never
+test a code change by starting a live bot.
+
+1. Keep `enabled: false`. Set `execution.mode: "live"`, the exact public key in
+   `expected_wallet`, a new descriptive `risk_session_id`, and all four per-wire
+   and cumulative caps. Caps are integers in raw units. Ensure
+   `max_trade_quote_raw` covers the configured amount plus buy slippage and
+   `max_total_fee_lamports` covers the base fee plus the configured priority fee
+   at the operation's compute-unit limit.
+2. Inspect durable state without authorizing submission:
+
+   ```bash
+   CONFIG=bots/bot-sniper-1-geyser.yaml
+   uv run src/bot_runner.py --config "$CONFIG" --status
+   ```
+
+   Resolve or explicitly account for every active position, pending exit, and
+   unresolved buy. Do not delete either `.state` file to make the report clear.
+3. Run the networked, non-submitting readiness check:
+
+   ```bash
+   uv run src/bot_runner.py --config "$CONFIG" --preflight
+   ```
+
+   Continue only when the JSON says `"ready": true`. This verifies the signer,
+   exclusive state lock, RPC health, configured quote balances, native
+   SOL/fee/rent headroom, remaining durable session budgets, and live fee
+   attestation. It never authorizes or calls transaction submission.
+4. Set `enabled: true`, rerun `--preflight`, then start exactly that config:
+
+   ```bash
+   uv run src/bot_runner.py --config "$CONFIG" --authorize-live
+   ```
+
+   `--authorize-live` is process-local; it is not stored in YAML. Starting
+   without `--config` still refuses every live bot.
+5. During and after the run, use `--status`. Stop the listener before manual
+   intervention. To liquidate one journaled mint without starting a listener:
+
+   ```bash
+   MINT=<base58-mint>
+   uv run src/bot_runner.py --config "$CONFIG" \
+     --emergency-exit "$MINT" --authorize-live
+   ```
+
+   Exit code `0` means confirmed, `1` means failed before confirmation, and `2`
+   means the exact signature is still unresolved. On `2`, do not submit a
+   different sell; rerun the same command to reconcile the durable signature.
+
+`risk_session_id` is the explicit reset boundary. Do not rotate it merely to
+continue buying after a cap. Size fee headroom for buys, exits, and cleanup. If
+the fee cap itself blocks liquidation, stop all listeners and create a
+dedicated exit-only session before using `--emergency-exit`; never combine that
+reset with new buys. A prepared wire that provably never reached the network
+releases its reservation. Submitted, reverted, expired, and ambiguous wires
+remain conservatively counted.
 
 ### Extreme fast mode: zero-RPC buys
 
@@ -222,9 +301,8 @@ The examples are not one safety class. Offline `verify_*.py` scripts do not use
 RPC or keys. Listener/decoder scripts may contact mainnet. `simulate_*.py`
 scripts submit RPC simulations but no transactions; simulation can differ from
 live execution. Files named `manual_buy*`, `manual_sell*`, `mint_and_buy*`, and
-`cleanup_accounts.py` are live/account-mutating tools that can spend funds,
-create or close accounts, or destroy assets. Never run them as a verification
-step.
+`cleanup_accounts.py` are live/account-mutating tools that can spend funds or
+change account state. Never run them as a verification step.
 
 | Path | What it covers |
 |---|---|
@@ -237,12 +315,28 @@ step.
 | `manual_buy.py`, `manual_sell.py`, `fetch_price.py` | Live pump.fun trade tools plus a read-only price path. `manual_buy.py --cu-optimized` adds a `SetLoadedAccountsDataSizeLimit` instruction |
 | `mint_and_buy_v2.py` | **Live:** create a coin and buy it in one transaction |
 | `decode_from_*.py`, `calculate_discriminator.py` | Decoding account data, transactions, and Anchor discriminators |
-| `cleanup_accounts.py` | **Live/account-mutating:** close eligible token accounts; review burn behavior before use |
+| `cleanup_accounts.py` | **Live/account-mutating:** close an empty ATA or unwrap WSOL through the authorized transaction ledger; it refuses token burns |
 
-Most of these take the mint or curve address as the first argument, and print usage if
-you leave it off. The `decode_from_*.py` scripts fall back to the saved fixtures beside
-them (`raw_*.json`), which are recaptured from mainnet rather than hand-edited — a
-stale fixture makes a working decoder look broken and a broken one look fine.
+Stop every process using the wallet before running it; closing an ATA while a
+bot is building a trade can invalidate either transaction. Each cleanup target
+uses a durable generation, and success is reported only after the confirmed
+transaction leaves the account absent.
+
+The cleanup tool has no default mint and requires the same explicit live grant
+as the bot:
+
+```bash
+uv run learning-examples/cleanup_accounts.py \
+  --config bots/bot-sniper-1-geyser.yaml \
+  --mint <MINT> \
+  --authorize-live
+```
+
+Most other examples take the mint or curve address as the first argument, and
+print usage if you leave it off. The `decode_from_*.py` scripts fall back to the
+saved fixtures beside them (`raw_*.json`), which are recaptured from mainnet
+rather than hand-edited—a stale fixture makes a working decoder look broken and
+a broken one look fine.
 
 Two offline verifiers and one RPC simulation are useful after a pump.fun
 program upgrade:

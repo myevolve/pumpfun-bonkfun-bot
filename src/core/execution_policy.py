@@ -13,6 +13,8 @@ from typing import Any
 
 from solders.pubkey import Pubkey
 
+_MAX_RISK_SESSION_ID_LENGTH = 128
+
 
 class ExecutionMode(StrEnum):
     """Permitted runtime modes."""
@@ -42,6 +44,9 @@ class ExecutionPolicy:
     expected_wallet: str | None = None
     max_trade_quote_raw: int | None = None
     max_total_fee_lamports: int | None = None
+    risk_session_id: str | None = None
+    max_session_quote_raw: int | None = None
+    max_session_fee_lamports: int | None = None
     allow_skip_preflight: bool = False
     allow_force_burn: bool = False
 
@@ -63,15 +68,38 @@ class ExecutionPolicy:
         for name, value in (
             ("max_trade_quote_raw", self.max_trade_quote_raw),
             ("max_total_fee_lamports", self.max_total_fee_lamports),
+            ("max_session_quote_raw", self.max_session_quote_raw),
+            ("max_session_fee_lamports", self.max_session_fee_lamports),
         ):
             if value is not None:
                 _validate_nonnegative_int(value, name)
+        if self.risk_session_id is not None:
+            if (
+                not isinstance(self.risk_session_id, str)
+                or not self.risk_session_id.strip()
+            ):
+                raise ValueError("risk_session_id must be a non-empty string")  # noqa: TRY003
+            if len(self.risk_session_id) > _MAX_RISK_SESSION_ID_LENGTH:
+                raise ValueError(  # noqa: TRY003
+                    "risk_session_id must be at most "
+                    f"{_MAX_RISK_SESSION_ID_LENGTH} characters"
+                )
         if self.mode is ExecutionMode.LIVE:
             if self.max_trade_quote_raw is None:
                 raise ValueError("max_trade_quote_raw is required for live execution")
             if self.max_total_fee_lamports is None:
                 raise ValueError(
                     "max_total_fee_lamports is required for live execution"
+                )
+            if self.risk_session_id is None:
+                raise ValueError("risk_session_id is required for live execution")  # noqa: TRY003
+            if self.max_session_quote_raw is None:
+                raise ValueError(  # noqa: TRY003
+                    "max_session_quote_raw is required for live execution"
+                )
+            if self.max_session_fee_lamports is None:
+                raise ValueError(  # noqa: TRY003
+                    "max_session_fee_lamports is required for live execution"
                 )
             if self.expected_wallet is None:
                 raise ValueError("expected_wallet is required for live execution")
@@ -144,6 +172,22 @@ class ExecutionPolicy:
                 f"limit {self.max_total_fee_lamports}"
             )
 
+    def session_risk_limits(self) -> tuple[str, int, int]:
+        """Return complete cumulative limits for an authorized live policy."""
+        if (
+            self.risk_session_id is None
+            or self.max_session_quote_raw is None
+            or self.max_session_fee_lamports is None
+        ):
+            raise ExecutionBlocked(  # noqa: TRY003
+                "Persistent session risk limits are required for live execution"
+            )
+        return (
+            self.risk_session_id,
+            self.max_session_quote_raw,
+            self.max_session_fee_lamports,
+        )
+
     def validate_preflight(self, skip_preflight: bool) -> None:
         """Prevent callers from bypassing simulation without a policy grant."""
         if skip_preflight and not self.allow_skip_preflight:
@@ -185,6 +229,9 @@ class ExecutionPolicy:
             expected_wallet=raw.get("expected_wallet"),
             max_trade_quote_raw=raw.get("max_trade_quote_raw"),
             max_total_fee_lamports=raw.get("max_total_fee_lamports"),
+            risk_session_id=raw.get("risk_session_id"),
+            max_session_quote_raw=raw.get("max_session_quote_raw"),
+            max_session_fee_lamports=raw.get("max_session_fee_lamports"),
             allow_skip_preflight=raw.get("allow_skip_preflight", False),
             allow_force_burn=raw.get("allow_force_burn", False),
         )

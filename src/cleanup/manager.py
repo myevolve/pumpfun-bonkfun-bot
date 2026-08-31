@@ -20,7 +20,7 @@ from core.client import (
 )
 from core.execution_policy import ExecutionPolicy
 from core.priority_fee.manager import PriorityFeeManager
-from core.pubkeys import SystemAddresses
+from core.pubkeys import WSOL_MINT, SystemAddresses
 from core.wallet import Wallet
 from utils.durable_file import atomic_write_text
 from utils.logger import get_logger
@@ -885,6 +885,7 @@ class AccountCleanupManager:
                     skip_preflight=False,
                     priority_fee=priority_fee or None,
                     quote_amount_raw=0,
+                    quote_mint=WSOL_MINT,
                     intent_id=intent_id,
                 )
             except TransactionSubmissionUnknown as exc:

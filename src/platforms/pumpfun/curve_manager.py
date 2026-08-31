@@ -19,7 +19,7 @@ from core.pubkeys import (
     normalize_quote_mint,
     quote_units_per_token,
 )
-from interfaces.core import CurveManager, Platform
+from interfaces.core import CurveManager, Platform, TokenInfo
 from platforms.pumpfun.address_provider import PumpFunAddresses
 from platforms.pumpfun.fee_schedule import (
     PumpFeeSchedule,
@@ -28,6 +28,7 @@ from platforms.pumpfun.fee_schedule import (
     quote_buy_exact_out,
     quote_sell_exact_in,
 )
+from platforms.pumpfun.pumpswap import PumpSwapManager
 from utils.idl_parser import IDLParser
 from utils.logger import get_logger
 
@@ -77,6 +78,7 @@ class PumpFunCurveManager(CurveManager):
         idl_parser: IDLParser,
         *,
         fee_schedule: PumpFeeSchedule | None = None,
+        pumpswap_manager: PumpSwapManager | None = None,
     ):
         """Initialize pump.fun curve manager with injected IDL parser.
 
@@ -92,6 +94,7 @@ class PumpFunCurveManager(CurveManager):
             PumpFunAddresses.find_fee_config(),
             PumpFunAddresses.PROGRAM,
         )
+        self.pumpswap = pumpswap_manager or PumpSwapManager(client)
 
         logger.info("Pump.Fun curve manager initialized with injected IDL parser")
 
@@ -202,13 +205,44 @@ class PumpFunCurveManager(CurveManager):
             raise ValueError(f"Mint account {mint} has an unsupported owner")
         return curve_state_data, token_program
 
+    async def get_sell_state_and_token_program(
+        self,
+        pool_address: Pubkey,
+        mint: Pubkey,
+        commitment: str | None = None,
+    ) -> tuple[dict[str, Any], Pubkey]:
+        """Resolve an executable sell snapshot across curve migration."""
+        curve_state, token_program = await self.get_pool_state_and_token_program(
+            pool_address,
+            mint,
+            commitment=commitment,
+        )
+        if curve_state.get("complete") is False:
+            return curve_state, token_program
+        if curve_state.get("complete") is not True:
+            raise ValueError("Pump.fun curve has an invalid completion flag")  # noqa: TRY003
+        quote_mint = normalize_quote_mint(_coerce_pubkey(curve_state.get("quote_mint")))
+        return await self.pumpswap.load_execution_state(
+            mint,
+            quote_mint,
+            commitment=commitment,
+        )
+
     async def prepare_live_execution(self) -> None:
-        """Start an attested fee snapshot before Pump quote processing."""
+        """Start attested fee snapshots for both Pump execution venues."""
         await self.fee_schedule.start()
+        try:
+            await self.pumpswap.start()
+        except Exception:
+            await self.fee_schedule.close()
+            raise
 
     async def close(self) -> None:
-        """Stop dynamic-fee polling."""
-        await self.fee_schedule.close()
+        """Stop both dynamic-fee polling tasks."""
+        try:
+            await self.pumpswap.close()
+        finally:
+            await self.fee_schedule.close()
 
     def _fee_snapshot_for_state(self, pool_state: dict[str, Any]) -> PumpFeeSnapshot:
         attached = pool_state.get("_pump_fee_snapshot")
@@ -243,6 +277,91 @@ class PumpFunCurveManager(CurveManager):
         # _decode_curve_state_with_idl already scales by the quote mint's
         # decimals, so don't re-derive the price with a hardcoded 1e9 here.
         return pool_state["price_per_token"]
+
+    async def calculate_token_price(  # noqa: C901
+        self,
+        token_info: TokenInfo,
+    ) -> float:
+        """Refresh a Pump token across migration and return its current price."""
+        if token_info.platform is not Platform.PUMP_FUN:
+            raise ValueError("Pump curve manager received a non-Pump token")  # noqa: TRY003
+        expected_curve = Pubkey.find_program_address(
+            [b"bonding-curve", bytes(token_info.mint)],
+            PumpFunAddresses.PROGRAM,
+        )[0]
+        if (
+            token_info.bonding_curve is not None
+            and token_info.bonding_curve != expected_curve
+        ):
+            raise ValueError(  # noqa: TRY003
+                "Pump.fun bonding curve does not match the token mint"
+            )
+        token_info.bonding_curve = expected_curve
+        state, token_program = await self.get_sell_state_and_token_program(
+            expected_curve,
+            token_info.mint,
+            commitment="processed",
+        )
+        token_info.token_program_id = token_program
+        quote_mint = normalize_quote_mint(_coerce_pubkey(state.get("quote_mint")))
+        quote_program = QUOTE_TOKEN_PROGRAMS.get(quote_mint)
+        if quote_program is None:
+            raise ValueError("Pump token has an unsupported quote mint")  # noqa: TRY003
+        state_quote_program = _coerce_pubkey(state.get("quote_token_program"))
+        if state_quote_program is not None and state_quote_program != quote_program:
+            raise ValueError(  # noqa: TRY003
+                "Pump token has inconsistent quote-token metadata"
+            )
+        token_info.quote_mint = quote_mint
+        token_info.quote_token_program_id = quote_program
+        token_info.base_decimals = state.get("base_decimals", token_info.base_decimals)
+        token_info.quote_decimals = state.get(
+            "quote_decimals", token_info.quote_decimals
+        )
+        token_info.is_mayhem_mode = state.get(
+            "is_mayhem_mode", token_info.is_mayhem_mode
+        )
+        token_info.is_cashback_coin = state.get(
+            "is_cashback_coin", token_info.is_cashback_coin
+        )
+
+        if state.get("venue") == "pumpswap":
+            field_mapping = {
+                "pool_state": "pool_address",
+                "base_vault": "base_vault",
+                "quote_vault": "quote_vault",
+                "global_config": "global_config",
+                "platform_config": "platform_config",
+                "creator": "creator",
+                "creator_vault": "creator_vault",
+                "protocol_fee_recipient": "protocol_fee_recipient",
+                "buyback_fee_recipient": "buyback_fee_recipient",
+            }
+            token_info.pool_needs_extension = state.get("pool_needs_extension", False)
+            for token_field, state_field in field_mapping.items():
+                value = _coerce_pubkey(state.get(state_field))
+                if value is None:
+                    raise ValueError(  # noqa: TRY003
+                        f"PumpSwap execution state has invalid {state_field}"
+                    )
+                setattr(token_info, token_field, value)
+            token_info.curve_complete = True
+            token_info.pool_tradeable = True
+            token_info.pool_status = "pumpswap"
+            return self.pumpswap.calculate_price(token_info.pool_state, state)
+
+        if state.get("complete") is not False:
+            raise ValueError("Pump.fun curve has an invalid completion flag")  # noqa: TRY003
+        token_info.curve_complete = False
+        token_info.pool_tradeable = True
+        token_info.pool_status = "funding"
+        creator = _coerce_pubkey(state.get("creator"))
+        if creator is not None:
+            token_info.creator = creator
+        price = state.get("price_per_token")
+        if isinstance(price, bool) or not isinstance(price, int | float):
+            raise TypeError("Pump.fun curve returned an invalid price")  # noqa: TRY003
+        return float(price)
 
     async def calculate_buy_amount_out(
         self,
@@ -289,6 +408,12 @@ class PumpFunCurveManager(CurveManager):
     ) -> int:
         """Calculate fee-adjusted raw quote output for a token input."""
         amount_in = _require_raw_u64(amount_in, "amount_in", positive=True)
+        if pool_state is not None and pool_state.get("venue") == "pumpswap":
+            return await self.pumpswap.calculate_sell_amount_out(
+                pool_address,
+                amount_in,
+                pool_state=pool_state,
+            )
         if pool_state is None:
             pool_state = await self.get_pool_state(pool_address)
         snapshot = self._fee_snapshot_for_state(pool_state)

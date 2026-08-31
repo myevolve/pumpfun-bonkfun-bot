@@ -19,6 +19,11 @@ from core.pubkeys import (
     normalize_quote_mint,
 )
 from interfaces.core import AddressProvider, InstructionBuilder, Platform, TokenInfo
+from platforms.pumpfun.pumpswap import (
+    PUMP_SWAP_PROGRAM,
+    PUMP_SWAP_SELL_DISCRIMINATOR,
+    build_pumpswap_sell_instructions,
+)
 from utils.idl_parser import IDLParser
 from utils.logger import get_logger
 
@@ -526,6 +531,13 @@ class PumpFunInstructionBuilder(InstructionBuilder):
         Returns:
             List of instructions needed for the sell operation
         """
+        if token_info.curve_complete is True:
+            return build_pumpswap_sell_instructions(
+                token_info,
+                user,
+                amount_in,
+                minimum_amount_out,
+            )
         if not self._use_legacy_instructions:
             return await self.build_sell_v2_instruction(
                 token_info, user, amount_in, minimum_amount_out, address_provider
@@ -737,6 +749,31 @@ class PumpFunInstructionBuilder(InstructionBuilder):
         Returns:
             List of account addresses that will be accessed
         """
+        if token_info.curve_complete is True:
+            sell_instructions = build_pumpswap_sell_instructions(
+                token_info,
+                user,
+                1,
+                0,
+            )
+            sell_instruction = next(
+                (
+                    instruction
+                    for instruction in sell_instructions
+                    if instruction.program_id == PUMP_SWAP_PROGRAM
+                    and bytes(instruction.data).startswith(PUMP_SWAP_SELL_DISCRIMINATOR)
+                ),
+                None,
+            )
+            if sell_instruction is None:
+                raise RuntimeError(  # noqa: TRY003
+                    "PumpSwap sell instruction was not built"
+                )
+            return [
+                account.pubkey
+                for account in sell_instruction.accounts
+                if account.is_writable
+            ]
         if not self._use_legacy_instructions:
             accounts_info = address_provider.get_sell_v2_instruction_accounts(
                 token_info, user
@@ -816,7 +853,6 @@ class PumpFunInstructionBuilder(InstructionBuilder):
         if self._use_legacy_instructions:
             # Sell operations: typically just sell instruction (ATA exists)
             return 60_000
-        # sell_v2 touches 26 accounts. Measured at ~85k CU by simulating a
-        # buy+sell in one transaction on mainnet (the combined tx consumed
-        # ~211k against ~126k for the buy alone).
-        return 120_000
+        # PumpSwap sells may also create the user's quote ATA. Keep a single
+        # conservative sell budget for both bonding-curve and migrated exits.
+        return 160_000

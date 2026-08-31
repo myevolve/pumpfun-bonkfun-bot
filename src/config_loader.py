@@ -107,6 +107,9 @@ ALLOWED_CONFIG_KEYS: dict[str, set[str] | None] = {
         "expected_wallet",
         "max_trade_quote_raw",
         "max_total_fee_lamports",
+        "risk_session_id",
+        "max_session_quote_raw",
+        "max_session_fee_lamports",
         "allow_skip_preflight",
         "allow_force_burn",
     },
@@ -142,6 +145,7 @@ STRING_FIELDS = {
     "cleanup.mode",
     "platform",
     "execution.mode",
+    "execution.risk_session_id",
 }
 
 NULLABLE_STRING_FIELDS = {
@@ -164,6 +168,8 @@ INTEGER_RANGES: dict[str, tuple[int | None, int | None, bool, bool]] = {
     "retries.max_attempts": (1, 1, True, True),
     "execution.max_trade_quote_raw": (0, None, True, True),
     "execution.max_total_fee_lamports": (0, None, True, True),
+    "execution.max_session_quote_raw": (0, None, True, True),
+    "execution.max_session_fee_lamports": (0, None, True, True),
 }
 
 NUMBER_RANGES: dict[str, tuple[float | None, float | None, bool, bool]] = {

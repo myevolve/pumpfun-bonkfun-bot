@@ -7,8 +7,45 @@ import sqlite3
 import threading
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
+from solders.pubkey import Pubkey
+
+from core.execution_policy import TradeLimitExceeded
 from core.transaction_state import TransactionOutcome, TransactionStatus
+
+
+def default_transaction_ledger_path(wallet: str | Pubkey) -> Path:
+    """Return the wallet-wide ledger shared by every trading platform."""
+    canonical_wallet = str(Pubkey.from_string(str(wallet)))
+    return Path(".state") / "transaction-ledgers" / f"{canonical_wallet}.sqlite3"
+
+
+_LEGACY_PLATFORM_LEDGER_SUFFIXES = ("pump_fun", "lets_bonk")
+_MAX_RISK_SESSION_ID_LENGTH = 128
+_MAX_OPERATION_KEY_LENGTH = 512
+_MAX_OPERATION_GENERATION = 0x7FFF_FFFF_FFFF_FFFF
+_SHA256_HEX_LENGTH = 64
+
+
+def resolve_transaction_ledger_path(wallet: str | Pubkey) -> Path:
+    """Return the shared ledger unless unreconciled platform ledgers exist."""
+    shared_path = default_transaction_ledger_path(wallet)
+    canonical_wallet = shared_path.stem
+    legacy_paths = tuple(
+        shared_path.with_name(f"{canonical_wallet}-{suffix}.sqlite3")
+        for suffix in _LEGACY_PLATFORM_LEDGER_SUFFIXES
+        if shared_path.with_name(f"{canonical_wallet}-{suffix}.sqlite3").exists()
+    )
+    if legacy_paths:
+        names = ", ".join(str(path) for path in legacy_paths)
+        raise LedgerConflict(  # noqa: TRY003
+            "Found legacy platform-scoped transaction ledger(s): "
+            f"{names}. Reconcile them into {shared_path} before live execution; "
+            "silently starting a new wallet ledger could replay an unresolved "
+            "transaction or reset cumulative risk."
+        )
+    return shared_path
 
 
 class LedgerConflict(RuntimeError):
@@ -46,6 +83,15 @@ class RecoveryRecord:
     state: str
     wire_bytes: bytes | None
     receipt_destinations: tuple[str, ...] | None
+
+
+@dataclass(frozen=True, slots=True)
+class SessionRiskTotals:
+    """Cumulative conservative reservations for one configured risk session."""
+
+    quote_amount_raw_by_mint: dict[str, int]
+    fee_lamports: int
+    submission_count: int
 
 
 class TransactionLedger:
@@ -112,6 +158,26 @@ class TransactionLedger:
                     error TEXT,
                     slot INTEGER,
                     observed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE TABLE IF NOT EXISTS risk_reservations (
+                    signature TEXT PRIMARY KEY
+                        REFERENCES submissions(signature) ON DELETE CASCADE,
+                    risk_session_id TEXT NOT NULL,
+                    signer TEXT NOT NULL,
+                    quote_amount_raw TEXT NOT NULL,
+                    quote_mint TEXT NOT NULL,
+                    fee_lamports TEXT NOT NULL,
+                    reserved_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS risk_reservations_session_signer_idx
+                    ON risk_reservations(risk_session_id, signer);
+
+                CREATE TABLE IF NOT EXISTS operation_intents (
+                    operation_key TEXT PRIMARY KEY,
+                    generation INTEGER NOT NULL CHECK (generation > 0),
+                    intent_id TEXT NOT NULL UNIQUE
+                        REFERENCES intents(intent_id)
                 );
                 """
             )
@@ -188,6 +254,229 @@ class TransactionLedger:
             raise LedgerConflict("receipt destinations contain invalid values")
         return tuple(decoded)
 
+    @classmethod
+    def _validate_session_risk_limits(
+        cls,
+        risk_session_id: str,
+        max_session_quote_raw: int,
+        max_session_fee_lamports: int,
+    ) -> None:
+        if not isinstance(risk_session_id, str) or not risk_session_id.strip():
+            raise ValueError("risk_session_id must be a non-empty string")  # noqa: TRY003
+        if len(risk_session_id) > _MAX_RISK_SESSION_ID_LENGTH:
+            raise ValueError(  # noqa: TRY003
+                "risk_session_id must be at most "
+                f"{_MAX_RISK_SESSION_ID_LENGTH} characters"
+            )
+        cls._validate_raw_amount("max_session_quote_raw", max_session_quote_raw)
+        cls._validate_raw_amount("max_session_fee_lamports", max_session_fee_lamports)
+
+    def _reserve_session_risk_locked(  # noqa: PLR0913
+        self,
+        *,
+        signature: str,
+        risk_session_id: str,
+        signer: str,
+        quote_mint: str,
+        quote_amount_raw: int,
+        fee_lamports: int,
+        max_session_quote_raw: int,
+        max_session_fee_lamports: int,
+    ) -> None:
+        existing = self._connection.execute(
+            """
+            SELECT signer, quote_mint, quote_amount_raw, fee_lamports
+            FROM risk_reservations WHERE signature = ?
+            """,
+            (signature,),
+        ).fetchone()
+        expected = (
+            signer,
+            quote_mint,
+            str(quote_amount_raw),
+            str(fee_lamports),
+        )
+        if existing is not None:
+            if tuple(existing) != expected:
+                raise LedgerConflict(  # noqa: TRY003
+                    f"risk reservation for {signature!r} is bound to different data"
+                )
+            return
+
+        rows = self._connection.execute(
+            """
+            SELECT quote_mint, quote_amount_raw, fee_lamports
+            FROM risk_reservations
+            WHERE risk_session_id = ? AND signer = ?
+            """,
+            (risk_session_id, signer),
+        ).fetchall()
+        reserved_quote = sum(
+            int(row["quote_amount_raw"])
+            for row in rows
+            if str(row["quote_mint"]) == quote_mint
+        )
+        reserved_fees = sum(int(row["fee_lamports"]) for row in rows)
+        proposed_quote = reserved_quote + quote_amount_raw
+        proposed_fees = reserved_fees + fee_lamports
+        if proposed_quote > max_session_quote_raw:
+            raise TradeLimitExceeded(  # noqa: TRY003
+                f"session quote amount {proposed_quote} for {quote_mint} "
+                f"exceeds limit {max_session_quote_raw}"
+            )
+        if proposed_fees > max_session_fee_lamports:
+            raise TradeLimitExceeded(  # noqa: TRY003
+                f"session fee amount {proposed_fees} exceeds "
+                f"limit {max_session_fee_lamports}"
+            )
+        self._connection.execute(
+            """
+            INSERT INTO risk_reservations (
+                signature, risk_session_id, signer, quote_mint,
+                quote_amount_raw, fee_lamports
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                signature,
+                risk_session_id,
+                signer,
+                quote_mint,
+                str(quote_amount_raw),
+                str(fee_lamports),
+            ),
+        )
+
+    def get_session_risk_totals(
+        self,
+        risk_session_id: str,
+        signer: str,
+    ) -> SessionRiskTotals:
+        """Return durable conservative exposure reserved for one session."""
+        if not isinstance(risk_session_id, str) or not risk_session_id.strip():
+            raise ValueError("risk_session_id must be a non-empty string")  # noqa: TRY003
+        if not isinstance(signer, str) or not signer:
+            raise ValueError("signer must be a non-empty string")  # noqa: TRY003
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT quote_mint, quote_amount_raw, fee_lamports
+                FROM risk_reservations
+                WHERE risk_session_id = ? AND signer = ?
+                """,
+                (risk_session_id, signer),
+            ).fetchall()
+        quote_totals: dict[str, int] = {}
+        for row in rows:
+            quote_mint = str(row["quote_mint"])
+            quote_totals[quote_mint] = quote_totals.get(quote_mint, 0) + int(
+                row["quote_amount_raw"]
+            )
+        return SessionRiskTotals(
+            quote_amount_raw_by_mint=quote_totals,
+            fee_lamports=sum(int(row["fee_lamports"]) for row in rows),
+            submission_count=len(rows),
+        )
+
+    def reserve_operation_intent(self, operation_key: str, signer: str) -> str:
+        """Reuse unresolved work or allocate a new terminal-safe generation."""
+        if (
+            not isinstance(operation_key, str)
+            or not operation_key
+            or len(operation_key) > _MAX_OPERATION_KEY_LENGTH
+        ):
+            raise ValueError(  # noqa: TRY003
+                "operation_key must be a non-empty string of at most "
+                f"{_MAX_OPERATION_KEY_LENGTH} characters"
+            )
+        if not isinstance(signer, str) or not signer:
+            raise ValueError("signer must be a non-empty string")  # noqa: TRY003
+
+        with self._lock:
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                current = self._connection.execute(
+                    """
+                    SELECT
+                        operation_intents.generation,
+                        operation_intents.intent_id,
+                        intents.signer
+                    FROM operation_intents
+                    JOIN intents
+                      ON intents.intent_id = operation_intents.intent_id
+                    WHERE operation_intents.operation_key = ?
+                    """,
+                    (operation_key,),
+                ).fetchone()
+                if current is not None:
+                    if str(current["signer"]) != signer:
+                        raise LedgerConflict(  # noqa: TRY003, TRY301
+                            "operation key is bound to a different signer"
+                        )
+                    current_intent = str(current["intent_id"])
+                    submission = self._connection.execute(
+                        "SELECT 1 FROM submissions WHERE intent_id = ? LIMIT 1",
+                        (current_intent,),
+                    ).fetchone()
+                    unresolved = self._connection.execute(
+                        """
+                        SELECT 1
+                        FROM submissions AS s
+                        LEFT JOIN outcomes AS o ON o.signature = s.signature
+                        WHERE s.intent_id = ?
+                          AND (o.status IS NULL OR o.status = 'unknown')
+                        LIMIT 1
+                        """,
+                        (current_intent,),
+                    ).fetchone()
+                    if submission is None or unresolved is not None:
+                        self._connection.commit()
+                        return current_intent
+                    generation = int(current["generation"]) + 1
+                else:
+                    generation = 1
+
+                if generation > _MAX_OPERATION_GENERATION:
+                    raise LedgerConflict(  # noqa: TRY003, TRY301
+                        "operation generation is exhausted"
+                    )
+                intent_id = f"{operation_key}:{generation}"
+                self._connection.execute(
+                    """
+                    INSERT INTO intents (
+                        intent_id, signer, quote_amount_raw,
+                        fee_lamports, message_hash
+                    ) VALUES (?, ?, NULL, NULL, NULL)
+                    """,
+                    (intent_id, signer),
+                )
+                if current is None:
+                    self._connection.execute(
+                        """
+                        INSERT INTO operation_intents (
+                            operation_key, generation, intent_id
+                        ) VALUES (?, ?, ?)
+                        """,
+                        (operation_key, generation, intent_id),
+                    )
+                else:
+                    cursor = self._connection.execute(
+                        """
+                        UPDATE operation_intents
+                        SET generation = ?, intent_id = ?
+                        WHERE operation_key = ?
+                        """,
+                        (generation, intent_id, operation_key),
+                    )
+                    if cursor.rowcount != 1:
+                        raise LedgerConflict(  # noqa: TRY003, TRY301
+                            "operation generation changed during reservation"
+                        )
+                self._connection.commit()
+                return intent_id  # noqa: TRY300
+            except Exception:
+                self._connection.rollback()
+                raise
+
     def record_intent(
         self,
         intent_id: str,
@@ -202,10 +491,12 @@ class TransactionLedger:
         self._validate_raw_amount("quote_amount_raw", quote_amount_raw)
         self._validate_raw_amount("fee_lamports", fee_lamports)
         if message_hash is not None and (
-            len(message_hash) != 64
+            len(message_hash) != _SHA256_HEX_LENGTH
             or any(character not in "0123456789abcdef" for character in message_hash)
         ):
-            raise ValueError("message_hash must be a lowercase SHA-256 digest")
+            raise ValueError(  # noqa: TRY003
+                "message_hash must be a lowercase SHA-256 digest"
+            )
 
         values = (
             intent_id,
@@ -240,7 +531,7 @@ class TransactionLedger:
                         (intent_id,),
                     ).fetchone()
                     if has_submission is not None:
-                        raise LedgerConflict(
+                        raise LedgerConflict(  # noqa: TRY003, TRY301
                             f"intent id {intent_id!r} is already bound to different data"
                         )
                     self._connection.execute(
@@ -350,7 +641,7 @@ class TransactionLedger:
         if state not in {"prepared", "submitted"}:
             raise ValueError("state must be 'prepared' or 'submitted'")
 
-    def record_submission(
+    def record_submission(  # noqa: PLR0915
         self,
         intent_id: str,
         signature: str,
@@ -360,6 +651,11 @@ class TransactionLedger:
         wire_bytes: bytes | None = None,
         state: str = "submitted",
         receipt_destinations: tuple[str, ...] | None = None,
+        quote_mint: str | None = None,
+        risk_session_id: str | None = None,
+        max_session_quote_raw: int | None = None,
+        max_session_fee_lamports: int | None = None,
+        intent_message_hash: str | None = None,
     ) -> str:
         """Atomically reserve one reusable exact-wire submission."""
         if not intent_id or not signature or not blockhash:
@@ -379,14 +675,55 @@ class TransactionLedger:
         normalized_destinations = self._encode_receipt_destinations(
             receipt_destinations
         )
+        risk_parameters = (
+            quote_mint,
+            risk_session_id,
+            max_session_quote_raw,
+            max_session_fee_lamports,
+        )
+        enforce_session_risk = any(value is not None for value in risk_parameters)
+        if intent_message_hash is not None and (
+            not isinstance(intent_message_hash, str)
+            or len(intent_message_hash) != _SHA256_HEX_LENGTH
+            or any(
+                character not in "0123456789abcdef" for character in intent_message_hash
+            )
+        ):
+            raise ValueError(  # noqa: TRY003
+                "intent_message_hash must be a lowercase SHA-256 digest"
+            )
+        if enforce_session_risk and intent_message_hash is None:
+            raise ValueError(  # noqa: TRY003
+                "intent_message_hash is required with session risk parameters"
+            )
+        if enforce_session_risk:
+            if any(value is None for value in risk_parameters):
+                raise ValueError(  # noqa: TRY003
+                    "quote_mint, risk_session_id, max_session_quote_raw, and "
+                    "max_session_fee_lamports must be provided together"
+                )
+            quote_mint = cast("str", quote_mint)
+            risk_session_id = cast("str", risk_session_id)
+            max_session_quote_raw = cast("int", max_session_quote_raw)
+            max_session_fee_lamports = cast("int", max_session_fee_lamports)
+            if not isinstance(quote_mint, str) or not quote_mint:
+                raise ValueError("quote_mint must be a non-empty string")  # noqa: TRY003
+            self._validate_session_risk_limits(
+                risk_session_id,
+                max_session_quote_raw,
+                max_session_fee_lamports,
+            )
 
         with self._lock:
             try:
                 self._connection.execute("BEGIN IMMEDIATE")
                 active = self._connection.execute(
                     """
-                    SELECT s.signature
+                    SELECT
+                        s.signature, i.signer, i.message_hash,
+                        i.quote_amount_raw, i.fee_lamports
                     FROM submissions AS s
+                    JOIN intents AS i ON i.intent_id = s.intent_id
                     LEFT JOIN outcomes AS o ON o.signature = s.signature
                     WHERE s.intent_id = ?
                       AND (
@@ -405,7 +742,34 @@ class TransactionLedger:
                     """,
                     (intent_id,),
                 ).fetchone()
+                if (
+                    active is not None
+                    and intent_message_hash is not None
+                    and active["message_hash"] != intent_message_hash
+                ):
+                    raise LedgerConflict(  # noqa: TRY003, TRY301
+                        "intent changed before submission"
+                    )
                 if active is not None and str(active["signature"]) != signature:
+                    if enforce_session_risk:
+                        if (
+                            active["quote_amount_raw"] is None
+                            or active["fee_lamports"] is None
+                        ):
+                            raise LedgerConflict(  # noqa: TRY003, TRY301
+                                f"submission {active['signature']!r} "
+                                "lacks risk metadata"
+                            )
+                        self._reserve_session_risk_locked(
+                            signature=str(active["signature"]),
+                            risk_session_id=risk_session_id,
+                            signer=str(active["signer"]),
+                            quote_mint=quote_mint,
+                            quote_amount_raw=int(active["quote_amount_raw"]),
+                            fee_lamports=int(active["fee_lamports"]),
+                            max_session_quote_raw=max_session_quote_raw,
+                            max_session_fee_lamports=max_session_fee_lamports,
+                        )
                     self._connection.commit()
                     return str(active["signature"])
 
@@ -437,8 +801,13 @@ class TransactionLedger:
                         s.state,
                         s.wire_bytes,
                         s.receipt_destinations,
+                        i.signer,
+                        i.message_hash,
+                        i.quote_amount_raw,
+                        i.fee_lamports,
                         o.status AS outcome_status
                     FROM submissions AS s
+                    JOIN intents AS i ON i.intent_id = s.intent_id
                     LEFT JOIN outcomes AS o ON o.signature = s.signature
                     WHERE s.signature = ?
                     """,
@@ -448,6 +817,11 @@ class TransactionLedger:
                     raise LedgerConflict(
                         f"submission {signature!r} disappeared during reservation"
                     )
+                if (
+                    intent_message_hash is not None
+                    and row["message_hash"] != intent_message_hash
+                ):
+                    raise LedgerConflict("intent changed before submission")
                 outcome_status = row["outcome_status"]
                 if outcome_status in {
                     TransactionStatus.SUCCESS.value,
@@ -513,6 +887,21 @@ class TransactionLedger:
                         raise LedgerConflict(
                             f"submission {signature!r} changed during reservation"
                         )
+                if enforce_session_risk:
+                    if row["quote_amount_raw"] is None or row["fee_lamports"] is None:
+                        raise LedgerConflict(  # noqa: TRY003, TRY301
+                            f"submission {signature!r} lacks risk metadata"
+                        )
+                    self._reserve_session_risk_locked(
+                        signature=signature,
+                        risk_session_id=risk_session_id,
+                        signer=str(row["signer"]),
+                        quote_mint=quote_mint,
+                        quote_amount_raw=int(row["quote_amount_raw"]),
+                        fee_lamports=int(row["fee_lamports"]),
+                        max_session_quote_raw=max_session_quote_raw,
+                        max_session_fee_lamports=max_session_fee_lamports,
+                    )
                 self._connection.commit()
                 return signature
             except Exception:
@@ -594,6 +983,10 @@ class TransactionLedger:
                         WHERE intent_id = ?
                           AND NOT EXISTS (
                               SELECT 1 FROM submissions
+                              WHERE intent_id = intents.intent_id
+                          )
+                          AND NOT EXISTS (
+                              SELECT 1 FROM operation_intents
                               WHERE intent_id = intents.intent_id
                           )
                         """,

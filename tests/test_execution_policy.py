@@ -29,6 +29,9 @@ def test_live_policy_requires_explicit_runtime_authorization() -> None:
         expected_wallet=str(WALLET),
         max_trade_quote_raw=100,
         max_total_fee_lamports=10,
+        risk_session_id="test-session",
+        max_session_quote_raw=1_000,
+        max_session_fee_lamports=100,
     )
 
     with pytest.raises(ExecutionBlocked):
@@ -46,6 +49,9 @@ def test_policy_rejects_wallet_mismatch() -> None:
         expected_wallet=str(WALLET),
         max_trade_quote_raw=100,
         max_total_fee_lamports=10,
+        risk_session_id="test-session",
+        max_session_quote_raw=1_000,
+        max_session_fee_lamports=100,
     )
 
     with pytest.raises(ExecutionBlocked, match="wallet"):
@@ -61,6 +67,9 @@ def test_policy_enforces_trade_and_fee_budgets() -> None:
         max_trade_quote_raw=100,
         max_total_fee_lamports=10,
         expected_wallet=str(WALLET),
+        risk_session_id="test-session",
+        max_session_quote_raw=1_000,
+        max_session_fee_lamports=100,
     )
 
     policy.validate_budgets(100, 10)
@@ -76,3 +85,28 @@ def test_policy_rejects_non_integer_limits_and_boolean_switches() -> None:
 
     with pytest.raises(ValueError, match="allow_skip_preflight"):
         ExecutionPolicy(allow_skip_preflight="yes")  # type: ignore[arg-type]
+
+
+def test_live_policy_requires_persistent_session_limits() -> None:
+    with pytest.raises(ValueError, match="risk_session_id"):
+        ExecutionPolicy(
+            mode=ExecutionMode.LIVE,
+            expected_wallet=str(WALLET),
+            max_trade_quote_raw=100,
+            max_total_fee_lamports=10,
+        )
+
+    with pytest.raises(ValueError, match="max_session_quote_raw"):
+        ExecutionPolicy(
+            mode=ExecutionMode.LIVE,
+            expected_wallet=str(WALLET),
+            max_trade_quote_raw=100,
+            max_total_fee_lamports=10,
+            risk_session_id="test-session",
+        )
+
+
+@pytest.mark.parametrize("risk_session_id", ["", " "])
+def test_policy_rejects_empty_risk_session_id(risk_session_id: str) -> None:
+    with pytest.raises(ValueError, match="risk_session_id"):
+        ExecutionPolicy(risk_session_id=risk_session_id)

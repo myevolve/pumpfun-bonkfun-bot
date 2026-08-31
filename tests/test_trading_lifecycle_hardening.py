@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import fcntl
 import json
+from typing import TYPE_CHECKING
 from time import monotonic
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -25,6 +26,9 @@ from trading.base import TradeResult
 from trading.platform_aware import PlatformAwareBuyer, PlatformAwareSeller
 from trading.position import ExitReason, Position
 from trading.universal_trader import UniversalTrader
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _token(platform: Platform) -> TokenInfo:
@@ -56,10 +60,21 @@ def test_recovery_token_round_trip_preserves_creation_timestamp() -> None:
     token.creation_timestamp = 123.5
 
     payload = UniversalTrader._token_to_dict(token)
-    recovered = UniversalTrader._token_from_dict(payload)
+    recovered = UniversalTrader.token_from_dict(payload)
 
     assert payload["creation_timestamp"] == 123.5
     assert recovered.creation_timestamp == 123.5
+
+
+def test_recovery_round_trip_preserves_pool_extension_requirement() -> None:
+    token = _token(Platform.PUMP_FUN)
+    token.pool_needs_extension = True
+
+    payload = UniversalTrader._token_to_dict(token)
+    recovered = UniversalTrader.token_from_dict(payload)
+
+    assert payload["pool_needs_extension"] is True
+    assert recovered.pool_needs_extension is True
 
 
 def test_pumpfun_fast_path_requires_consistent_quote_program_metadata() -> None:
@@ -115,7 +130,7 @@ def test_recovery_round_trip_preserves_large_event_reserve_integers() -> None:
         setattr(token, field, value)
 
     payload = json.loads(json.dumps(UniversalTrader._token_to_dict(token)))
-    recovered = UniversalTrader._token_from_dict(payload)
+    recovered = UniversalTrader.token_from_dict(payload)
 
     for field, value in values.items():
         assert payload[field] == value
@@ -128,7 +143,7 @@ def test_recovery_rejects_malformed_event_reserves(malformed: object) -> None:
     payload["virtual_token_reserves"] = malformed
 
     with pytest.raises(ValueError, match="virtual_token_reserves"):
-        UniversalTrader._token_from_dict(payload)
+        UniversalTrader.token_from_dict(payload)
 
 
 @pytest.mark.parametrize(
@@ -142,7 +157,7 @@ def test_recovery_token_rejects_malformed_creation_timestamp(
     payload["creation_timestamp"] = malformed_timestamp
 
     with pytest.raises(ValueError, match="creation_timestamp"):
-        UniversalTrader._token_from_dict(payload)
+        UniversalTrader.token_from_dict(payload)
 
 
 def test_recovery_token_serialization_rejects_malformed_creation_timestamp() -> None:
@@ -390,7 +405,11 @@ class _CurveManager:
 
 
 class _Client:
+    def __init__(self) -> None:
+        self.submission_kwargs: dict = {}
+
     async def build_and_send_transaction(self, *args, **kwargs) -> str:
+        self.submission_kwargs = kwargs
         return "sell-signature"
 
     async def confirm_transaction_outcome(self, signature: str) -> SimpleNamespace:
@@ -550,8 +569,9 @@ async def test_letsbonk_sell_does_not_require_creator_vault_capability(
         "trading.platform_aware.get_platform_implementations",
         lambda platform, client: implementations,
     )
+    client = _Client()
     seller = PlatformAwareSeller(
-        _Client(),
+        client,
         SimpleNamespace(pubkey=Pubkey.new_unique(), keypair=object()),
         _PriorityFees(),
     )
@@ -561,6 +581,76 @@ async def test_letsbonk_sell_does_not_require_creator_vault_capability(
     assert result.success is True
     assert token.creator is not None
     assert token.creator_vault is None
+    assert "skip_preflight" not in client.submission_kwargs
+
+
+@pytest.mark.asyncio
+async def test_pumpfun_completed_curve_routes_sell_to_pumpswap(monkeypatch) -> None:
+    token = _token(Platform.PUMP_FUN)
+    migrated_pool = Pubkey.new_unique()
+    pool_creator = Pubkey.new_unique()
+    creator_vault = Pubkey.new_unique()
+    protocol_fee_recipient = Pubkey.new_unique()
+    buyback_fee_recipient = Pubkey.new_unique()
+    builder = _InstructionBuilder()
+    builder.build_sell_instruction = AsyncMock(return_value=[])
+    curve_manager = SimpleNamespace(
+        get_sell_state_and_token_program=AsyncMock(
+            return_value=(
+                {
+                    "venue": "pumpswap",
+                    "complete": True,
+                    "is_tradeable": True,
+                    "status_name": "pumpswap",
+                    "pool_address": migrated_pool,
+                    "base_vault": Pubkey.new_unique(),
+                    "quote_vault": Pubkey.new_unique(),
+                    "global_config": Pubkey.new_unique(),
+                    "platform_config": Pubkey.new_unique(),
+                    "creator": pool_creator,
+                    "creator_vault": creator_vault,
+                    "protocol_fee_recipient": protocol_fee_recipient,
+                    "buyback_fee_recipient": buyback_fee_recipient,
+                    "pool_needs_extension": True,
+                    "quote_mint": SystemAddresses.WSOL_MINT,
+                    "quote_token_program": SystemAddresses.TOKEN_PROGRAM,
+                    "base_decimals": 6,
+                    "quote_decimals": 9,
+                },
+                SystemAddresses.TOKEN_PROGRAM,
+            )
+        ),
+        calculate_sell_amount_out=AsyncMock(return_value=1_000_000_000),
+    )
+    implementations = SimpleNamespace(
+        address_provider=_AddressProviderWithoutCreatorVault(),
+        instruction_builder=builder,
+        curve_manager=curve_manager,
+    )
+    monkeypatch.setattr(
+        "trading.platform_aware.get_platform_implementations",
+        lambda platform, client: implementations,
+    )
+    client = _Client()
+    seller = PlatformAwareSeller(
+        client,
+        SimpleNamespace(pubkey=Pubkey.new_unique(), keypair=object()),
+        _PriorityFees(),
+    )
+
+    result = await seller.execute(token, token_amount=1.0, token_price=None)
+
+    assert result.success is True
+    curve_manager.get_sell_state_and_token_program.assert_awaited_once()
+    assert token.curve_complete is True
+    assert token.pool_status == "pumpswap"
+    assert token.pool_state == migrated_pool
+    assert token.creator == pool_creator
+    assert token.creator_vault == creator_vault
+    assert token.protocol_fee_recipient == protocol_fee_recipient
+    assert token.buyback_fee_recipient == buyback_fee_recipient
+    assert token.pool_needs_extension is True
+    builder.build_sell_instruction.assert_awaited_once()
 
 
 @pytest.mark.parametrize(
@@ -619,6 +709,9 @@ def test_constructor_releases_persistence_resources_after_recovery_failure(
         expected_wallet=str(wallet),
         max_trade_quote_raw=1,
         max_total_fee_lamports=1,
+        risk_session_id="test-session",
+        max_session_quote_raw=100,
+        max_session_fee_lamports=100,
     )
 
     with pytest.raises(RuntimeError, match="recovery failed"):
@@ -639,6 +732,123 @@ def test_constructor_releases_persistence_resources_after_recovery_failure(
     with lock_path.open("a+b") as lock_handle:
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+
+
+def test_constructor_defers_ledger_until_runtime_components_are_valid(
+    monkeypatch,
+) -> None:
+    wallet = Pubkey.new_unique()
+    ledger_opened = False
+
+    def open_ledger(_path):
+        nonlocal ledger_opened
+        ledger_opened = True
+        return SimpleNamespace(close=lambda: None)
+
+    def fail_listener(**_kwargs):
+        raise RuntimeError("listener setup failed")
+
+    monkeypatch.setattr(
+        "trading.universal_trader.Wallet",
+        lambda private_key: SimpleNamespace(pubkey=wallet),
+    )
+    monkeypatch.setattr("trading.universal_trader.TransactionLedger", open_ledger)
+    monkeypatch.setattr(
+        "trading.universal_trader.SolanaClient",
+        lambda *args, **kwargs: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        "trading.universal_trader.PriorityFeeManager",
+        lambda *args, **kwargs: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        "trading.universal_trader.get_platform_implementations",
+        lambda *args, **kwargs: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        "trading.universal_trader.ListenerFactory.create_listener",
+        fail_listener,
+    )
+    policy = ExecutionPolicy(
+        mode=ExecutionMode.LIVE,
+        expected_wallet=str(wallet),
+        max_trade_quote_raw=1,
+        max_total_fee_lamports=1,
+        risk_session_id="test-session",
+        max_session_quote_raw=100,
+        max_session_fee_lamports=100,
+    )
+
+    with pytest.raises(RuntimeError, match="listener setup failed"):
+        UniversalTrader(
+            rpc_endpoint="offline",
+            wss_endpoint="offline",
+            private_key="unused",
+            buy_amount=0.1,
+            buy_slippage=0.1,
+            sell_slippage=0.1,
+            execution_policy=policy,
+        )
+
+    assert ledger_opened is False
+
+
+def test_dry_run_constructor_does_not_resolve_live_ledger(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    wallet = Pubkey.new_unique()
+
+    def reject_ledger_resolution(_wallet: Pubkey) -> None:
+        raise AssertionError(  # noqa: TRY003
+            "dry-run construction must not inspect live ledgers"
+        )
+
+    monkeypatch.setattr(
+        "trading.universal_trader.Wallet",
+        lambda _private_key: SimpleNamespace(pubkey=wallet),
+    )
+    monkeypatch.setattr(
+        "trading.universal_trader.resolve_transaction_ledger_path",
+        reject_ledger_resolution,
+    )
+    monkeypatch.setattr(
+        "trading.universal_trader.SolanaClient",
+        lambda *_args, **_kwargs: SimpleNamespace(ledger=None),
+    )
+    monkeypatch.setattr(
+        "trading.universal_trader.PriorityFeeManager",
+        lambda *_args, **_kwargs: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        "trading.universal_trader.PlatformAwareBuyer",
+        lambda *_args, **_kwargs: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        "trading.universal_trader.PlatformAwareSeller",
+        lambda *_args, **_kwargs: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        "trading.universal_trader.get_platform_implementations",
+        lambda *_args, **_kwargs: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        "trading.universal_trader.ListenerFactory.create_listener",
+        lambda *_args, **_kwargs: SimpleNamespace(),
+    )
+
+    trader = UniversalTrader(
+        rpc_endpoint="offline",
+        wss_endpoint="offline",
+        private_key="unused",
+        buy_amount=0.1,
+        buy_slippage=0.1,
+        sell_slippage=0.1,
+        execution_policy=ExecutionPolicy(mode=ExecutionMode.DRY_RUN),
+        position_journal_path=tmp_path / "positions.json",
+    )
+
+    assert trader.transaction_ledger is None  # noqa: S101
 
 
 @pytest.mark.asyncio
@@ -793,6 +1003,7 @@ async def test_pumpfun_usdc_buy_has_no_native_receipt_destinations(
     assert result.success is True
     assert client.submission_kwargs["receipt_destinations"] is None
     assert builder.calls[0]["minimum_amount_out"] == 2_000_000
+    assert "skip_preflight" not in client.submission_kwargs
 
 
 @pytest.mark.asyncio
@@ -952,6 +1163,7 @@ def _lifecycle_trader(*, yolo_mode: bool) -> UniversalTrader:
     trader._position_tasks = set()
     trader._position_monitor_tasks = set()
     trader._fatal_monitor_errors = asyncio.Queue()
+    trader._unresolved_buy_state_changed = asyncio.Event()
     trader._active_positions = {}
     trader._pending_recovery_tokens = []
     trader._reserved_mints = set()
@@ -971,6 +1183,55 @@ def _lifecycle_trader(*, yolo_mode: bool) -> UniversalTrader:
     trader._process_token_queue = process_queue
     trader._reconcile_unresolved_buys = reconcile
     return trader
+
+
+@pytest.mark.asyncio
+async def test_single_trade_waits_for_unresolved_buy_before_shutdown() -> None:
+    """A late-confirming buy must stay under reconciliation in one-shot mode."""
+    trader = _lifecycle_trader(yolo_mode=False)
+    token = _token(Platform.LETS_BONK)
+    token_key = str(token.mint)
+    reconciliation_started = asyncio.Event()
+    release_reconciliation = asyncio.Event()
+    cleanup_started = asyncio.Event()
+
+    async def wait_for_token() -> TokenInfo:
+        return token
+
+    async def handle_token(_token_info: TokenInfo) -> bool:
+        trader._unresolved_buys[token_key] = {
+            "token": token,
+            "signature": "late-signature",
+        }
+        reconciliation_started.set()
+        return False
+
+    async def reconcile() -> None:
+        await reconciliation_started.wait()
+        await release_reconciliation.wait()
+        trader._unresolved_buys.pop(token_key)
+        trader._unresolved_buy_state_changed.set()
+
+    async def cleanup() -> None:
+        cleanup_started.set()
+
+    trader._wait_for_token = wait_for_token
+    trader._handle_token = handle_token
+    trader._reconcile_unresolved_buys = reconcile
+    trader._cleanup_resources = cleanup
+
+    start_task = asyncio.create_task(trader.start())
+    await asyncio.wait_for(reconciliation_started.wait(), timeout=0.1)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert not cleanup_started.is_set()
+    assert not start_task.done()
+
+    release_reconciliation.set()
+    await asyncio.wait_for(start_task, timeout=0.1)
+
+    assert cleanup_started.is_set()
 
 
 @pytest.mark.asyncio
@@ -1174,6 +1435,7 @@ async def test_unresolved_buy_recovery_uses_exact_durable_receipt_destinations()
     primary = Pubkey.new_unique()
     protocol_fee = Pubkey.new_unique()
     trader._shutdown_event = asyncio.Event()
+    trader._unresolved_buy_state_changed = asyncio.Event()
     trader._unresolved_buys = {
         token_key: {
             "token": token,
@@ -1284,6 +1546,8 @@ async def test_cleanup_attempts_all_resources_and_raises_first_failure(
         "client close",
         "ledger close",
     ]
+    assert trader.transaction_ledger is None
+    assert trader.solana_client.ledger is None
 
 
 @pytest.mark.asyncio
@@ -1750,8 +2014,15 @@ async def test_confirmed_sell_passes_raw_delta_to_cleanup(monkeypatch) -> None:
     trader._shutdown_event = asyncio.Event()
     trader.price_check_interval = 1
     trader.max_exit_sell_attempts = 1
+    calculate_token_price = AsyncMock(return_value=2.0)
+    calculate_price = AsyncMock(
+        side_effect=AssertionError("token-aware price lookup must take precedence")
+    )
     trader.platform_implementations = SimpleNamespace(
-        curve_manager=SimpleNamespace(calculate_price=AsyncMock(return_value=2.0))
+        curve_manager=SimpleNamespace(
+            calculate_token_price=calculate_token_price,
+            calculate_price=calculate_price,
+        )
     )
     trader.seller = SimpleNamespace(
         execute=AsyncMock(
@@ -1785,6 +2056,8 @@ async def test_confirmed_sell_passes_raw_delta_to_cleanup(monkeypatch) -> None:
     await trader._monitor_position_until_exit(token, position)
 
     assert cleanup_after_sell.await_args.kwargs["confirmed_sold_raw"] == 1_500_000
+    calculate_token_price.assert_awaited_once_with(token)
+    calculate_price.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1858,3 +2131,124 @@ async def test_monitor_cancellation_drains_inflight_sell_before_propagating(
     assert completed_before_sell is False
     assert events == ["log", "remove"]
     cleanup_after_sell.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_emergency_exit_sells_one_loaded_position_without_listener(
+    monkeypatch,
+) -> None:
+    trader = object.__new__(UniversalTrader)
+    token = _token(Platform.LETS_BONK)
+    position = Position.create_from_buy_result(
+        mint=token.mint,
+        symbol=token.symbol,
+        entry_price=1.0,
+        quantity=2.0,
+        quantity_raw=2_000_000,
+        account_balance_baseline_raw=0,
+        position_id="buy-signature",
+    )
+    policy = ExecutionPolicy(
+        mode=ExecutionMode.LIVE,
+        expected_wallet=str(Pubkey.new_unique()),
+        max_trade_quote_raw=10_000_000_000,
+        max_total_fee_lamports=1_000_000,
+        risk_session_id="test-session",
+        max_session_quote_raw=100_000_000_000,
+        max_session_fee_lamports=10_000_000,
+    ).authorize_live()
+    trader.execution_policy = policy
+    trader._active_positions = {str(token.mint): (token, position)}
+    curve_manager = SimpleNamespace(
+        prepare_live_execution=AsyncMock(),
+        calculate_token_price=AsyncMock(return_value=0.75),
+    )
+    trader.platform_implementations = SimpleNamespace(curve_manager=curve_manager)
+    sell_result = TradeResult(
+        success=True,
+        platform=Platform.LETS_BONK,
+        tx_signature="emergency-sell-signature",
+        amount=2.0,
+        amount_raw=2_000_000,
+        price=0.75,
+        status=TransactionStatus.SUCCESS.value,
+    )
+    trader.seller = SimpleNamespace(execute=AsyncMock(return_value=sell_result))
+    trader.solana_client = SimpleNamespace()
+    trader.wallet = SimpleNamespace()
+    trader.priority_fee_manager = SimpleNamespace()
+    trader.cleanup_mode = None
+    trader.cleanup_with_priority_fee = False
+    trader.cleanup_force_close_with_burn = False
+    trader._persist_position = lambda token_info, active_position: None
+    trader._log_trade = lambda *args, **kwargs: None
+    trader._remove_position = lambda mint: trader._active_positions.pop(str(mint))
+    trader._cleanup_resources = AsyncMock()
+    cleanup_after_sell = AsyncMock(return_value=None)
+    monkeypatch.setattr(
+        "trading.universal_trader.handle_cleanup_after_sell",
+        cleanup_after_sell,
+    )
+
+    result = await trader.emergency_exit(token.mint)
+
+    assert result is sell_result
+    curve_manager.prepare_live_execution.assert_awaited_once()
+    curve_manager.calculate_token_price.assert_awaited_once_with(token)
+    trader.seller.execute.assert_awaited_once()
+    assert trader.seller.execute.await_args.kwargs["intent_id"].startswith(
+        "emergency-sell:buy-signature:"
+    )
+    assert position.is_active is False
+    assert str(token.mint) not in trader._active_positions
+    trader._cleanup_resources.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_emergency_exit_reconciles_pending_signature_without_resubmitting() -> (
+    None
+):
+    trader = object.__new__(UniversalTrader)
+    token = _token(Platform.LETS_BONK)
+    position = Position.create_from_buy_result(
+        mint=token.mint,
+        symbol=token.symbol,
+        entry_price=1.0,
+        quantity=2.0,
+        quantity_raw=2_000_000,
+        position_id="buy-signature",
+    )
+    position.mark_exit_intent("sell:buy-signature:1", ExitReason.MANUAL, 0.75)
+    position.mark_exit_pending("pending-signature", ExitReason.MANUAL)
+    trader.execution_policy = ExecutionPolicy(
+        mode=ExecutionMode.LIVE,
+        expected_wallet=str(Pubkey.new_unique()),
+        max_trade_quote_raw=10_000_000_000,
+        max_total_fee_lamports=1_000_000,
+        risk_session_id="test-session",
+        max_session_quote_raw=100_000_000_000,
+        max_session_fee_lamports=10_000_000,
+    ).authorize_live()
+    trader._active_positions = {str(token.mint): (token, position)}
+    trader.platform_implementations = SimpleNamespace(
+        curve_manager=SimpleNamespace(prepare_live_execution=AsyncMock())
+    )
+    trader.solana_client = SimpleNamespace(
+        confirm_transaction_outcome=AsyncMock(
+            return_value=SimpleNamespace(
+                status=TransactionStatus.UNKNOWN,
+                error="RPC unavailable",
+                slot=None,
+            )
+        )
+    )
+    trader.seller = SimpleNamespace(execute=AsyncMock())
+    trader._cleanup_resources = AsyncMock()
+
+    result = await trader.emergency_exit(token.mint)
+
+    assert result.unresolved is True
+    assert result.tx_signature == "pending-signature"
+    trader.seller.execute.assert_not_awaited()
+    assert position.pending_exit_signature == "pending-signature"
+    trader._cleanup_resources.assert_awaited_once()

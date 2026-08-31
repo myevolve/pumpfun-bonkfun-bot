@@ -1,11 +1,19 @@
 from __future__ import annotations
 
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
 
 import pytest
 
-from core.transaction_ledger import LedgerConflict, TransactionLedger
+from core.execution_policy import TradeLimitExceeded
+from core.transaction_ledger import (
+    LedgerConflict,
+    TransactionLedger,
+    default_transaction_ledger_path,
+    resolve_transaction_ledger_path,
+)
 from core.transaction_state import TransactionOutcome, TransactionStatus
 
 
@@ -436,3 +444,336 @@ def test_legacy_schema_is_migrated_without_losing_submission(
             )
             == "new-sig"
         )
+
+
+def _reserve_risk_submission(
+    ledger: TransactionLedger,
+    *,
+    intent: str,
+    signature: str,
+    quote_mint: str = "SOL",
+    quote_amount_raw: int,
+    fee_lamports: int,
+    session_id: str = "2026-05-01-live",
+    max_session_quote_raw: int = 100,
+    max_session_fee_lamports: int = 25,
+) -> None:
+    ledger.record_intent(
+        intent,
+        "wallet",
+        quote_amount_raw,
+        fee_lamports,
+        "a" * 64,
+    )
+    ledger.record_submission(
+        intent,
+        signature,
+        f"blockhash-{signature}",
+        100,
+        state="prepared",
+        wire_bytes=f"wire-{signature}".encode(),
+        quote_mint=quote_mint,
+        risk_session_id=session_id,
+        max_session_quote_raw=max_session_quote_raw,
+        max_session_fee_lamports=max_session_fee_lamports,
+        intent_message_hash="a" * 64,
+    )
+
+
+def test_session_quote_budget_is_durable_across_restart(tmp_path: Path) -> None:
+    path = tmp_path / "ledger.sqlite"
+    with TransactionLedger(path) as ledger:
+        _reserve_risk_submission(
+            ledger,
+            intent="buy-1",
+            signature="sig-1",
+            quote_amount_raw=60,
+            fee_lamports=10,
+        )
+
+    with TransactionLedger(path) as ledger:
+        with pytest.raises(TradeLimitExceeded, match="session quote"):
+            _reserve_risk_submission(
+                ledger,
+                intent="buy-2",
+                signature="sig-2",
+                quote_amount_raw=41,
+                fee_lamports=10,
+            )
+
+        totals = ledger.get_session_risk_totals("2026-05-01-live", "wallet")
+        assert totals.quote_amount_raw_by_mint == {"SOL": 60}
+        assert totals.fee_lamports == 10
+        assert totals.submission_count == 1
+        assert ledger.get_active_submission("buy-2") is None
+
+
+def test_session_fee_budget_counts_each_signed_submission(tmp_path: Path) -> None:
+    with TransactionLedger(tmp_path / "ledger.sqlite") as ledger:
+        _reserve_risk_submission(
+            ledger,
+            intent="sell-1",
+            signature="sig-1",
+            quote_amount_raw=0,
+            fee_lamports=15,
+        )
+        ledger.mark_submission_submitted("sig-1")
+        ledger.record_outcome(TransactionOutcome(TransactionStatus.REVERTED, "sig-1"))
+
+        with pytest.raises(TradeLimitExceeded, match="session fee"):
+            _reserve_risk_submission(
+                ledger,
+                intent="sell-1",
+                signature="sig-2",
+                quote_amount_raw=0,
+                fee_lamports=15,
+            )
+
+        totals = ledger.get_session_risk_totals("2026-05-01-live", "wallet")
+        assert totals.fee_lamports == 15
+        assert totals.submission_count == 1
+
+
+def test_new_session_id_explicitly_resets_cumulative_budget(tmp_path: Path) -> None:
+    with TransactionLedger(tmp_path / "ledger.sqlite") as ledger:
+        _reserve_risk_submission(
+            ledger,
+            intent="buy-1",
+            signature="sig-1",
+            quote_amount_raw=100,
+            fee_lamports=25,
+        )
+        _reserve_risk_submission(
+            ledger,
+            intent="buy-2",
+            signature="sig-2",
+            quote_amount_raw=100,
+            fee_lamports=25,
+            session_id="2026-05-02-live",
+        )
+
+        assert ledger.get_session_risk_totals(
+            "2026-05-01-live", "wallet"
+        ).quote_amount_raw_by_mint == {"SOL": 100}
+        assert ledger.get_session_risk_totals(
+            "2026-05-02-live", "wallet"
+        ).quote_amount_raw_by_mint == {"SOL": 100}
+
+
+def test_releasing_never_submitted_wire_releases_session_budget(
+    tmp_path: Path,
+) -> None:
+    with TransactionLedger(tmp_path / "ledger.sqlite") as ledger:
+        _reserve_risk_submission(
+            ledger,
+            intent="buy-1",
+            signature="sig-1",
+            quote_amount_raw=100,
+            fee_lamports=25,
+        )
+
+        assert ledger.release_prepared_submission("sig-1") is True
+        totals = ledger.get_session_risk_totals("2026-05-01-live", "wallet")
+        assert totals.quote_amount_raw_by_mint == {}
+        assert totals.fee_lamports == 0
+        assert totals.submission_count == 0
+
+
+def test_releasing_operation_wire_preserves_its_generation(tmp_path: Path) -> None:
+    operation_key = "manual-cleanup:wallet:mint:account"
+    with TransactionLedger(tmp_path / "ledger.sqlite") as ledger:
+        intent = ledger.reserve_operation_intent(operation_key, "wallet")
+        _reserve_risk_submission(
+            ledger,
+            intent=intent,
+            signature="cleanup-signature",
+            quote_amount_raw=0,
+            fee_lamports=5,
+        )
+
+        assert ledger.release_prepared_submission("cleanup-signature") is True
+        assert ledger.get_active_submission(intent) is None
+        assert ledger.reserve_operation_intent(operation_key, "wallet") == intent
+
+        totals = ledger.get_session_risk_totals("2026-05-01-live", "wallet")
+        assert totals.quote_amount_raw_by_mint == {}
+        assert totals.fee_lamports == 0
+        assert totals.submission_count == 0
+
+
+def test_submission_rejects_a_concurrently_replanned_intent(
+    tmp_path: Path,
+) -> None:
+    original_hash = "a" * 64
+    replacement_hash = "b" * 64
+    with TransactionLedger(tmp_path / "ledger.sqlite") as ledger:
+        ledger.record_intent("buy", "wallet", 60, 5, original_hash)
+        ledger.record_intent("buy", "wallet", 1, 1, replacement_hash)
+
+        with pytest.raises(LedgerConflict, match="intent changed before submission"):
+            ledger.record_submission(
+                "buy",
+                "stale-signature",
+                "stale-blockhash",
+                100,
+                state="prepared",
+                wire_bytes=b"stale-wire",
+                quote_mint="SOL",
+                risk_session_id="concurrent-session",
+                max_session_quote_raw=100,
+                max_session_fee_lamports=100,
+                intent_message_hash=original_hash,
+            )
+
+        assert (
+            ledger.get_session_risk_totals(
+                "concurrent-session",
+                "wallet",
+            ).submission_count
+            == 0
+        )
+
+        ledger.record_submission(
+            "buy",
+            "replacement-signature",
+            "replacement-blockhash",
+            100,
+            state="prepared",
+            wire_bytes=b"replacement-wire",
+            quote_mint="SOL",
+            risk_session_id="concurrent-session",
+            max_session_quote_raw=100,
+            max_session_fee_lamports=100,
+            intent_message_hash=replacement_hash,
+        )
+
+        totals = ledger.get_session_risk_totals("concurrent-session", "wallet")
+        assert totals.quote_amount_raw_by_mint == {"SOL": 1}
+        assert totals.fee_lamports == 1
+
+
+def test_operation_generation_reuses_only_nonterminal_work(tmp_path: Path) -> None:
+    operation_key = "manual-cleanup:wallet:mint:account"
+    path = tmp_path / "ledger.sqlite"
+    with TransactionLedger(path) as ledger:
+        first_intent = ledger.reserve_operation_intent(operation_key, "wallet")
+        assert ledger.reserve_operation_intent(operation_key, "wallet") == first_intent
+
+        ledger.record_intent(first_intent, "wallet", 0, 5, "a" * 64)
+        ledger.record_submission(
+            first_intent,
+            "first-signature",
+            "first-blockhash",
+            100,
+            state="submitted",
+            wire_bytes=b"first-wire",
+        )
+        assert ledger.reserve_operation_intent(operation_key, "wallet") == first_intent
+
+        ledger.record_outcome(
+            TransactionOutcome(TransactionStatus.SUCCESS, "first-signature")
+        )
+
+    with TransactionLedger(path) as ledger:
+        second_intent = ledger.reserve_operation_intent(operation_key, "wallet")
+        assert second_intent != first_intent
+        assert second_intent.endswith(":2")
+
+    with TransactionLedger(path) as ledger:
+        assert ledger.reserve_operation_intent(operation_key, "wallet") == second_intent
+
+
+def test_concurrent_session_reservations_cannot_overspend(tmp_path: Path) -> None:
+    path = tmp_path / "ledger.sqlite"
+    with TransactionLedger(path):
+        pass
+
+    barrier = Barrier(2)
+
+    def reserve(index: int) -> str:
+        with TransactionLedger(path) as ledger:
+            intent = f"buy-{index}"
+            signature = f"sig-{index}"
+            ledger.record_intent(intent, "wallet", 60, 5, "a" * 64)
+            barrier.wait()
+            try:
+                ledger.record_submission(
+                    intent,
+                    signature,
+                    f"blockhash-{index}",
+                    100,
+                    state="prepared",
+                    wire_bytes=f"wire-{index}".encode(),
+                    quote_mint="SOL",
+                    risk_session_id="concurrent-session",
+                    max_session_quote_raw=100,
+                    max_session_fee_lamports=100,
+                    intent_message_hash="a" * 64,
+                )
+            except TradeLimitExceeded:
+                return "blocked"
+            return "reserved"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(reserve, (1, 2)))
+
+    assert sorted(results) == ["blocked", "reserved"]
+    with TransactionLedger(path) as ledger:
+        totals = ledger.get_session_risk_totals(
+            "concurrent-session",
+            "wallet",
+        )
+    assert totals.quote_amount_raw_by_mint == {"SOL": 60}
+    assert totals.submission_count == 1
+
+
+def test_quote_budget_is_accounted_independently_per_mint(tmp_path: Path) -> None:
+    with TransactionLedger(tmp_path / "ledger.sqlite") as ledger:
+        _reserve_risk_submission(
+            ledger,
+            intent="sol-buy",
+            signature="sol-sig",
+            quote_mint="SOL",
+            quote_amount_raw=60,
+            fee_lamports=5,
+        )
+        _reserve_risk_submission(
+            ledger,
+            intent="usdc-buy",
+            signature="usdc-sig",
+            quote_mint="USDC",
+            quote_amount_raw=60,
+            fee_lamports=5,
+        )
+
+        totals = ledger.get_session_risk_totals("2026-05-01-live", "wallet")
+        assert totals.quote_amount_raw_by_mint == {"SOL": 60, "USDC": 60}
+
+
+def test_wallet_ledger_path_rejects_unreconciled_legacy_ledgers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    wallet = "11111111111111111111111111111111"
+    shared = default_transaction_ledger_path(wallet)
+    legacy = shared.with_name(f"{wallet}-pump_fun.sqlite3")
+    with TransactionLedger(legacy):
+        pass
+
+    with pytest.raises(LedgerConflict, match="legacy platform-scoped"):
+        resolve_transaction_ledger_path(wallet)
+
+    assert not shared.exists()
+
+
+def test_wallet_ledger_path_is_shared_when_no_legacy_ledgers_exist(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    wallet = "11111111111111111111111111111111"
+
+    assert resolve_transaction_ledger_path(wallet) == (
+        Path(".state") / "transaction-ledgers" / f"{wallet}.sqlite3"
+    )

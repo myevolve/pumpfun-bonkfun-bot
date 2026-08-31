@@ -291,6 +291,9 @@ def test_live_config_requires_finite_budgets() -> None:
         "expected_wallet": "11111111111111111111111111111111",
         "max_trade_quote_raw": 1_000_000,
         "max_total_fee_lamports": 50_000,
+        "risk_session_id": "test-session",
+        "max_session_quote_raw": 10_000_000,
+        "max_session_fee_lamports": 1_000_000,
     }
     validate_config(config)
     policy = ExecutionPolicy.from_config(config)
@@ -305,6 +308,9 @@ def test_pump_live_mode_is_accepted_for_runtime_fee_attestation() -> None:
         "expected_wallet": "11111111111111111111111111111111",
         "max_trade_quote_raw": 1_000_000,
         "max_total_fee_lamports": 50_000,
+        "risk_session_id": "test-session",
+        "max_session_quote_raw": 10_000_000,
+        "max_session_fee_lamports": 1_000_000,
     }
 
     validate_config(config)

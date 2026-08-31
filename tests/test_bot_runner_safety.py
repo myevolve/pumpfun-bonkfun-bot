@@ -1,15 +1,24 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import signal
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
+from solders.pubkey import Pubkey
 
 import bot_runner
 from core.execution_policy import ExecutionBlocked, ExecutionMode
+from core.pubkeys import WSOL_MINT
+from core.transaction_ledger import TransactionLedger
+from interfaces.core import Platform, TokenInfo
+from trading.position import Position
+from trading.universal_trader import UniversalTrader
 
 
 def live_config() -> dict:
@@ -19,6 +28,9 @@ def live_config() -> dict:
             "expected_wallet": "11111111111111111111111111111111",
             "max_trade_quote_raw": 1_000_000,
             "max_total_fee_lamports": 50_000,
+            "risk_session_id": "test-session",
+            "max_session_quote_raw": 10_000_000,
+            "max_session_fee_lamports": 1_000_000,
         }
     }
 
@@ -44,6 +56,346 @@ def test_normal_cli_invocation_does_not_authorize_live() -> None:
     assert args.authorize_live is False
 
 
+def test_status_cli_requires_one_explicit_config() -> None:
+    args = bot_runner.parse_args(["--config", "bots/live.yaml", "--status"])
+
+    assert args.config == Path("bots/live.yaml")
+    assert args.status is True
+    assert args.emergency_exit is None
+
+    with pytest.raises(SystemExit):
+        bot_runner.parse_args(["--status"])
+
+
+def test_preflight_cli_is_read_only_and_requires_one_config() -> None:
+    args = bot_runner.parse_args(["--config", "bots/live.yaml", "--preflight"])
+
+    assert args.config == Path("bots/live.yaml")
+    assert args.preflight is True
+
+    with pytest.raises(SystemExit):
+        bot_runner.parse_args(["--preflight"])
+    with pytest.raises(SystemExit):
+        bot_runner.parse_args(
+            [
+                "--config",
+                "bots/live.yaml",
+                "--preflight",
+                "--authorize-live",
+            ]
+        )
+
+
+def test_emergency_exit_cli_requires_live_authorization_and_one_mint() -> None:
+    mint = "11111111111111111111111111111111"
+    args = bot_runner.parse_args(
+        [
+            "--config",
+            "bots/live.yaml",
+            "--emergency-exit",
+            mint,
+            "--authorize-live",
+        ]
+    )
+
+    assert args.emergency_exit == mint
+    assert args.authorize_live is True
+
+    with pytest.raises(SystemExit):
+        bot_runner.parse_args(["--config", "bots/live.yaml", "--emergency-exit", mint])
+
+
+def test_status_and_emergency_exit_are_mutually_exclusive() -> None:
+    with pytest.raises(SystemExit):
+        bot_runner.parse_args(
+            [
+                "--config",
+                "bots/live.yaml",
+                "--status",
+                "--emergency-exit",
+                "11111111111111111111111111111111",
+                "--authorize-live",
+            ]
+        )
+
+
+def test_status_reads_validated_recovery_journal_without_live_authorization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    wallet = Pubkey.new_unique()
+    mint = Pubkey.new_unique()
+    token = TokenInfo(
+        name="Token",
+        symbol="TOK",
+        uri="",
+        mint=mint,
+        platform=Platform.PUMP_FUN,
+    )
+    position = Position.create_from_buy_result(
+        mint=mint,
+        symbol="TOK",
+        entry_price=0.25,
+        quantity=2.0,
+        quantity_raw=2_000_000,
+        position_id="buy-signature",
+    )
+    journal = (
+        tmp_path / ".state" / "positions" / f"{wallet}-{Platform.PUMP_FUN.value}.json"
+    )
+    journal.parent.mkdir(parents=True)
+    journal.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "wallet": str(wallet),
+                "platform": Platform.PUMP_FUN.value,
+                "positions": {
+                    str(mint): {
+                        "token": UniversalTrader._token_to_dict(token),
+                        "position": position.to_dict(),
+                    }
+                },
+                "unresolved_buys": {},
+                "pending_tokens": [],
+            }
+        )
+    )
+    config = {
+        "name": "live",
+        "platform": Platform.PUMP_FUN.value,
+        "execution": {
+            "mode": "live",
+            "expected_wallet": str(wallet),
+            "max_trade_quote_raw": 1_000_000,
+            "max_total_fee_lamports": 50_000,
+            "risk_session_id": "test-session",
+            "max_session_quote_raw": 10_000_000,
+            "max_session_fee_lamports": 1_000_000,
+        },
+    }
+    ledger_path = tmp_path / ".state" / "transaction-ledgers" / f"{wallet}.sqlite3"
+    with TransactionLedger(ledger_path) as ledger:
+        ledger.record_intent(
+            "buy-1",
+            str(wallet),
+            250_000,
+            10_000,
+            "a" * 64,
+        )
+        ledger.record_submission(
+            "buy-1",
+            "signature-1",
+            "blockhash-1",
+            100,
+            quote_mint=str(WSOL_MINT),
+            state="prepared",
+            wire_bytes=b"wire",
+            risk_session_id="test-session",
+            max_session_quote_raw=10_000_000,
+            max_session_fee_lamports=1_000_000,
+            intent_message_hash="a" * 64,
+        )
+    monkeypatch.setattr(bot_runner, "load_bot_config", lambda _: config)
+
+    status = bot_runner.read_bot_status("bots/live.yaml")
+
+    assert status["wallet"] == str(wallet)
+    assert status["platform"] == Platform.PUMP_FUN.value
+    assert status["active_position_count"] == 1
+    assert status["active_positions"] == [
+        {
+            "mint": str(mint),
+            "symbol": "TOK",
+            "quantity_raw": 2_000_000,
+            "entry_price": 0.25,
+            "pending_exit_signature": None,
+        }
+    ]
+    assert status["unresolved_buy_count"] == 0
+    assert status["risk_session"] == {
+        "id": "test-session",
+        "reserved_quote_raw_by_mint": {str(WSOL_MINT): 250_000},
+        "max_quote_raw_per_mint": 10_000_000,
+        "remaining_quote_raw_by_mint": {str(WSOL_MINT): 9_750_000},
+        "reserved_fee_lamports": 10_000,
+        "max_fee_lamports": 1_000_000,
+        "remaining_fee_lamports": 990_000,
+        "submission_count": 1,
+    }
+    assert status["transaction_ledger_path"] == str(
+        Path(".state") / "transaction-ledgers" / f"{wallet}.sqlite3"
+    )
+
+    config["name"] = "live-bonk"
+    config["platform"] = Platform.LETS_BONK.value
+    other_platform_status = bot_runner.read_bot_status("bots/live-bonk.yaml")
+    assert (
+        other_platform_status["transaction_ledger_path"]
+        == status["transaction_ledger_path"]
+    )
+    assert other_platform_status["risk_session"] == status["risk_session"]
+
+
+def test_status_supports_dry_run_without_live_risk_limits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    wallet = Pubkey.new_unique()
+    config = {
+        "name": "dry-status",
+        "platform": Platform.PUMP_FUN.value,
+        "execution": {
+            "mode": "dry_run",
+            "expected_wallet": str(wallet),
+        },
+    }
+    monkeypatch.setattr(bot_runner, "load_bot_config", lambda _: config)
+
+    status = bot_runner.read_bot_status("bots/dry.yaml")
+
+    assert status["wallet"] == str(wallet)  # noqa: S101
+    assert status["active_position_count"] == 0  # noqa: S101
+    assert "risk_session" not in status  # noqa: S101
+
+
+def test_live_preflight_checks_network_and_never_authorizes_submission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wallet = Pubkey.from_string("11111111111111111111111111111111")
+    config = {
+        "name": "live",
+        "platform": Platform.PUMP_FUN.value,
+        "trade": {"buy_amount": 0.0005, "buy_slippage": 0.1},
+        "filters": {},
+        **live_config(),
+    }
+    status = {
+        "active_position_count": 0,
+        "unresolved_buy_count": 0,
+        "pending_token_count": 0,
+        "risk_session": {
+            "id": "test-session",
+            "reserved_quote_raw_by_mint": {},
+            "reserved_fee_lamports": 0,
+        },
+    }
+    client = SimpleNamespace(
+        get_health=AsyncMock(return_value="ok"),
+        get_native_balance=AsyncMock(return_value=20_000_000),
+        get_minimum_balance_for_rent_exemption=AsyncMock(return_value=3_000_000),
+        get_token_account_balance=AsyncMock(),
+        build_and_send_transaction=AsyncMock(),
+    )
+    curve_manager = SimpleNamespace(prepare_live_execution=AsyncMock())
+    trader = SimpleNamespace(
+        wallet=SimpleNamespace(pubkey=wallet),
+        solana_client=client,
+        platform_implementations=SimpleNamespace(curve_manager=curve_manager),
+        close=AsyncMock(),
+    )
+    captured_policy = None
+
+    def create_trader(cfg, policy, platform):
+        nonlocal captured_policy
+        assert cfg is config
+        assert platform is Platform.PUMP_FUN
+        captured_policy = policy
+        return trader
+
+    monkeypatch.setattr(bot_runner, "load_bot_config", lambda _: config)
+    monkeypatch.setattr(bot_runner, "read_bot_status", lambda _: status)
+    monkeypatch.setattr(bot_runner, "_create_trader", create_trader)
+
+    report = asyncio.run(bot_runner.run_live_preflight("bots/live.yaml"))
+
+    assert report["ready"] is True
+    assert captured_policy is not None
+    assert captured_policy.can_submit is False
+    assert {check["name"] for check in report["checks"]} >= {
+        "rpc_health",
+        "native_balance",
+        "session_fee_budget",
+        "session_quote_budget",
+        "fee_attestation",
+    }
+    client.build_and_send_transaction.assert_not_awaited()
+    trader.close.assert_awaited_once()
+
+    status["risk_session"]["reserved_quote_raw_by_mint"] = {str(WSOL_MINT): 9_600_000}
+    blocked_report = asyncio.run(bot_runner.run_live_preflight("bots/live.yaml"))
+    session_check = next(
+        check
+        for check in blocked_report["checks"]
+        if check["name"] == "session_quote_budget"
+    )
+    assert blocked_report["ready"] is False
+    assert session_check["ok"] is False
+    client.build_and_send_transaction.assert_not_awaited()
+    assert trader.close.await_count == 2
+
+
+def test_main_returns_nonzero_when_live_preflight_is_not_ready(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    async def preflight(_config: Path) -> dict[str, object]:
+        return {"ready": False, "checks": []}
+
+    monkeypatch.setattr(bot_runner, "run_live_preflight", preflight)
+
+    result = bot_runner.main(["--config", "bots/live.yaml", "--preflight"])
+
+    assert result == 1
+    assert json.loads(capsys.readouterr().out)["ready"] is False
+
+
+def test_main_dispatches_status_without_starting_bot(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        bot_runner,
+        "read_bot_status",
+        lambda _: {"active_position_count": 0},
+    )
+    monkeypatch.setattr(
+        bot_runner,
+        "_run_bot_process",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("status must not start a bot")
+        ),
+    )
+
+    assert bot_runner.main(["--config", "bots/live.yaml", "--status"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"active_position_count": 0}
+
+
+def test_main_returns_nonzero_for_unresolved_emergency_exit(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    async def emergency_exit(_config: Path, _mint: str) -> dict[str, object]:
+        return {"success": False, "status": "unknown", "tx_signature": "pending"}
+
+    monkeypatch.setattr(bot_runner, "run_emergency_exit", emergency_exit)
+
+    result = bot_runner.main(
+        [
+            "--config",
+            "bots/live.yaml",
+            "--emergency-exit",
+            "11111111111111111111111111111111",
+            "--authorize-live",
+        ]
+    )
+
+    assert result == 2
+    assert json.loads(capsys.readouterr().out)["status"] == "unknown"
+
+
 def test_start_bot_rejects_disabled_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -60,8 +412,6 @@ def test_start_bot_rejects_disabled_config(
 def test_start_bot_propagates_fatal_trader_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from trading import universal_trader
-
     config = {
         "name": "fatal-trader",
         "enabled": True,
@@ -91,7 +441,7 @@ def test_start_bot_propagates_fatal_trader_failure(
     monkeypatch.setattr(bot_runner, "load_bot_config", lambda _: config)
     monkeypatch.setattr(bot_runner, "setup_logging", lambda _: None)
     monkeypatch.setattr(bot_runner, "print_config_summary", lambda _: None)
-    monkeypatch.setattr(universal_trader, "UniversalTrader", FatalTrader)
+    monkeypatch.setattr(bot_runner, "UniversalTrader", FatalTrader)
 
     with pytest.raises(RuntimeError, match="listener failed"):
         asyncio.run(bot_runner.start_bot("unused.yaml"))

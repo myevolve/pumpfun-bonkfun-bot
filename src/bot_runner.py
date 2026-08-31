@@ -1,5 +1,8 @@
+# Operator-facing validation must retain the exact rejected invariant.
+# ruff: noqa: TRY003
 import argparse
 import asyncio
+import json
 import logging
 import multiprocessing
 import os
@@ -9,7 +12,10 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
+from decimal import ROUND_DOWN, Decimal
 from pathlib import Path
+
+from solders.pubkey import Pubkey
 
 # Try to use uvloop on Unix or winloop on Windows for better performance
 # Fall back to standard asyncio if not available
@@ -31,6 +37,7 @@ except ImportError:
 
 from config_loader import (
     get_platform_from_config,
+    get_supported_listeners_for_platform,
     load_bot_config,
     print_config_summary,
     validate_platform_listener_combination,
@@ -40,10 +47,29 @@ from core.execution_policy import (
     ExecutionMode,
     ExecutionPolicy,
 )
+from core.pubkeys import (
+    WSOL_MINT,
+    get_quote_asset,
+    resolve_quote_amounts,
+    resolve_quote_mint,
+)
+from core.transaction_ledger import (
+    SessionRiskTotals,
+    TransactionLedger,
+    resolve_transaction_ledger_path,
+)
+from interfaces.core import Platform
+from platforms import platform_factory
+from trading.position import Position
+from trading.universal_trader import (
+    DEFAULT_MAX_EXIT_SELL_ATTEMPTS,
+    UniversalTrader,
+)
 from utils.logger import setup_file_logging
 
 PROCESS_POLL_INTERVAL_SECONDS = 0.2
 PROCESS_SHUTDOWN_GRACE_SECONDS = 5.0
+PREFLIGHT_RENT_ACCOUNT_SIZE = 512
 PROCESS_TERMINATE_GRACE_SECONDS = 2.0
 PROCESS_KILL_GRACE_SECONDS = 1.0
 
@@ -76,6 +102,216 @@ def build_execution_policy(
     return policy
 
 
+def read_bot_status(  # noqa: C901, PLR0912, PLR0915
+    config_path: str | Path,
+) -> dict[str, object]:
+    """Read and validate one bot's durable recovery status without a signer."""
+
+    cfg = load_bot_config(config_path)
+    policy = ExecutionPolicy.from_config(cfg)
+    if policy.expected_wallet is None:
+        raise ValueError("Status requires execution.expected_wallet")
+    platform = get_platform_from_config(cfg)
+    journal_path = (
+        Path(".state") / "positions" / f"{policy.expected_wallet}-{platform.value}.json"
+    )
+    ledger_path = resolve_transaction_ledger_path(policy.expected_wallet)
+    base_status: dict[str, object] = {
+        "bot": cfg["name"],
+        "wallet": policy.expected_wallet,
+        "platform": platform.value,
+        "journal_path": str(journal_path),
+        "transaction_ledger_path": str(ledger_path),
+        "active_position_count": 0,
+        "active_positions": [],
+        "unresolved_buy_count": 0,
+        "unresolved_buys": [],
+        "pending_token_count": 0,
+        "pending_tokens": [],
+    }
+    if policy.mode is ExecutionMode.LIVE:
+        risk_session_id, max_session_quote_raw, max_session_fee_lamports = (
+            policy.session_risk_limits()
+        )
+        risk_totals = SessionRiskTotals({}, 0, 0)
+        if ledger_path.exists():
+            with TransactionLedger(ledger_path) as ledger:
+                risk_totals = ledger.get_session_risk_totals(
+                    risk_session_id,
+                    policy.expected_wallet,
+                )
+        base_status["risk_session"] = {
+            "id": risk_session_id,
+            "reserved_quote_raw_by_mint": risk_totals.quote_amount_raw_by_mint,
+            "max_quote_raw_per_mint": max_session_quote_raw,
+            "remaining_quote_raw_by_mint": {
+                mint: max(0, max_session_quote_raw - amount)
+                for mint, amount in risk_totals.quote_amount_raw_by_mint.items()
+            },
+            "reserved_fee_lamports": risk_totals.fee_lamports,
+            "max_fee_lamports": max_session_fee_lamports,
+            "remaining_fee_lamports": max(
+                0, max_session_fee_lamports - risk_totals.fee_lamports
+            ),
+            "submission_count": risk_totals.submission_count,
+        }
+    if not journal_path.exists():
+        return base_status
+
+    payload = json.loads(journal_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict) or payload.get("version") != 1:
+        raise ValueError("Recovery journal has an invalid version")
+    if payload.get("wallet") != policy.expected_wallet:
+        raise ValueError("Recovery journal belongs to a different wallet")
+    if payload.get("platform") != platform.value:
+        raise ValueError("Recovery journal belongs to a different platform")
+    position_records = payload.get("positions", {})
+    unresolved_records = payload.get("unresolved_buys", {})
+    pending_records = payload.get("pending_tokens", [])
+    if not isinstance(position_records, dict):
+        raise TypeError("Recovery journal positions must be an object")
+    if not isinstance(unresolved_records, dict):
+        raise TypeError("Recovery journal unresolved_buys must be an object")
+    if not isinstance(pending_records, list):
+        raise TypeError("Recovery journal pending_tokens must be an array")
+
+    active_positions: list[dict[str, object]] = []
+    for token_key, record in position_records.items():
+        if not isinstance(record, dict):
+            raise TypeError("Recovery journal position record must be an object")
+        token = UniversalTrader.token_from_dict(record["token"])
+        position = Position.from_dict(record["position"])
+        if (
+            str(token.mint) != token_key
+            or position.mint != token.mint
+            or token.platform is not platform
+        ):
+            raise ValueError("Recovery journal position identity is inconsistent")
+        if position.is_active:
+            active_positions.append(
+                {
+                    "mint": token_key,
+                    "symbol": token.symbol,
+                    "quantity_raw": position.quantity_raw,
+                    "entry_price": position.entry_price,
+                    "pending_exit_signature": position.pending_exit_signature,
+                }
+            )
+
+    unresolved_buys: list[dict[str, object]] = []
+    for token_key, record in unresolved_records.items():
+        if not isinstance(record, dict):
+            raise TypeError("Recovery journal unresolved record must be an object")
+        token = UniversalTrader.token_from_dict(record["token"])
+        signature = record.get("signature")
+        if (
+            str(token.mint) != token_key
+            or token.platform is not platform
+            or not isinstance(signature, str)
+            or not signature
+        ):
+            raise ValueError("Recovery journal unresolved buy is inconsistent")
+        unresolved_buys.append(
+            {
+                "mint": token_key,
+                "symbol": token.symbol,
+                "signature": signature,
+            }
+        )
+
+    pending_tokens: list[dict[str, str]] = []
+    for record in pending_records:
+        token = UniversalTrader.token_from_dict(record)
+        if token.platform is not platform:
+            raise ValueError("Recovery journal pending token platform is inconsistent")
+        pending_tokens.append({"mint": str(token.mint), "symbol": token.symbol})
+
+    active_positions.sort(key=lambda item: str(item["mint"]))
+    unresolved_buys.sort(key=lambda item: str(item["mint"]))
+    pending_tokens.sort(key=lambda item: item["mint"])
+    base_status.update(
+        {
+            "active_position_count": len(active_positions),
+            "active_positions": active_positions,
+            "unresolved_buy_count": len(unresolved_buys),
+            "unresolved_buys": unresolved_buys,
+            "pending_token_count": len(pending_tokens),
+            "pending_tokens": pending_tokens,
+        }
+    )
+    return base_status
+
+
+def _create_trader(
+    cfg: dict,
+    policy: ExecutionPolicy,
+    platform: Platform,
+) -> UniversalTrader:
+    """Construct one trader from validated config without starting it."""
+
+    return UniversalTrader(
+        rpc_endpoint=cfg["rpc_endpoint"],
+        wss_endpoint=cfg["wss_endpoint"],
+        private_key=cfg["private_key"],
+        platform=platform,
+        buy_amount=cfg["trade"]["buy_amount"],
+        buy_slippage=cfg["trade"]["buy_slippage"],
+        sell_slippage=cfg["trade"]["sell_slippage"],
+        extreme_fast_mode=cfg["trade"].get("extreme_fast_mode", False),
+        extreme_fast_token_amount=cfg["trade"].get("extreme_fast_token_amount", 30),
+        curve_refresh_budget=cfg["trade"].get("curve_refresh_budget", 2.0),
+        trust_create_event=cfg["trade"].get("trust_create_event", True),
+        quote_amounts=cfg["trade"].get("quote_amounts"),
+        allowed_quote_mints=cfg["filters"].get("allowed_quote_mints"),
+        exit_strategy=cfg["trade"].get("exit_strategy", "time_based"),
+        take_profit_percentage=cfg["trade"].get("take_profit_percentage"),
+        stop_loss_percentage=cfg["trade"].get("stop_loss_percentage"),
+        max_hold_time=cfg["trade"].get("max_hold_time"),
+        price_check_interval=cfg["trade"].get("price_check_interval", 10),
+        max_exit_sell_attempts=cfg["trade"].get(
+            "max_exit_sell_attempts", DEFAULT_MAX_EXIT_SELL_ATTEMPTS
+        ),
+        listener_type=cfg["filters"]["listener_type"],
+        geyser_endpoint=cfg.get("geyser", {}).get("endpoint"),
+        geyser_api_token=cfg.get("geyser", {}).get("api_token"),
+        geyser_auth_type=cfg.get("geyser", {}).get("auth_type", "x-token"),
+        pumpportal_url=cfg.get("pumpportal", {}).get(
+            "url", "wss://pumpportal.fun/api/data"
+        ),
+        enable_dynamic_priority_fee=cfg.get("priority_fees", {}).get(
+            "enable_dynamic", False
+        ),
+        enable_fixed_priority_fee=cfg.get("priority_fees", {}).get(
+            "enable_fixed", True
+        ),
+        fixed_priority_fee=cfg.get("priority_fees", {}).get("fixed_amount", 500000),
+        extra_priority_fee=cfg.get("priority_fees", {}).get("extra_percentage", 0.0),
+        hard_cap_prior_fee=cfg.get("priority_fees", {}).get("hard_cap", 500000),
+        max_retries=cfg.get("retries", {}).get("max_attempts", 1),
+        wait_time_after_creation=cfg.get("retries", {}).get("wait_after_creation", 15),
+        wait_time_after_buy=cfg.get("retries", {}).get("wait_after_buy", 15),
+        wait_time_before_new_token=cfg.get("retries", {}).get(
+            "wait_before_new_token", 15
+        ),
+        max_token_age=cfg.get("filters", {}).get("max_token_age", 0.001),
+        token_wait_timeout=cfg.get("timing", {}).get("token_wait_timeout", 120),
+        cleanup_mode=cfg.get("cleanup", {}).get("mode", "disabled"),
+        cleanup_force_close_with_burn=cfg.get("cleanup", {}).get(
+            "force_close_with_burn", False
+        ),
+        cleanup_with_priority_fee=cfg.get("cleanup", {}).get(
+            "with_priority_fee", False
+        ),
+        match_string=cfg["filters"].get("match_string"),
+        bro_address=cfg["filters"].get("bro_address"),
+        marry_mode=cfg["filters"].get("marry_mode", False),
+        yolo_mode=cfg["filters"].get("yolo_mode", False),
+        compute_units=cfg.get("compute_units", {}),
+        max_rps=cfg.get("node", {}).get("max_rps", 25),
+        execution_policy=policy,
+    )
+
+
 async def start_bot(
     config_path: str | Path,
     *,
@@ -92,8 +328,6 @@ async def start_bot(
     platform = get_platform_from_config(cfg)
     logging.info("Detected platform: %s", platform.value)
 
-    from platforms import platform_factory
-
     if not platform_factory.registry.is_platform_supported(platform):
         raise ValueError(
             f"Platform {platform.value} is not supported. Available platforms: "
@@ -102,107 +336,319 @@ async def start_bot(
 
     listener_type = cfg["filters"]["listener_type"]
     if not validate_platform_listener_combination(platform, listener_type):
-        from config_loader import get_supported_listeners_for_platform
-
         supported = get_supported_listeners_for_platform(platform)
         raise ValueError(
             f"Listener '{listener_type}' is not compatible with platform "
             f"'{platform.value}'. Supported listeners: {supported}"
         )
 
-    # Initialize universal trader with platform-specific configuration
-    from trading.universal_trader import (
-        DEFAULT_MAX_EXIT_SELL_ATTEMPTS,
-        UniversalTrader,
-    )
-
     try:
-        trader = UniversalTrader(
-            # Connection settings
-            rpc_endpoint=cfg["rpc_endpoint"],
-            wss_endpoint=cfg["wss_endpoint"],
-            private_key=cfg["private_key"],
-            # Platform configuration - pass platform enum directly
-            platform=platform,
-            # Trade parameters
-            buy_amount=cfg["trade"]["buy_amount"],
-            buy_slippage=cfg["trade"]["buy_slippage"],
-            sell_slippage=cfg["trade"]["sell_slippage"],
-            # Extreme fast mode settings
-            extreme_fast_mode=cfg["trade"].get("extreme_fast_mode", False),
-            extreme_fast_token_amount=cfg["trade"].get("extreme_fast_token_amount", 30),
-            curve_refresh_budget=cfg["trade"].get("curve_refresh_budget", 2.0),
-            trust_create_event=cfg["trade"].get("trust_create_event", True),
-            # Quote asset configuration (pump.fun non-SOL pairs)
-            quote_amounts=cfg["trade"].get("quote_amounts"),
-            allowed_quote_mints=cfg["filters"].get("allowed_quote_mints"),
-            # Exit strategy configuration
-            exit_strategy=cfg["trade"].get("exit_strategy", "time_based"),
-            take_profit_percentage=cfg["trade"].get("take_profit_percentage"),
-            stop_loss_percentage=cfg["trade"].get("stop_loss_percentage"),
-            max_hold_time=cfg["trade"].get("max_hold_time"),
-            price_check_interval=cfg["trade"].get("price_check_interval", 10),
-            max_exit_sell_attempts=cfg["trade"].get(
-                "max_exit_sell_attempts", DEFAULT_MAX_EXIT_SELL_ATTEMPTS
-            ),
-            # Listener configuration
-            listener_type=cfg["filters"]["listener_type"],
-            # Geyser configuration (if applicable)
-            geyser_endpoint=cfg.get("geyser", {}).get("endpoint"),
-            geyser_api_token=cfg.get("geyser", {}).get("api_token"),
-            geyser_auth_type=cfg.get("geyser", {}).get("auth_type", "x-token"),
-            # PumpPortal configuration (if applicable)
-            pumpportal_url=cfg.get("pumpportal", {}).get(
-                "url", "wss://pumpportal.fun/api/data"
-            ),
-            # Priority fee configuration
-            enable_dynamic_priority_fee=cfg.get("priority_fees", {}).get(
-                "enable_dynamic", False
-            ),
-            enable_fixed_priority_fee=cfg.get("priority_fees", {}).get(
-                "enable_fixed", True
-            ),
-            fixed_priority_fee=cfg.get("priority_fees", {}).get("fixed_amount", 500000),
-            extra_priority_fee=cfg.get("priority_fees", {}).get(
-                "extra_percentage", 0.0
-            ),
-            hard_cap_prior_fee=cfg.get("priority_fees", {}).get("hard_cap", 500000),
-            # Retry and timeout settings
-            max_retries=cfg.get("retries", {}).get("max_attempts", 1),
-            wait_time_after_creation=cfg.get("retries", {}).get(
-                "wait_after_creation", 15
-            ),
-            wait_time_after_buy=cfg.get("retries", {}).get("wait_after_buy", 15),
-            wait_time_before_new_token=cfg.get("retries", {}).get(
-                "wait_before_new_token", 15
-            ),
-            max_token_age=cfg.get("filters", {}).get("max_token_age", 0.001),
-            token_wait_timeout=cfg.get("timing", {}).get("token_wait_timeout", 120),
-            # Cleanup settings
-            cleanup_mode=cfg.get("cleanup", {}).get("mode", "disabled"),
-            cleanup_force_close_with_burn=cfg.get("cleanup", {}).get(
-                "force_close_with_burn", False
-            ),
-            cleanup_with_priority_fee=cfg.get("cleanup", {}).get(
-                "with_priority_fee", False
-            ),
-            # Trading filters
-            match_string=cfg["filters"].get("match_string"),
-            bro_address=cfg["filters"].get("bro_address"),
-            marry_mode=cfg["filters"].get("marry_mode", False),
-            yolo_mode=cfg["filters"].get("yolo_mode", False),
-            # Compute unit configuration
-            compute_units=cfg.get("compute_units", {}),
-            # Node provider configuration
-            max_rps=cfg.get("node", {}).get("max_rps", 25),
-            execution_policy=policy,
-        )
-
+        trader = _create_trader(cfg, policy, platform)
         await trader.start()
 
-    except Exception as e:
-        logging.exception(f"Failed to initialize or start trader: {e}")
+    except Exception:
+        logging.exception("Failed to initialize or start trader")
         raise
+
+
+async def run_emergency_exit(
+    config_path: str | Path,
+    mint: str,
+) -> dict[str, object]:
+    """Exit one durable position under an explicitly authorized live policy."""
+    cfg = load_bot_config(config_path)
+    policy = build_execution_policy(cfg, authorize_live=True)
+    setup_logging(cfg["name"])
+    platform = get_platform_from_config(cfg)
+
+    if not platform_factory.registry.is_platform_supported(platform):
+        raise ValueError(f"Platform {platform.value} is not supported")
+    try:
+        mint_key = Pubkey.from_string(mint)
+    except ValueError as exc:
+        raise ValueError("--emergency-exit requires a valid Solana mint") from exc
+    trader = _create_trader(cfg, policy, platform)
+    result = await trader.emergency_exit(mint_key)
+    return result.to_dict()
+
+
+def _configured_quote_budgets_raw(
+    cfg: dict,
+) -> dict[Pubkey, int]:
+    """Return each tradable quote mint's configured worst-case buy debit."""
+    trade = cfg["trade"]
+    quote_amounts = {
+        WSOL_MINT: float(trade["buy_amount"]),
+        **resolve_quote_amounts(trade.get("quote_amounts")),
+    }
+    allowed_values = cfg.get("filters", {}).get("allowed_quote_mints")
+    if allowed_values is not None:
+        allowed = {resolve_quote_mint(value) for value in allowed_values}
+        quote_amounts = {
+            mint: amount for mint, amount in quote_amounts.items() if mint in allowed
+        }
+    slippage_bps = int(
+        (Decimal(str(trade["buy_slippage"])) * 10_000).to_integral_value(
+            rounding=ROUND_DOWN
+        )
+    )
+    budgets: dict[Pubkey, int] = {}
+    for mint, amount in quote_amounts.items():
+        asset = get_quote_asset(mint)
+        raw_amount = int(
+            (Decimal(str(amount)) * (10**asset.decimals)).to_integral_value(
+                rounding=ROUND_DOWN
+            )
+        )
+        if raw_amount <= 0:
+            raise ValueError(f"Configured amount for {mint} is below one raw unit")
+        budgets[mint] = (raw_amount * (10_000 + slippage_bps) + 9_999) // 10_000
+    if not budgets:
+        raise ValueError("No allowed quote mint has a configured buy amount")
+    return budgets
+
+
+async def run_live_preflight(  # noqa: C901, PLR0912, PLR0915
+    config_path: str | Path,
+) -> dict[str, object]:
+    """Check one live configuration without authorizing or submitting a wire."""
+    cfg = load_bot_config(config_path)
+    policy = ExecutionPolicy.from_config(cfg)
+    if policy.mode is not ExecutionMode.LIVE:
+        raise ExecutionBlocked("--preflight requires execution.mode='live'")
+    platform = get_platform_from_config(cfg)
+    status = read_bot_status(config_path)
+    checks: list[dict[str, object]] = [
+        {
+            "name": "configuration",
+            "ok": True,
+            "detail": "strict live configuration loaded",
+        },
+        {
+            "name": "durable_state",
+            "ok": True,
+            "detail": {
+                "active_positions": status["active_position_count"],
+                "unresolved_buys": status["unresolved_buy_count"],
+                "pending_tokens": status["pending_token_count"],
+            },
+        },
+    ]
+    try:
+        quote_budgets = _configured_quote_budgets_raw(cfg)
+    except (TypeError, ValueError) as exc:
+        checks.append(
+            {
+                "name": "quote_configuration",
+                "ok": False,
+                "detail": str(exc),
+            }
+        )
+        quote_budgets = {}
+
+    try:
+        trader = _create_trader(cfg, policy, platform)
+    except Exception as exc:  # noqa: BLE001
+        checks.append(
+            {
+                "name": "signer_and_state_lock",
+                "ok": False,
+                "detail": f"{type(exc).__name__}: initialization failed",
+            }
+        )
+        return {
+            "ready": False,
+            "bot": cfg["name"],
+            "wallet": policy.expected_wallet,
+            "platform": platform.value,
+            "checks": checks,
+            "status": status,
+        }
+
+    try:
+        checks.append(
+            {
+                "name": "signer_and_state_lock",
+                "ok": str(trader.wallet.pubkey) == policy.expected_wallet,
+                "detail": "signer matches expected wallet and state lock is held",
+            }
+        )
+
+        try:
+            health = await trader.solana_client.get_health()
+            checks.append(
+                {
+                    "name": "rpc_health",
+                    "ok": health == "ok",
+                    "detail": health,
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            checks.append(
+                {
+                    "name": "rpc_health",
+                    "ok": False,
+                    "detail": f"{type(exc).__name__}: health check failed",
+                }
+            )
+
+        native_balance: int | None = None
+        rent_buffer: int | None = None
+        try:
+            native_balance = await trader.solana_client.get_native_balance(
+                trader.wallet.pubkey
+            )
+            rent_buffer = (
+                await trader.solana_client.get_minimum_balance_for_rent_exemption(
+                    PREFLIGHT_RENT_ACCOUNT_SIZE
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            checks.append(
+                {
+                    "name": "native_balance",
+                    "ok": False,
+                    "detail": f"{type(exc).__name__}: balance check failed",
+                }
+            )
+
+        risk_session = status["risk_session"]
+        if not isinstance(risk_session, dict):
+            raise TypeError("Status returned invalid session-risk data")
+        reserved_fees = int(risk_session["reserved_fee_lamports"])
+        _, max_session_quote, max_session_fees = policy.session_risk_limits()
+        max_transaction_fees = policy.max_total_fee_lamports
+        max_trade_quote = policy.max_trade_quote_raw
+        if max_transaction_fees is None or max_trade_quote is None:
+            raise ExecutionBlocked("Live transaction limits are incomplete")
+        remaining_fees = max(0, max_session_fees - reserved_fees)
+        checks.append(
+            {
+                "name": "session_fee_budget",
+                "ok": remaining_fees >= max_transaction_fees,
+                "detail": {
+                    "remaining_lamports": remaining_fees,
+                    "required_next_transaction_lamports": max_transaction_fees,
+                },
+            }
+        )
+
+        reserved_by_mint = risk_session["reserved_quote_raw_by_mint"]
+        if not isinstance(reserved_by_mint, dict):
+            raise TypeError("Status returned invalid quote-risk totals")
+        quote_budget_ok = bool(quote_budgets)
+        quote_budget_details: dict[str, object] = {}
+        for mint, required_raw in quote_budgets.items():
+            mint_text = str(mint)
+            reserved_raw = int(reserved_by_mint.get(mint_text, 0))
+            remaining_raw = max(0, max_session_quote - reserved_raw)
+            mint_ok = required_raw <= max_trade_quote and required_raw <= remaining_raw
+            quote_budget_ok = quote_budget_ok and mint_ok
+            quote_budget_details[mint_text] = {
+                "required_raw": required_raw,
+                "per_trade_limit_raw": max_trade_quote,
+                "remaining_session_raw": remaining_raw,
+                "ok": mint_ok,
+            }
+        checks.append(
+            {
+                "name": "session_quote_budget",
+                "ok": quote_budget_ok,
+                "detail": quote_budget_details,
+            }
+        )
+
+        token_balance_ok = True
+        token_balance_details: dict[str, object] = {}
+        for mint, required_raw in quote_budgets.items():
+            if mint == WSOL_MINT:
+                continue
+            asset = get_quote_asset(mint)
+            ata = trader.wallet.get_associated_token_address(
+                mint,
+                asset.token_program,
+            )
+            try:
+                balance_raw = await trader.solana_client.get_token_account_balance(ata)
+                mint_ok = balance_raw >= required_raw
+                token_balance_details[str(mint)] = {
+                    "balance_raw": balance_raw,
+                    "required_raw": required_raw,
+                    "ok": mint_ok,
+                }
+                token_balance_ok = token_balance_ok and mint_ok
+            except Exception as exc:  # noqa: BLE001
+                token_balance_details[str(mint)] = {
+                    "error": f"{type(exc).__name__}: balance check failed",
+                    "ok": False,
+                }
+                token_balance_ok = False
+        checks.append(
+            {
+                "name": "token_quote_balances",
+                "ok": token_balance_ok,
+                "detail": token_balance_details,
+            }
+        )
+
+        if native_balance is not None and rent_buffer is not None:
+            required_native = max_transaction_fees + rent_buffer
+            required_native += quote_budgets.get(WSOL_MINT, 0)
+            checks.append(
+                {
+                    "name": "native_balance",
+                    "ok": native_balance >= required_native,
+                    "detail": {
+                        "balance_lamports": native_balance,
+                        "required_lamports": required_native,
+                        "rent_buffer_account_size": (PREFLIGHT_RENT_ACCOUNT_SIZE),
+                    },
+                }
+            )
+
+        curve_manager = trader.platform_implementations.curve_manager
+        prepare_live_execution = getattr(
+            curve_manager,
+            "prepare_live_execution",
+            None,
+        )
+        if callable(prepare_live_execution):
+            try:
+                await prepare_live_execution()
+                checks.append(
+                    {
+                        "name": "fee_attestation",
+                        "ok": True,
+                        "detail": "live fee state attested",
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001
+                checks.append(
+                    {
+                        "name": "fee_attestation",
+                        "ok": False,
+                        "detail": f"{type(exc).__name__}: attestation failed",
+                    }
+                )
+        else:
+            checks.append(
+                {
+                    "name": "fee_attestation",
+                    "ok": True,
+                    "detail": "platform has no separate fee attestation",
+                }
+            )
+    finally:
+        await trader.close()
+
+    return {
+        "ready": all(bool(check["ok"]) for check in checks),
+        "bot": cfg["name"],
+        "wallet": policy.expected_wallet,
+        "platform": platform.value,
+        "checks": checks,
+        "status": status,
+    }
 
 
 async def _run_bot_process(
@@ -501,13 +947,42 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "configuration selected with --config"
         ),
     )
+    operations = parser.add_mutually_exclusive_group()
+    operations.add_argument(
+        "--status",
+        action="store_true",
+        help="Print recovered position and unresolved-submission status as JSON",
+    )
+    operations.add_argument(
+        "--preflight",
+        action="store_true",
+        help="Check live signer, RPC, balances, fees, and durable risk without submitting",
+    )
+    operations.add_argument(
+        "--emergency-exit",
+        metavar="MINT",
+        help="Sell exactly one journaled position without starting a listener",
+    )
     args = parser.parse_args(argv)
     if args.authorize_live and args.config is None:
         parser.error("--authorize-live requires an explicit --config path")
+    if (
+        args.status or args.preflight or args.emergency_exit is not None
+    ) and args.config is None:
+        parser.error(
+            "--status, --preflight, and --emergency-exit require "
+            "an explicit --config path"
+        )
+    if args.emergency_exit is not None and not args.authorize_live:
+        parser.error("--emergency-exit requires --authorize-live")
+    if (args.status or args.preflight) and args.authorize_live:
+        parser.error(
+            "--status and --preflight are read-only and must not use --authorize-live"
+        )
     return args
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -515,6 +990,20 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
 
     try:
+        if args.status:
+            status = read_bot_status(args.config)
+            print(json.dumps(status, indent=2, sort_keys=True))
+            return 0
+        if args.preflight:
+            report = asyncio.run(run_live_preflight(args.config))
+            print(json.dumps(report, indent=2, sort_keys=True))
+            return 0 if report.get("ready") is True else 1
+        if args.emergency_exit is not None:
+            result = asyncio.run(run_emergency_exit(args.config, args.emergency_exit))
+            print(json.dumps(result, indent=2, sort_keys=True))
+            if result.get("success") is True:
+                return 0
+            return 2 if result.get("status") == "unknown" else 1
         if args.config is not None:
             shutdown_signal = asyncio.run(
                 _run_bot_process(

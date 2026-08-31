@@ -48,6 +48,9 @@ class TokenInfo:
     token_program_id: Pubkey | None = None  # Token or Token2022 program
     is_mayhem_mode: bool = False  # pump.fun mayhem mode flag
     is_cashback_coin: bool = False  # pump.fun cashback coin flag
+    protocol_fee_recipient: Pubkey | None = None  # PumpSwap selected recipient
+    buyback_fee_recipient: Pubkey | None = None  # PumpSwap selected recipient
+    pool_needs_extension: bool = False  # PumpSwap account realloc prerequisite
 
     # Quote asset (pump.fun v2 instructions). SOL-paired coins carry
     # Pubkey::default() on-chain; normalize_quote_mint() maps that to wrapped

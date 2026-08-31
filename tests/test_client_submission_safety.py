@@ -18,6 +18,7 @@ from solders.message import Message
 from solders.pubkey import Pubkey
 from solders.signature import Signature
 from solders.transaction import Transaction
+from spl.token.instructions import get_associated_token_address
 
 from core import client as client_module
 from core.client import SolanaClient
@@ -37,6 +38,9 @@ def _live_client(
         expected_wallet=str(signer.pubkey()),
         max_trade_quote_raw=1_000_000,
         max_total_fee_lamports=100_000,
+        risk_session_id="test-session",
+        max_session_quote_raw=10_000_000,
+        max_session_fee_lamports=10_000_000,
         allow_skip_preflight=True,
     )
     ledger = TransactionLedger(tmp_path / "transactions.sqlite3")
@@ -74,6 +78,47 @@ def _unknown_error_type() -> type[RuntimeError]:
 
 
 @pytest.mark.asyncio
+async def test_default_submission_uses_policy_preflight_setting(tmp_path) -> None:
+    """A caller that omits the transport option must inherit safe preflight."""
+    observed_opts: list[object] = []
+
+    async def send_transaction(
+        transaction: Transaction,
+        opts: object,
+    ) -> SimpleNamespace:
+        observed_opts.append(opts)
+        return SimpleNamespace(value=transaction.signatures[0])
+
+    rpc = SimpleNamespace(
+        send_transaction=AsyncMock(side_effect=send_transaction),
+    )
+    client, _ledger, signer = _live_client(tmp_path, rpc)
+    client.execution_policy = ExecutionPolicy(
+        mode="live",
+        live_authorized=True,
+        expected_wallet=str(signer.pubkey()),
+        max_trade_quote_raw=1_000_000,
+        max_total_fee_lamports=100_000,
+        risk_session_id="test-session",
+        max_session_quote_raw=10_000_000,
+        max_session_fee_lamports=10_000_000,
+        allow_skip_preflight=False,
+    )
+
+    await client.build_and_send_transaction(
+        [_instruction()],
+        signer,
+        quote_amount_raw=10,
+        fee_lamports=5_000,
+        intent_id="policy-owned-preflight",
+        quote_mint=WSOL_MINT,
+    )
+
+    assert len(observed_opts) == 1
+    assert observed_opts[0].skip_preflight is False
+
+
+@pytest.mark.asyncio
 async def test_caller_compute_budget_instruction_is_rejected(tmp_path) -> None:
     rpc = SimpleNamespace(send_transaction=AsyncMock())
     client, _ledger, signer = _live_client(tmp_path, rpc)
@@ -85,6 +130,7 @@ async def test_caller_compute_budget_instruction_is_rejected(tmp_path) -> None:
             quote_amount_raw=10,
             fee_lamports=5_000,
             intent_id="injected-compute-budget",
+            quote_mint=WSOL_MINT,
         )
 
     rpc.send_transaction.assert_not_awaited()
@@ -103,6 +149,7 @@ async def test_newly_signed_transaction_retries_are_disabled(tmp_path) -> None:
             quote_amount_raw=10,
             fee_lamports=5_000,
             intent_id="unsafe-retry-count",
+            quote_mint=WSOL_MINT,
         )
 
     rpc.send_transaction.assert_not_awaited()
@@ -121,6 +168,7 @@ async def test_explicit_compute_unit_limit_cannot_exceed_protocol_cap(tmp_path) 
             fee_lamports=5_000,
             compute_unit_limit=1_400_001,
             intent_id="oversized-compute-budget",
+            quote_mint=WSOL_MINT,
         )
 
     rpc.send_transaction.assert_not_awaited()
@@ -139,6 +187,7 @@ async def test_priority_fee_cannot_exceed_wire_encoding_cap(tmp_path) -> None:
             fee_lamports=5_000,
             priority_fee=2**64,
             intent_id="oversized-priority-fee",
+            quote_mint=WSOL_MINT,
         )
 
     rpc.send_transaction.assert_not_awaited()
@@ -169,6 +218,7 @@ async def test_transport_failure_is_unknown_and_raises_with_signature(
             quote_amount_raw=10,
             fee_lamports=5_000,
             intent_id="ambiguous-send",
+            quote_mint=WSOL_MINT,
         )
 
     signature = caught.value.signature
@@ -184,6 +234,7 @@ async def test_transport_failure_is_unknown_and_raises_with_signature(
             quote_amount_raw=10,
             fee_lamports=5_000,
             intent_id="ambiguous-send",
+            quote_mint=WSOL_MINT,
         )
     assert rpc.send_transaction.await_count == 1
 
@@ -204,6 +255,7 @@ async def test_response_signature_mismatch_is_unknown_not_success(tmp_path) -> N
             quote_amount_raw=10,
             fee_lamports=5_000,
             intent_id="mismatched-response",
+            quote_mint=WSOL_MINT,
         )
 
     outcome = ledger.get_outcome(caught.value.signature)
@@ -230,6 +282,7 @@ async def test_malformed_send_response_is_signature_bearing_unknown(
             quote_amount_raw=10,
             fee_lamports=5_000,
             intent_id=f"malformed-response-{id(malformed_response)}",
+            quote_mint=WSOL_MINT,
         )
 
     assert caught.value.signature
@@ -254,6 +307,7 @@ async def test_rpc_error_after_send_started_raises_signature_bearing_unknown(
             quote_amount_raw=10,
             fee_lamports=5_000,
             intent_id="rpc-error-send",
+            quote_mint=WSOL_MINT,
         )
 
     assert caught.value.signature
@@ -286,6 +340,7 @@ async def test_blockhash_rpc_error_does_not_prove_expiry(tmp_path) -> None:
             fee_lamports=5_000,
             intent_id="unproven-blockhash-error",
             max_retries=1,
+            quote_mint=WSOL_MINT,
         )
 
     outcome = ledger.get_outcome(caught.value.signature)
@@ -328,6 +383,7 @@ async def test_prepared_wire_rpc_error_raises_signature_bearing_unknown(
             quote_amount_raw=10,
             fee_lamports=5_000,
             intent_id="prepared-rpc-error",
+            quote_mint=WSOL_MINT,
         )
 
     assert caught.value.signature == signature
@@ -367,6 +423,7 @@ async def test_prepared_malformed_response_is_signature_bearing_unknown(
             quote_amount_raw=10,
             fee_lamports=5_000,
             intent_id="prepared-malformed-response",
+            quote_mint=WSOL_MINT,
         )
 
     assert caught.value.signature == signature
@@ -413,6 +470,7 @@ async def test_prepared_recovery_submits_the_exact_stored_wire_bytes(tmp_path) -
         quote_amount_raw=10,
         fee_lamports=5_000,
         intent_id="prepared-recovery",
+        quote_mint=WSOL_MINT,
     )
 
     assert returned == prepared_signature
@@ -448,6 +506,9 @@ async def test_prepared_recovery_revalidates_current_budget_policy(tmp_path) -> 
         expected_wallet=str(signer.pubkey()),
         max_trade_quote_raw=50,
         max_total_fee_lamports=100_000,
+        risk_session_id="test-session",
+        max_session_quote_raw=10_000_000,
+        max_session_fee_lamports=10_000_000,
         allow_skip_preflight=True,
     )
 
@@ -531,6 +592,7 @@ async def test_prepared_recovery_ignores_rebuilt_message_and_receipt_context(
         fee_lamports=5_000,
         intent_id="changed-prepared-recovery",
         receipt_destinations=rebuilt_destinations,
+        quote_mint=WSOL_MINT,
     )
 
     assert returned == prepared_signature
@@ -587,6 +649,7 @@ async def test_expired_prepared_wire_remains_unknown_without_terminal_evidence(
             quote_amount_raw=10,
             fee_lamports=5_000,
             intent_id="stale-prepared",
+            quote_mint=WSOL_MINT,
         )
 
     assert caught.value.signature == str(stale_signature)
@@ -610,6 +673,7 @@ async def test_cancellation_before_send_releases_only_prepared_reservation(
             quote_amount_raw=10,
             fee_lamports=5_000,
             intent_id="cancel-before-send",
+            quote_mint=WSOL_MINT,
         )
 
     assert ledger.get_active_submission_record("cancel-before-send") is None
@@ -629,6 +693,7 @@ async def test_cancellation_during_send_keeps_submitted_reservation(tmp_path) ->
             quote_amount_raw=10,
             fee_lamports=5_000,
             intent_id="cancel-during-send",
+            quote_mint=WSOL_MINT,
         )
 
     record = ledger.get_active_submission_record("cancel-during-send")
@@ -662,6 +727,7 @@ async def test_cancellation_during_post_send_ledger_mark_waits_for_transition(
             quote_amount_raw=10,
             fee_lamports=5_000,
             intent_id="cancel-during-ledger-mark",
+            quote_mint=WSOL_MINT,
         )
     )
     await asyncio.wait_for(asyncio.to_thread(mark_started.wait), timeout=1)
@@ -1150,6 +1216,83 @@ async def test_sell_sol_receipt_adds_transaction_fee_to_owner_delta() -> None:
 
 
 @pytest.mark.asyncio
+async def test_sell_wsol_receipt_excludes_preexisting_closed_ata_lamports() -> None:
+    client = SolanaClient("http://offline.invalid")
+    owner = Pubkey.new_unique()
+    quote_account = get_associated_token_address(owner, WSOL_MINT)
+    result = {
+        "meta": {
+            "err": None,
+            "fee": 5,
+            "preBalances": [10_000, 200],
+            "postBalances": [10_300, 0],
+            "preTokenBalances": [
+                {
+                    "accountIndex": 1,
+                    "mint": str(WSOL_MINT),
+                    "owner": str(owner),
+                    "uiTokenAmount": {"amount": "50"},
+                }
+            ],
+            "postTokenBalances": [],
+        },
+        "transaction": {"message": {"accountKeys": [str(owner), str(quote_account)]}},
+    }
+
+    async def get_result(_signature, *, commitment: str = "confirmed") -> dict:
+        return result
+
+    client._get_transaction_result = get_result
+
+    assert (
+        await client.get_sell_transaction_details(Signature.default(), WSOL_MINT, owner)
+        == 105
+    )
+
+
+@pytest.mark.asyncio
+async def test_sell_wsol_receipt_prefers_owner_token_delta() -> None:
+    client = SolanaClient("http://offline.invalid")
+    owner = Pubkey.new_unique()
+    quote_account = Pubkey.new_unique()
+    result = {
+        "meta": {
+            "err": None,
+            "fee": 5,
+            "preBalances": [10_000, 200],
+            "postBalances": [9_995, 195],
+            "preTokenBalances": [
+                {
+                    "accountIndex": 1,
+                    "mint": str(WSOL_MINT),
+                    "owner": str(owner),
+                    "uiTokenAmount": {"amount": "50"},
+                }
+            ],
+            "postTokenBalances": [
+                {
+                    "accountIndex": 1,
+                    "mint": str(WSOL_MINT),
+                    "owner": str(owner),
+                    "uiTokenAmount": {"amount": "75"},
+                }
+            ],
+        },
+        "transaction": {"message": {"accountKeys": [str(owner), str(quote_account)]}},
+    }
+
+    async def get_result(_signature, *, commitment: str = "confirmed") -> dict:
+        return result
+
+    client._get_transaction_result = get_result
+
+    assert (
+        await client.get_sell_transaction_details(Signature.default(), WSOL_MINT, owner)
+        == 25
+    )
+
+
+@pytest.mark.asyncio
 async def test_sell_spl_quote_receipt_uses_owner_token_delta() -> None:
     client = SolanaClient("http://offline.invalid")
     owner = Pubkey.new_unique()
@@ -1275,3 +1418,78 @@ def test_canonical_transaction_requires_requested_primary_signature() -> None:
 
     result["transaction"]["signatures"][1] = "not-a-signature"
     assert not SolanaClient._is_canonical_transaction_result(result, str(primary))
+
+
+@pytest.mark.asyncio
+async def test_session_budget_blocks_second_wire_before_network_send(tmp_path) -> None:
+    async def send_transaction(
+        transaction: Transaction,
+        _opts: object,
+    ) -> SimpleNamespace:
+        return SimpleNamespace(value=transaction.signatures[0])
+
+    rpc = SimpleNamespace(
+        send_transaction=AsyncMock(side_effect=send_transaction),
+    )
+    client, _ledger, signer = _live_client(tmp_path, rpc)
+    client.execution_policy = ExecutionPolicy(
+        mode="live",
+        live_authorized=True,
+        expected_wallet=str(signer.pubkey()),
+        max_trade_quote_raw=1_000_000,
+        max_total_fee_lamports=100_000,
+        risk_session_id="bounded-session",
+        max_session_quote_raw=1_000_000,
+        max_session_fee_lamports=100_000,
+        allow_skip_preflight=True,
+    )
+
+    await client.build_and_send_transaction(
+        [_instruction()],
+        signer,
+        quote_amount_raw=600_000,
+        fee_lamports=5_000,
+        intent_id="session-buy-1",
+        quote_mint=WSOL_MINT,
+    )
+
+    with pytest.raises(TradeLimitExceeded, match="session quote"):
+        await client.build_and_send_transaction(
+            [Instruction(Pubkey.new_unique(), b"trade-2", [])],
+            signer,
+            quote_amount_raw=600_000,
+            fee_lamports=5_000,
+            intent_id="session-buy-2",
+            quote_mint=WSOL_MINT,
+        )
+
+    assert rpc.send_transaction.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_native_balance_and_rent_reads_validate_rpc_shape() -> None:
+    client = object.__new__(SolanaClient)
+    client.post_rpc = AsyncMock(
+        side_effect=[
+            {"result": {"context": {"slot": 1}, "value": 123_456}},
+            {"result": 3_000_000},
+        ]
+    )
+    wallet = Pubkey.new_unique()
+
+    assert await client.get_native_balance(wallet) == 123_456
+    assert await client.get_minimum_balance_for_rent_exemption(512) == 3_000_000
+    assert client.post_rpc.await_args_list[0].args[0]["method"] == "getBalance"
+    assert (
+        client.post_rpc.await_args_list[1].args[0]["method"]
+        == "getMinimumBalanceForRentExemption"
+    )
+
+
+@pytest.mark.asyncio
+async def test_native_balance_rejects_malformed_rpc_value() -> None:
+    client = object.__new__(SolanaClient)
+    client.post_rpc = AsyncMock(return_value={"result": {"value": True}})
+
+    with pytest.raises(ValueError, match="getBalance"):
+        await client.get_native_balance(Pubkey.new_unique())

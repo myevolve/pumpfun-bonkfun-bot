@@ -28,9 +28,10 @@ from solders.message import Message
 from solders.pubkey import Pubkey
 from solders.signature import Signature
 from solders.transaction import Transaction
+from spl.token.instructions import get_associated_token_address
 
 from core.execution_policy import ExecutionBlocked, ExecutionPolicy
-from core.pubkeys import is_sol_paired
+from core.pubkeys import is_sol_paired, normalize_quote_mint
 from core.rpc_rate_limiter import TokenBucketRateLimiter
 from core.transaction_ledger import TransactionLedger
 from core.transaction_state import TransactionOutcome, TransactionStatus
@@ -269,6 +270,50 @@ class SolanaClient:
         if result and "result" in result:
             return result["result"]
         return None
+
+    async def get_native_balance(self, pubkey: Pubkey) -> int:
+        """Return a wallet's confirmed native SOL balance in lamports."""
+        if not isinstance(pubkey, Pubkey):
+            raise TypeError("pubkey must be a Pubkey")  # noqa: TRY003
+        response = await self.post_rpc(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getBalance",
+                "params": [str(pubkey), {"commitment": "confirmed"}],
+            }
+        )
+        try:
+            value = response["result"]["value"]
+        except (KeyError, TypeError) as exc:
+            raise ValueError("getBalance response is missing a value") from exc  # noqa: TRY003
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError("getBalance response contains an invalid value")  # noqa: TRY003
+        return value
+
+    async def get_minimum_balance_for_rent_exemption(self, size: int) -> int:
+        """Return the confirmed rent-exempt minimum for an account size."""
+        if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+            raise ValueError("account size must be a non-negative integer")  # noqa: TRY003
+        response = await self.post_rpc(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getMinimumBalanceForRentExemption",
+                "params": [size, {"commitment": "confirmed"}],
+            }
+        )
+        try:
+            value = response["result"]
+        except (KeyError, TypeError) as exc:
+            raise ValueError(  # noqa: TRY003
+                "getMinimumBalanceForRentExemption response is missing a value"
+            ) from exc
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(  # noqa: TRY003
+                "getMinimumBalanceForRentExemption response contains an invalid value"
+            )
+        return value
 
     async def get_account_info(
         self, pubkey: Pubkey, commitment: str | None = None
@@ -652,19 +697,26 @@ class SolanaClient:
                 "Durable submission receipt context contains an invalid pubkey"
             ) from exc
 
+    def _resolve_skip_preflight(self, *, requested: bool | None) -> bool:
+        """Resolve transport preflight from policy unless explicitly safer."""
+        if requested is None:
+            return self.execution_policy.allow_skip_preflight
+        if not isinstance(requested, bool):
+            raise TypeError("skip_preflight must be a boolean or None")  # noqa: TRY003
+        return requested
+
     async def recover_active_submission(
         self,
         intent_id: str,
         *,
-        skip_preflight: bool = True,
+        skip_preflight: bool | None = None,
     ) -> Signature | None:
         """Recover an exact ledger-bound wire before any caller rebuilds it."""
         if not isinstance(intent_id, str) or not intent_id:
             raise ValueError("intent_id is required")
-        if not isinstance(skip_preflight, bool):
-            raise ValueError("skip_preflight must be a boolean")
+        resolved_skip_preflight = self._resolve_skip_preflight(requested=skip_preflight)
         self.execution_policy.require_submission()
-        self.execution_policy.validate_preflight(skip_preflight)
+        self.execution_policy.validate_preflight(resolved_skip_preflight)
         if self.ledger is None:
             raise ExecutionBlocked("Submission recovery requires a durable ledger")
         record = await asyncio.to_thread(
@@ -674,7 +726,7 @@ class SolanaClient:
         if record is None:
             return None
         tx_opts = TxOpts(
-            skip_preflight=skip_preflight,
+            skip_preflight=resolved_skip_preflight,
             preflight_commitment=Processed,
             max_retries=0,
         )
@@ -684,13 +736,14 @@ class SolanaClient:
         self,
         instructions: list[Instruction],
         signer_keypair: Keypair,
-        skip_preflight: bool = True,
+        skip_preflight: bool | None = None,
         max_retries: int = 1,
         priority_fee: int | None = None,
         compute_unit_limit: int | None = None,
         account_data_size_limit: int | None = None,
         *,
         quote_amount_raw: int | None = None,
+        quote_mint: Pubkey | None = None,
         fee_lamports: int | None = None,
         intent_id: str | None = None,
         receipt_destinations: tuple[str, ...] | None = None,
@@ -702,15 +755,14 @@ class SolanaClient:
         as an explicit safety assertion and must be exactly one.
         """
         policy = self.execution_policy
+        resolved_skip_preflight = self._resolve_skip_preflight(requested=skip_preflight)
         policy.require_submission()
         policy.validate_wallet(signer_keypair.pubkey())
-        policy.validate_preflight(skip_preflight)
+        policy.validate_preflight(resolved_skip_preflight)
         if self.ledger is None:
             raise ExecutionBlocked(
                 "Live transaction submission requires a durable TransactionLedger"
             )
-        if not isinstance(skip_preflight, bool):
-            raise ValueError("skip_preflight must be a boolean")
 
         if not isinstance(instructions, list) or any(
             not isinstance(instruction, Instruction) for instruction in instructions
@@ -768,11 +820,23 @@ class SolanaClient:
             raise ExecutionBlocked(
                 "quote_amount_raw is required for every transaction submission"
             )
+        if quote_mint is None:
+            raise ExecutionBlocked(  # noqa: TRY003
+                "quote_mint is required for every transaction submission"
+            )
+        if not isinstance(quote_mint, Pubkey):
+            raise TypeError("quote_mint must be a Pubkey")  # noqa: TRY003
+        normalized_quote_mint = normalize_quote_mint(quote_mint)
         validated_quote_amount = quote_amount_raw
         if fee_lamports is not None:
             policy.validate_budgets(validated_quote_amount, fee_lamports)
         fee_lamports = max(fee_lamports or 0, estimated_fee)
         policy.validate_budgets(validated_quote_amount, fee_lamports)
+        (
+            risk_session_id,
+            max_session_quote_raw,
+            max_session_fee_lamports,
+        ) = policy.session_risk_limits()
 
         logger.info(
             f"Priority fee in microlamports: {priority_fee if priority_fee else 0}"
@@ -803,7 +867,7 @@ class SolanaClient:
             fee_lamports,
         )
         tx_opts = TxOpts(
-            skip_preflight=skip_preflight,
+            skip_preflight=resolved_skip_preflight,
             preflight_commitment=Processed,
             max_retries=0,
         )
@@ -873,6 +937,11 @@ class SolanaClient:
                 wire_bytes=wire_bytes,
                 state="prepared",
                 receipt_destinations=receipt_destinations,
+                quote_mint=str(normalized_quote_mint),
+                risk_session_id=risk_session_id,
+                max_session_quote_raw=max_session_quote_raw,
+                max_session_fee_lamports=max_session_fee_lamports,
+                intent_message_hash=message_hash,
             )
             if reserved_signature != signature_text:
                 self._submission_validity.pop(signature_text, None)
@@ -900,6 +969,11 @@ class SolanaClient:
                     wire_bytes=wire_bytes,
                     state="prepared",
                     receipt_destinations=receipt_destinations,
+                    risk_session_id=risk_session_id,
+                    quote_mint=str(normalized_quote_mint),
+                    max_session_quote_raw=max_session_quote_raw,
+                    max_session_fee_lamports=max_session_fee_lamports,
+                    intent_message_hash=message_hash,
                 )
                 if reserved_signature != signature_text:
                     raise TransactionSubmissionUnknown(
@@ -1548,6 +1622,15 @@ class SolanaClient:
                 return None
 
         owner_string = str(owner)
+        if is_sol_paired(quote_mint):
+            token_received = self._extract_positive_token_diff(
+                meta,
+                str(quote_mint),
+                owner=owner_string,
+                account_count=len(normalized_account_keys),
+            )
+            if token_received is not None:
+                return token_received
         owner_indexes = [
             index
             for index, account_key in enumerate(normalized_account_keys)
@@ -1573,14 +1656,35 @@ class SolanaClient:
         fee = meta.get("fee")
         if type(fee) is not int or fee < 0 or fee > 0xFFFF_FFFF_FFFF_FFFF:
             return None
+        preexisting_quote_account_lamports = 0
+        quote_account_string = str(get_associated_token_address(owner, quote_mint))
+        quote_account_indexes = [
+            index
+            for index, account_key in enumerate(normalized_account_keys)
+            if account_key == quote_account_string
+        ]
+        if len(quote_account_indexes) > 1:
+            return None
+        if quote_account_indexes:
+            quote_account_index = quote_account_indexes[0]
+            if (
+                pre_balances[quote_account_index] > 0
+                and post_balances[quote_account_index] == 0
+            ):
+                preexisting_quote_account_lamports = pre_balances[quote_account_index]
         owner_index = owner_indexes[0]
-        received = post_balances[owner_index] - pre_balances[owner_index] + fee
+        received = (
+            post_balances[owner_index]
+            - pre_balances[owner_index]
+            + fee
+            - preexisting_quote_account_lamports
+        )
         if not 0 < received <= 0xFFFF_FFFF_FFFF_FFFF:
             return None
         return received
 
     @staticmethod
-    def _extract_positive_token_diff(
+    def _extract_positive_token_diff(  # noqa: PLR0912
         meta: dict,
         mint_str: str,
         *,

@@ -131,6 +131,7 @@ def _manager(
         client,  # type: ignore[arg-type]
         _Parser(),  # type: ignore[arg-type]
         fee_schedule=schedule,  # type: ignore[arg-type]
+        pumpswap_manager=_Schedule(schedule.snapshot),  # type: ignore[arg-type]
     )
 
 
@@ -257,4 +258,6 @@ async def test_live_execution_lifecycle_delegates_to_fee_schedule() -> None:
 
     assert schedule.started is True
     assert schedule.closed is True
+    assert manager.pumpswap.started is True  # type: ignore[attr-defined]
+    assert manager.pumpswap.closed is True  # type: ignore[attr-defined]
     assert isinstance(manager.fee_schedule, PumpFeeSchedule | _Schedule)

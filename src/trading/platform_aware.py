@@ -29,7 +29,7 @@ from core.pubkeys import (
 )
 from core.quote_engine import minimum_output_with_slippage
 from core.wallet import Wallet
-from interfaces.core import AddressProvider, Platform, TokenInfo
+from interfaces.core import AddressProvider, CurveManager, Platform, TokenInfo
 from platforms import get_platform_implementations
 from trading.base import Trader, TradeResult
 from utils.logger import get_logger
@@ -184,50 +184,35 @@ def _base_unit(token_info: TokenInfo) -> int:
     return 10**decimals
 
 
-async def _read_pool_state_with_retry(
-    curve_manager: object,
+async def _read_pool_state_with_retry(  # noqa: PLR0913
+    curve_manager: CurveManager,
     pool_address: Pubkey,
+    *,
     mint: Pubkey | None = None,
+    state_reader: str | None = None,
     budget_seconds: float = 2.0,
-    delay_seconds: float = 0.15,
+    delay_seconds: float = 0.1,
 ) -> tuple[dict, Pubkey | None]:
-    """Read bonding curve state, retrying within a time budget on a lagging node.
-
-    A freshly created curve may not be visible at `confirmed` yet, and a node
-    can momentarily serve a slot that predates it — both surface as "account
-    not found". Reading at `processed` and retrying costs a handful of RPC
-    calls, which is far cheaper than trading on stale account data. Issue #170
-    measured individual reads on a load-balanced endpoint lagging several
-    seconds behind a fast listener, hence a time budget rather than a fixed
-    attempt count.
-
-    When `mint` is given and the curve manager supports it, the curve and the
-    mint are read in one slot-consistent batch so the mint's owning token
-    program comes back for free (pumpportal listeners can only guess it).
-
-    Args:
-        curve_manager: Platform curve manager
-        pool_address: Bonding curve / pool address
-        mint: Optional token mint to read alongside the curve
-        budget_seconds: Total time to keep retrying before giving up
-        delay_seconds: Pause between attempts
-
-    Returns:
-        Tuple of (decoded pool state, token program id or None if unknown)
-
-    Raises:
-        Exception: The last read error if every attempt fails
-    """
-    batch_read = mint is not None and hasattr(
-        curve_manager, "get_pool_state_and_token_program"
+    """Read authoritative pool state, retrying within a bounded lag window."""
+    selected_reader = (
+        getattr(curve_manager, state_reader, None) if state_reader is not None else None
     )
+    batch_reader = selected_reader
+    if not callable(batch_reader) and mint is not None:
+        batch_reader = getattr(
+            curve_manager,
+            "get_pool_state_and_token_program",
+            None,
+        )
     deadline = monotonic() + budget_seconds
     last_error: Exception | None = None
     while True:
         try:
-            if batch_read:
-                result = await curve_manager.get_pool_state_and_token_program(
-                    pool_address, mint, commitment="processed"
+            if callable(batch_reader):
+                result = await batch_reader(
+                    pool_address,
+                    mint,
+                    commitment="processed",
                 )
             else:
                 state = await curve_manager.get_pool_state(
@@ -274,6 +259,18 @@ def _record_executable_state(token_info: TokenInfo, pool_state: dict) -> None:
     if not isinstance(pool_state, dict):
         raise ValueError("Pool state must be a mapping")
     if token_info.platform is Platform.PUMP_FUN:
+        if pool_state.get("venue") == "pumpswap":
+            if (
+                pool_state.get("complete") is not True
+                or pool_state.get("is_tradeable") is not True
+            ):
+                raise ValueError(  # noqa: TRY003
+                    "PumpSwap pool is not authoritatively tradeable"
+                )
+            token_info.curve_complete = True
+            token_info.pool_tradeable = True
+            token_info.pool_status = "pumpswap"
+            return
         if pool_state.get("complete") is not False:
             raise ValueError(
                 "Pump.fun bonding curve is complete or missing its completion flag"
@@ -360,7 +357,7 @@ def _apply_token_program(
                 "Verified Pump.fun associated bonding curve does not match the mint"
             )
         token_info.associated_bonding_curve = expected_associated_curve
-        if token_info.creator is not None:
+        if token_info.creator is not None and token_info.pool_status != "pumpswap":
             expected_creator_vault = address_provider.derive_creator_vault(
                 token_info.creator
             )
@@ -422,6 +419,35 @@ def _sync_letsbonk_execution_metadata(
     token_info.global_config = _require_pool_pubkey(pool_state, "global_config")
     token_info.platform_config = _require_pool_pubkey(pool_state, "platform_config")
     token_info.creator = _require_pool_pubkey(pool_state, "creator")
+
+
+def _sync_pumpswap_execution_metadata(
+    token_info: TokenInfo,
+    pool_state: dict,
+) -> None:
+    """Apply the canonical migrated-pool accounts selected for this sell."""
+    if (
+        token_info.platform is not Platform.PUMP_FUN
+        or pool_state.get("venue") != "pumpswap"
+    ):
+        return
+    token_info.pool_state = _require_pool_pubkey(pool_state, "pool_address")
+    token_info.base_vault = _require_pool_pubkey(pool_state, "base_vault")
+    token_info.quote_vault = _require_pool_pubkey(pool_state, "quote_vault")
+    token_info.global_config = _require_pool_pubkey(pool_state, "global_config")
+    token_info.platform_config = _require_pool_pubkey(pool_state, "platform_config")
+    token_info.creator = _require_pool_pubkey(pool_state, "creator")
+    token_info.creator_vault = _require_pool_pubkey(pool_state, "creator_vault")
+    token_info.protocol_fee_recipient = _require_pool_pubkey(
+        pool_state, "protocol_fee_recipient"
+    )
+    token_info.buyback_fee_recipient = _require_pool_pubkey(
+        pool_state, "buyback_fee_recipient"
+    )
+    pool_needs_extension = pool_state.get("pool_needs_extension", False)
+    if not isinstance(pool_needs_extension, bool):
+        raise TypeError("PumpSwap pool extension flag is invalid")  # noqa: TRY003
+    token_info.pool_needs_extension = pool_needs_extension
 
 
 class PlatformAwareBuyer(Trader):
@@ -758,7 +784,6 @@ class PlatformAwareBuyer(Trader):
             tx_signature = await self.client.build_and_send_transaction(
                 instructions,
                 self.wallet.keypair,
-                skip_preflight=True,
                 max_retries=self.max_retries,
                 priority_fee=priority_fee,
                 compute_unit_limit=instruction_builder.get_buy_compute_unit_limit(
@@ -768,6 +793,7 @@ class PlatformAwareBuyer(Trader):
                     "account_data_size", token_info.platform
                 ),
                 quote_amount_raw=max_quote_amount_raw,
+                quote_mint=quote_mint,
                 intent_id=f"buy:{token_info.platform.value}:{token_info.mint}",
                 receipt_destinations=(
                     tuple(
@@ -1217,6 +1243,11 @@ class PlatformAwareSeller(Trader):
                     curve_manager,
                     pool_address,
                     mint=token_info.mint,
+                    state_reader=(
+                        "get_sell_state_and_token_program"
+                        if token_info.platform is Platform.PUMP_FUN
+                        else None
+                    ),
                 )
                 _record_executable_state(token_info, pool_state)
                 token_info.is_mayhem_mode = pool_state.get(
@@ -1232,6 +1263,12 @@ class PlatformAwareSeller(Trader):
                     "quote_decimals", token_info.quote_decimals
                 )
                 quote_mint = _refresh_quote_mint(token_info, pool_state)
+                execution_pool_address = pool_state.get("pool_address", pool_address)
+                if not isinstance(execution_pool_address, Pubkey):
+                    raise TypeError(  # noqa: TRY003, TRY301
+                        "Pool state returned an invalid pool address"
+                    )
+                pool_address = execution_pool_address
                 fresh_creator = pool_state.get("creator")
                 if fresh_creator:
                     new_creator = (
@@ -1245,7 +1282,10 @@ class PlatformAwareSeller(Trader):
                 derive_creator_vault = getattr(
                     address_provider, "derive_creator_vault", None
                 )
-                if token_info.platform is Platform.PUMP_FUN:
+                if (
+                    token_info.platform is Platform.PUMP_FUN
+                    and pool_state.get("venue") != "pumpswap"
+                ):
                     if token_info.creator is None:
                         raise RuntimeError("Pump.fun sell requires creator metadata")
                     if not callable(derive_creator_vault):
@@ -1254,12 +1294,17 @@ class PlatformAwareSeller(Trader):
                             "from its address provider"
                         )
                     token_info.creator_vault = derive_creator_vault(token_info.creator)
-                elif fresh_creator and callable(derive_creator_vault):
+                elif (
+                    token_info.platform is not Platform.PUMP_FUN
+                    and fresh_creator
+                    and callable(derive_creator_vault)
+                ):
                     token_info.creator_vault = derive_creator_vault(token_info.creator)
                 _apply_token_program(token_info, fresh_token_program, address_provider)
                 _sync_letsbonk_execution_metadata(
                     token_info, pool_state, address_provider
                 )
+                _sync_pumpswap_execution_metadata(token_info, pool_state)
             except Exception as exc:
                 raise RuntimeError(
                     "Could not refresh authoritative protocol metadata before "
@@ -1330,7 +1375,6 @@ class PlatformAwareSeller(Trader):
             tx_signature = await self.client.build_and_send_transaction(
                 instructions,
                 self.wallet.keypair,
-                skip_preflight=True,
                 max_retries=self.max_retries,
                 priority_fee=priority_fee,
                 compute_unit_limit=instruction_builder.get_sell_compute_unit_limit(
@@ -1340,6 +1384,7 @@ class PlatformAwareSeller(Trader):
                     "account_data_size", token_info.platform
                 ),
                 quote_amount_raw=0,
+                quote_mint=quote_mint,
                 intent_id=intent_id
                 or (
                     f"sell:{token_info.platform.value}:{token_info.mint}:"
