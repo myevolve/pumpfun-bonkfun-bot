@@ -19,44 +19,63 @@ _SECRET_DIGESTS: set[bytes] = set()
 _LOCK = threading.RLock()
 _loggers: dict[str, logging.Logger] = {}
 _SENSITIVE_FIELD_NAMES = {
+    "authorization",
+    "mnemonic",
     "privatekey",
-    "secretkey",
     "seed",
     "seedphrase",
-    "mnemonic",
+    "secretkey",
+    "xtoken",
 }
+_SENSITIVE_FIELD_SUFFIXES = (
+    "accesstoken",
+    "apikey",
+    "apitoken",
+    "authtoken",
+    "password",
+    "passwd",
+)
 _SENSITIVE_LABEL_RE = re.compile(
-    r"(?i)\b(private[\s_-]*key|secret[\s_-]*key|seed(?:[\s_-]*phrase)?|mnemonic)"
-    r"([\"']?\s*[:=]\s*)"
+    r"(?i)\b("
+    r"private[\s_-]*key|secret[\s_-]*key|seed(?:[\s_-]*phrase)?|mnemonic|"
+    r"api[\s_-]*key|api[\s_-]*token|access[\s_-]*token|auth[\s_-]*token|"
+    r"x[\s_-]*token|authorization|password|passwd"
+    r")([\"']?\s*[:=]\s*)"
     r"(\"(?:\\.|[^\"\\\n\r])*(?:\"|(?=\n|\r|$))"
     r"|'(?:\\.|[^'\\\n\r])*(?:'|(?=\n|\r|$))"
-    r"|[^\s,\"'}]+)"
+    r"|(?:bearer|basic)\s+[^\s,\"'&}\]]+"
+    r"|[^\s,\"'&}\]]+)"
 )
+_URL_USERINFO_RE = re.compile(r"(?i)\b((?:https?|wss?|grpcs?)://)[^/@\s]+@")
 _BASE58_TOKEN_RE = re.compile(
     r"(?<![1-9A-HJ-NP-Za-km-z])[1-9A-HJ-NP-Za-km-z]{32,128}"
     r"(?![1-9A-HJ-NP-Za-km-z])"
 )
+_INVALID_BASE58_MESSAGE = "secret must be 32 to 128 Base58 characters"
 
 
 def register_secret(secret: str | bytes | bytearray) -> None:
-    """Register a secret digest so its exact value is redacted from logs.
+    """Register a Base58 secret digest for exact-value log redaction.
 
     Only a SHA-256 digest is retained; the logger never stores the secret.
     """
     if isinstance(secret, str):
-        secret_bytes = secret.encode("utf-8")
-    elif isinstance(secret, (bytes, bytearray)):
-        secret_bytes = bytes(secret)
+        secret_text = secret
+    elif isinstance(secret, bytes | bytearray):
+        secret_text = bytes(secret).decode("ascii")
     else:
         raise TypeError("secret must be text or bytes")
-    if not secret_bytes:
+    if not secret_text:
         raise ValueError("secret cannot be empty")
+    if _BASE58_TOKEN_RE.fullmatch(secret_text) is None:
+        raise ValueError(_INVALID_BASE58_MESSAGE)
     with _LOCK:
-        _SECRET_DIGESTS.add(sha256(secret_bytes).digest())
+        _SECRET_DIGESTS.add(sha256(secret_text.encode("ascii")).digest())
 
 
 def _redact(value: Any) -> str:
     text = str(value)
+    text = _URL_USERINFO_RE.sub(r"\1[REDACTED]@", text)
     text = _SENSITIVE_LABEL_RE.sub(r"\1\2[REDACTED]", text)
 
     def redact_registered(match: re.Match[str]) -> str:
@@ -68,28 +87,41 @@ def _redact(value: Any) -> str:
     return _BASE58_TOKEN_RE.sub(redact_registered, text)
 
 
-def _sanitize_argument(value: Any) -> Any:
+def _sanitize_argument(value: Any, _seen: set[int] | None = None) -> Any:
     value_type = type(value)
     if value_type.__name__ == "Keypair" and value_type.__module__.startswith("solders"):
         return "[REDACTED]"
     if value_type.__name__ == "Wallet" and value_type.__module__ == "core.wallet":
         fingerprint = getattr(value, "public_key_fingerprint", None)
         return str(fingerprint) if fingerprint is not None else "[WALLET]"
-    if isinstance(value, Mapping):
-        sanitized: dict[Any, Any] = {}
-        for key, item in value.items():
-            normalized_key = re.sub(r"[\s_-]", "", str(key)).lower()
-            sanitized[key] = (
-                "[REDACTED]"
-                if normalized_key in _SENSITIVE_FIELD_NAMES
-                else _sanitize_argument(item)
-            )
-        return sanitized
-    if isinstance(value, tuple):
-        return tuple(_sanitize_argument(item) for item in value)
-    if isinstance(value, list):
-        return [_sanitize_argument(item) for item in value]
-    return value
+    if not isinstance(value, Mapping | tuple | list):
+        return value
+
+    seen = set() if _seen is None else _seen
+    value_id = id(value)
+    if value_id in seen:
+        return "[RECURSIVE]"
+    seen.add(value_id)
+    try:
+        if isinstance(value, Mapping):
+            sanitized: dict[Any, Any] = {}
+            for key, item in value.items():
+                normalized_key = re.sub(r"[\s_-]", "", str(key)).lower()
+                is_sensitive = (
+                    normalized_key in _SENSITIVE_FIELD_NAMES
+                    or normalized_key.endswith(_SENSITIVE_FIELD_SUFFIXES)
+                )
+                sanitized[key] = (
+                    "[REDACTED]" if is_sensitive else _sanitize_argument(item, seen)
+                )
+            result: Any = sanitized
+        elif isinstance(value, tuple):
+            result = tuple(_sanitize_argument(item, seen) for item in value)
+        else:
+            result = [_sanitize_argument(item, seen) for item in value]
+    finally:
+        seen.remove(value_id)
+    return result
 
 
 class _CorrelationFilter(logging.Filter):

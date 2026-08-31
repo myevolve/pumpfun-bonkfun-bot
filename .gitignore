@@ -2,6 +2,10 @@ trades/*
 # written by learning-examples/extract_blocksubscribe_transactions.py
 blocksubscribe-transactions/
 
+# Live bot state and structured logs are local operational data.
+.state/
+logs/
+
 .vscode
 .pylintrc
 .ruff_cache
@@ -134,6 +138,8 @@ celerybeat.pid
 
 # Environments
 .env
+.env.*
+!.env.example
 .venv
 env/
 venv/
