@@ -14,6 +14,13 @@ from core.client import TransactionStatus, TransactionSubmissionUnknown
 from core.execution_policy import ExecutionBlocked, ExecutionMode, ExecutionPolicy
 from core.pubkeys import SystemAddresses
 from interfaces.core import Platform, TokenInfo
+from platforms.pumpfun.curve_manager import PumpFunCurveManager
+from platforms.pumpfun.fee_schedule import (
+    PumpFeeConfig,
+    PumpFees,
+    PumpFeeSnapshot,
+    PumpFeeTier,
+)
 from trading.base import TradeResult
 from trading.platform_aware import PlatformAwareBuyer, PlatformAwareSeller
 from trading.position import ExitReason, Position
@@ -33,6 +40,11 @@ def _token(platform: Platform) -> TokenInfo:
         pool_state=pool if platform is Platform.LETS_BONK else None,
         quote_mint=SystemAddresses.WSOL_MINT,
         quote_token_program_id=SystemAddresses.TOKEN_PROGRAM,
+        creator=Pubkey.new_unique() if platform is Platform.PUMP_FUN else None,
+        virtual_token_reserves=100_000_000,
+        virtual_quote_reserves=40_000_000,
+        real_token_reserves=50_000_000,
+        token_total_supply=1_000_000_000,
         token_program_id=SystemAddresses.TOKEN_PROGRAM,
         base_decimals=6,
         quote_decimals=9,
@@ -69,6 +81,54 @@ def test_pumpfun_fast_path_requires_consistent_quote_program_metadata() -> None:
 
     token.quote_mint = SystemAddresses.WSOL_MINT
     assert buyer._can_skip_refresh(token) is True
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "virtual_token_reserves",
+        "virtual_quote_reserves",
+        "real_token_reserves",
+        "token_total_supply",
+    ),
+)
+def test_pumpfun_fast_path_requires_complete_event_reserves(field: str) -> None:
+    token = _token(Platform.PUMP_FUN)
+    token.state_from_event = True
+    token.curve_complete = False
+    buyer = object.__new__(PlatformAwareBuyer)
+    buyer.trust_create_event = True
+    setattr(token, field, None)
+
+    assert buyer._can_skip_refresh(token) is False
+
+
+def test_recovery_round_trip_preserves_large_event_reserve_integers() -> None:
+    token = _token(Platform.PUMP_FUN)
+    values = {
+        "virtual_token_reserves": 9_007_199_254_740_999,
+        "virtual_quote_reserves": 9_007_199_254_740_997,
+        "real_token_reserves": 9_007_199_254_740_995,
+        "token_total_supply": 9_007_199_254_741_001,
+    }
+    for field, value in values.items():
+        setattr(token, field, value)
+
+    payload = json.loads(json.dumps(UniversalTrader._token_to_dict(token)))
+    recovered = UniversalTrader._token_from_dict(payload)
+
+    for field, value in values.items():
+        assert payload[field] == value
+        assert getattr(recovered, field) == value
+
+
+@pytest.mark.parametrize("malformed", [True, -1, 1.5, "1", 2**64])
+def test_recovery_rejects_malformed_event_reserves(malformed: object) -> None:
+    payload = UniversalTrader._token_to_dict(_token(Platform.PUMP_FUN))
+    payload["virtual_token_reserves"] = malformed
+
+    with pytest.raises(ValueError, match="virtual_token_reserves"):
+        UniversalTrader._token_from_dict(payload)
 
 
 @pytest.mark.parametrize(
@@ -318,7 +378,14 @@ class _CurveManager:
             SystemAddresses.TOKEN_PROGRAM,
         )
 
-    async def calculate_sell_amount_out(self, pool: Pubkey, amount: int) -> int:
+    async def calculate_sell_amount_out(
+        self,
+        pool: Pubkey,
+        amount: int,
+        *,
+        pool_state: dict | None = None,
+    ) -> int:
+        del pool, amount, pool_state
         return 1_000_000_000
 
 
@@ -355,6 +422,73 @@ class _SuccessfulBuyClient(_Client):
         **kwargs,
     ) -> tuple[int, int]:
         return 2_000_000, 1_000_000
+
+
+class _FastFeeSchedule:
+    def __init__(
+        self,
+        snapshot: PumpFeeSnapshot,
+        error: RuntimeError | None = None,
+    ) -> None:
+        self.snapshot = snapshot
+        self.error = error
+
+    def require_snapshot(self) -> PumpFeeSnapshot:
+        if self.error is not None:
+            raise self.error
+        return self.snapshot
+
+
+class _RecordingBuyBuilder(_InstructionBuilder):
+    buy_uses_exact_output = True
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    async def build_buy_instruction(
+        self,
+        token_info: TokenInfo,
+        user: Pubkey,
+        amount_in: int,
+        minimum_amount_out: int,
+        address_provider: object,
+    ) -> list:
+        self.calls.append(
+            {
+                "token_info": token_info,
+                "user": user,
+                "amount_in": amount_in,
+                "minimum_amount_out": minimum_amount_out,
+                "address_provider": address_provider,
+            }
+        )
+        return []
+
+
+def _pump_fee_manager(
+    *,
+    regular: PumpFees,
+    stable: PumpFees,
+    error: RuntimeError | None = None,
+) -> PumpFunCurveManager:
+    config = PumpFeeConfig(
+        bump=1,
+        admin=Pubkey.new_unique(),
+        flat_fees=regular,
+        regular_tiers=(PumpFeeTier(0, regular),),
+        stable_tiers=(PumpFeeTier(0, stable),),
+        digest="fast-path-fees",
+    )
+    snapshot = PumpFeeSnapshot(
+        config=config,
+        observed_at=1.0,
+        attested_at=1.0,
+    )
+    return PumpFunCurveManager(
+        SimpleNamespace(),  # type: ignore[arg-type]
+        SimpleNamespace(),  # type: ignore[arg-type]
+        fee_schedule=_FastFeeSchedule(snapshot, error),  # type: ignore[arg-type]
+    )
 
 
 class _UnknownSubmissionClient(_Client):
@@ -623,10 +757,15 @@ async def test_pumpfun_usdc_buy_has_no_native_receipt_destinations(
     token.quote_decimals = 6
     token.state_from_event = True
     token.curve_complete = False
+    builder = _RecordingBuyBuilder()
+    curve_manager = _pump_fee_manager(
+        regular=PumpFees(0, 10_000, 0),
+        stable=PumpFees(0, 0, 0),
+    )
     implementations = SimpleNamespace(
         address_provider=_AddressProviderWithoutCreatorVault(),
-        instruction_builder=_InstructionBuilder(),
-        curve_manager=_CurveManager(),
+        instruction_builder=builder,
+        curve_manager=curve_manager,
     )
     monkeypatch.setattr(
         "trading.platform_aware.get_platform_implementations",
@@ -638,6 +777,7 @@ async def test_pumpfun_usdc_buy_has_no_native_receipt_destinations(
         keypair=object(),
         get_associated_token_address=lambda mint, program: Pubkey.new_unique(),
     )
+    client.execution_policy = SimpleNamespace(mode=ExecutionMode.LIVE)
     buyer = PlatformAwareBuyer(
         client,
         wallet,
@@ -652,6 +792,150 @@ async def test_pumpfun_usdc_buy_has_no_native_receipt_destinations(
 
     assert result.success is True
     assert client.submission_kwargs["receipt_destinations"] is None
+    assert builder.calls[0]["minimum_amount_out"] == 2_000_000
+
+
+@pytest.mark.asyncio
+async def test_pumpfun_buy_enforces_allowlist_after_authoritative_refresh(
+    monkeypatch,
+) -> None:
+    token = _token(Platform.PUMP_FUN)
+    token.quote_mint = None
+    token.state_from_event = False
+    builder = _RecordingBuyBuilder()
+    curve_manager = _pump_fee_manager(
+        regular=PumpFees(0, 80, 20),
+        stable=PumpFees(0, 50, 10),
+    )
+    pool_state = {
+        "complete": False,
+        "quote_mint": SystemAddresses.USDC_MINT,
+        "base_decimals": 6,
+        "quote_decimals": 6,
+        "virtual_token_reserves": 100_000_000,
+        "virtual_quote_reserves": 40_000_000,
+        "real_token_reserves": 50_000_000,
+        "token_total_supply": 1_000_000_000,
+        "_pump_fee_snapshot": curve_manager.fee_schedule.snapshot,
+    }
+    monkeypatch.setattr(
+        "trading.platform_aware._read_pool_state_with_retry",
+        AsyncMock(
+            return_value=(pool_state, SystemAddresses.TOKEN_PROGRAM),
+        ),
+    )
+    monkeypatch.setattr(
+        "trading.platform_aware.get_platform_implementations",
+        lambda platform, client: SimpleNamespace(
+            address_provider=_AddressProviderWithoutCreatorVault(),
+            instruction_builder=builder,
+            curve_manager=curve_manager,
+        ),
+    )
+    buyer = PlatformAwareBuyer(
+        _SuccessfulBuyClient(),
+        SimpleNamespace(
+            pubkey=Pubkey.new_unique(),
+            keypair=object(),
+            get_associated_token_address=lambda mint, program: Pubkey.new_unique(),
+        ),
+        _PriorityFees(),
+        amount=0.1,
+        extreme_fast_token_amount=2,
+        extreme_fast_mode=True,
+        quote_amounts={SystemAddresses.USDC_MINT: 1.0},
+        allowed_quote_mints={SystemAddresses.WSOL_MINT},
+    )
+
+    result = await buyer.execute(token)
+
+    assert result.success is False
+    assert result.error_message == (
+        f"Quote mint {SystemAddresses.USDC_MINT} is not allowed"
+    )
+    assert token.quote_mint == SystemAddresses.USDC_MINT
+    assert builder.calls == []
+
+
+@pytest.mark.asyncio
+async def test_pumpfun_fast_buy_skips_target_above_fee_aware_quote_cap(
+    monkeypatch,
+) -> None:
+    token = _token(Platform.PUMP_FUN)
+    token.state_from_event = True
+    token.curve_complete = False
+    builder = _RecordingBuyBuilder()
+    implementations = SimpleNamespace(
+        address_provider=_AddressProviderWithoutCreatorVault(),
+        instruction_builder=builder,
+        curve_manager=_pump_fee_manager(
+            regular=PumpFees(0, 10_000, 0),
+            stable=PumpFees(0, 0, 0),
+        ),
+    )
+    monkeypatch.setattr(
+        "trading.platform_aware.get_platform_implementations",
+        lambda platform, client: implementations,
+    )
+    buyer = PlatformAwareBuyer(
+        _SuccessfulBuyClient(),
+        SimpleNamespace(
+            pubkey=Pubkey.new_unique(),
+            keypair=object(),
+            get_associated_token_address=lambda mint, program: Pubkey.new_unique(),
+        ),
+        _PriorityFees(),
+        amount=0.0005,
+        extreme_fast_token_amount=2,
+        extreme_fast_mode=True,
+    )
+
+    result = await buyer.execute(token)
+
+    assert result.success is False
+    assert "exceeds configured quote cap" in result.error_message
+    assert builder.calls == []
+
+
+@pytest.mark.asyncio
+async def test_pumpfun_fast_buy_refuses_expired_fee_snapshot_without_rpc(
+    monkeypatch,
+) -> None:
+    token = _token(Platform.PUMP_FUN)
+    token.state_from_event = True
+    token.curve_complete = False
+    builder = _RecordingBuyBuilder()
+    implementations = SimpleNamespace(
+        address_provider=_AddressProviderWithoutCreatorVault(),
+        instruction_builder=builder,
+        curve_manager=_pump_fee_manager(
+            regular=PumpFees(0, 95, 30),
+            stable=PumpFees(0, 50, 10),
+            error=RuntimeError("Pump fee schedule attestation has expired"),
+        ),
+    )
+    monkeypatch.setattr(
+        "trading.platform_aware.get_platform_implementations",
+        lambda platform, client: implementations,
+    )
+    buyer = PlatformAwareBuyer(
+        _SuccessfulBuyClient(),
+        SimpleNamespace(
+            pubkey=Pubkey.new_unique(),
+            keypair=object(),
+            get_associated_token_address=lambda mint, program: Pubkey.new_unique(),
+        ),
+        _PriorityFees(),
+        amount=0.1,
+        extreme_fast_token_amount=2,
+        extreme_fast_mode=True,
+    )
+
+    result = await buyer.execute(token)
+
+    assert result.success is False
+    assert "attestation has expired" in result.error_message
+    assert builder.calls == []
 
 
 def _lifecycle_trader(*, yolo_mode: bool) -> UniversalTrader:
@@ -687,6 +971,47 @@ def _lifecycle_trader(*, yolo_mode: bool) -> UniversalTrader:
     trader._process_token_queue = process_queue
     trader._reconcile_unresolved_buys = reconcile
     return trader
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "execution_mode",
+    [ExecutionMode.DRY_RUN, ExecutionMode.LIVE],
+)
+async def test_pump_fee_attestation_failure_prevents_processing_and_listening(
+    execution_mode: ExecutionMode,
+) -> None:
+    trader = _lifecycle_trader(yolo_mode=True)
+    trader.platform = Platform.PUMP_FUN
+    trader.execution_policy = SimpleNamespace(mode=execution_mode)
+    events: list[str] = []
+
+    async def prepare_live_execution() -> None:
+        events.append("prepare")
+        raise RuntimeError("fee attestation failed")
+
+    async def process_queue() -> None:
+        events.append("process")
+
+    async def listen(*args, **kwargs) -> None:
+        events.append("listen")
+
+    async def cleanup() -> None:
+        events.append("cleanup")
+
+    trader.platform_implementations = SimpleNamespace(
+        curve_manager=SimpleNamespace(
+            prepare_live_execution=prepare_live_execution,
+        )
+    )
+    trader._process_token_queue = process_queue
+    trader.token_listener = SimpleNamespace(listen_for_tokens=listen)
+    trader._cleanup_resources = cleanup
+
+    with pytest.raises(RuntimeError, match="fee attestation failed"):
+        await trader.start()
+
+    assert events == ["prepare", "cleanup"]
 
 
 @pytest.mark.asyncio
@@ -922,6 +1247,13 @@ async def test_cleanup_attempts_all_resources_and_raises_first_failure(
     trader.cleanup_with_priority_fee = False
     trader.cleanup_force_close_with_burn = False
 
+    async def close_curve_manager() -> None:
+        events.append("curve manager close")
+
+    trader.platform_implementations = SimpleNamespace(
+        curve_manager=SimpleNamespace(close=close_curve_manager)
+    )
+
     async def cleanup_post_session(*args, **kwargs) -> None:
         events.append("post-session cleanup")
         raise RuntimeError("post-session cleanup failed")
@@ -948,6 +1280,7 @@ async def test_cleanup_attempts_all_resources_and_raises_first_failure(
         "journal",
         "background cancelled",
         "post-session cleanup",
+        "curve manager close",
         "client close",
         "ledger close",
     ]
@@ -1136,6 +1469,28 @@ async def test_handle_token_propagates_fatal_buy_exception_and_keeps_recovery() 
         await trader._handle_token(token)
 
     assert trader._pending_recovery_tokens == [token]
+
+
+@pytest.mark.asyncio
+async def test_handle_token_defers_unverified_pump_quote_allowlist_check() -> None:
+    trader = object.__new__(UniversalTrader)
+    token = _token(Platform.PUMP_FUN)
+    token.quote_mint = None
+    token.state_from_event = False
+    trader.platform = Platform.PUMP_FUN
+    trader.allowed_quote_mints = {SystemAddresses.USDC_MINT}
+    trader.quote_amounts = {SystemAddresses.USDC_MINT: 1.0}
+    trader.extreme_fast_mode = True
+    trader._pending_recovery_tokens = []
+    trader._write_recovery_journal = lambda: None
+    trader.buyer = SimpleNamespace(
+        execute=AsyncMock(side_effect=RuntimeError("authoritative refresh reached"))
+    )
+
+    with pytest.raises(RuntimeError, match="authoritative refresh reached"):
+        await trader._handle_token(token)
+
+    trader.buyer.execute.assert_awaited_once_with(token)
 
 
 @pytest.mark.asyncio

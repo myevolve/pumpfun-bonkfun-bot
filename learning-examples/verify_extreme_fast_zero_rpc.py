@@ -45,6 +45,13 @@ from core.pubkeys import WSOL_MINT, SystemAddresses  # noqa: E402
 from interfaces.core import Platform, TokenInfo  # noqa: E402
 from platforms.pumpfun.address_provider import PumpFunAddressProvider  # noqa: E402
 from platforms.pumpfun.event_parser import PumpFunEventParser  # noqa: E402
+from platforms.pumpfun.fee_schedule import (  # noqa: E402
+    PumpFeeConfig,
+    PumpFees,
+    PumpFeeSnapshot,
+    PumpFeeTier,
+    quote_buy_exact_out,
+)
 from platforms.pumpfun.pumpportal_processor import (  # noqa: E402
     PumpFunPumpPortalProcessor,
 )
@@ -61,6 +68,21 @@ FIXTURE = (
 
 PROVIDER = PumpFunAddressProvider()
 TRADER = Pubkey.from_string("11111111111111111111111111111112")
+
+
+_FEES = PumpFees(lp_fee_bps=0, protocol_fee_bps=95, creator_fee_bps=30)
+_FEE_SNAPSHOT = PumpFeeSnapshot(
+    config=PumpFeeConfig(
+        bump=1,
+        admin=TRADER,
+        flat_fees=_FEES,
+        regular_tiers=(PumpFeeTier(0, _FEES),),
+        stable_tiers=(PumpFeeTier(0, _FEES),),
+        digest="offline-attested-fees",
+    ),
+    observed_at=0.0,
+    attested_at=0.0,
+)
 
 
 def _event_parser() -> PumpFunEventParser:
@@ -190,6 +212,8 @@ class _CountingCurveManager:
 
     def __init__(self) -> None:
         self.calls = 0
+        self.quote_calls = 0
+        self.fee_schedule = SimpleNamespace(require_snapshot=lambda: _FEE_SNAPSHOT)
 
     async def get_pool_state_and_token_program(
         self,
@@ -199,11 +223,17 @@ class _CountingCurveManager:
     ) -> tuple[dict, Pubkey]:
         self.calls += 1
         state = {
-            "creator": str(TRADER),
+            "creator": TRADER,
             "is_mayhem_mode": False,
             "is_cashback_coin": False,
             "complete": False,
             "quote_mint": WSOL_MINT,
+            "virtual_token_reserves": 1_000_000_000_000,
+            "virtual_quote_reserves": 5_000_000_000,
+            "real_token_reserves": 800_000_000_000,
+            "real_quote_reserves": 10_000_000_000,
+            "token_total_supply": 1_000_000_000_000,
+            "_pump_fee_snapshot": _FEE_SNAPSHOT,
         }
         return state, SystemAddresses.TOKEN_2022_PROGRAM
 
@@ -214,12 +244,33 @@ class _CountingCurveManager:
     ) -> dict:
         self.calls += 1
         return {
-            "creator": str(TRADER),
+            "creator": TRADER,
             "is_mayhem_mode": False,
             "is_cashback_coin": False,
             "complete": False,
             "quote_mint": WSOL_MINT,
+            "virtual_token_reserves": 1_000_000_000_000,
+            "virtual_quote_reserves": 5_000_000_000,
+            "real_token_reserves": 800_000_000_000,
+            "real_quote_reserves": 10_000_000_000,
+            "token_total_supply": 1_000_000_000_000,
+            "_pump_fee_snapshot": _FEE_SNAPSHOT,
         }
+
+    async def calculate_buy_cost(
+        self,
+        _pool: Pubkey,
+        token_amount_out: int,
+        *,
+        pool_state: dict | None = None,
+    ) -> int:
+        self.quote_calls += 1
+        state = pool_state or await self.get_pool_state(_pool)
+        return quote_buy_exact_out(
+            state,
+            token_amount_out,
+            _FEE_SNAPSHOT,
+        ).amount_in_raw
 
 
 def _stub_implementations(curve_manager: object) -> SimpleNamespace:
@@ -239,6 +290,7 @@ def _stub_implementations(curve_manager: object) -> SimpleNamespace:
 
     instruction_builder = SimpleNamespace(
         build_buy_instruction=build_buy_instruction,
+        buy_uses_exact_output=True,
         get_required_accounts_for_buy=lambda *_a, **_k: [],
         get_buy_compute_unit_limit=lambda _override: 100_000,
     )
@@ -322,7 +374,7 @@ def check_logs_listener_downgrades_and_refreshes() -> bool:
     )
     curve_manager = _CountingCurveManager()
     client, _result = _run_buy(token_info, curve_manager)
-    refreshed = curve_manager.calls >= 1 and len(client.sent) == 1
+    refreshed = curve_manager.calls == 1 and len(client.sent) == 1
     if not (downgraded and refreshed):
         print(
             f"    source={token_info.source} "
@@ -517,7 +569,7 @@ def check_pumpportal_buy_still_refreshes() -> bool:
     )
     curve_manager = _CountingCurveManager()
     client, _result = _run_buy(token_info, curve_manager)
-    ok = curve_manager.calls >= 1 and len(client.sent) == 1
+    ok = curve_manager.calls == 1 and len(client.sent) == 1
     if not ok:
         print(
             f"    curve_manager.calls={curve_manager.calls} "
@@ -534,9 +586,9 @@ def check_trust_flag_forces_refresh() -> bool:
         return False
     curve_manager = _CountingCurveManager()
     _client, _result = _run_buy(token_info, curve_manager, trust_create_event=False)
-    ok = curve_manager.calls >= 1
+    ok = curve_manager.calls == 1
     if not ok:
-        print(f"    curve_manager.calls={curve_manager.calls} (expected >=1)")
+        print(f"    curve_manager.calls={curve_manager.calls} (expected 1)")
     return ok
 
 

@@ -36,13 +36,19 @@ caps, and the separate `--authorize-live` runtime acknowledgement. Bulk startup
 never authorizes live bots. This README intentionally provides no copy-paste live
 command.
 
-**Current live capability boundary:** the bot refuses live pump.fun bonding-curve
-buys and sells because the current dynamic protocol and creator fee schedule is
-not yet sourced into its executable quote. It fails before submission rather
-than deriving a slippage minimum from a pre-fee quote. The pump.fun dry-run,
-decoder, and offline verification paths remain available. LetsBonk execution is
-limited to authoritative `blocks` or `geyser` events, funding-state constant
-product pools, and the supported WSOL quote asset.
+**Current live capability boundary:** pump.fun bonding-curve buys and sells
+support only SOL/WSOL- and USDC-paired coins. Before any live listener or queue
+processor starts, the bot strictly decodes the Pump FeeConfig account and
+attests every regular and stable tier against the fee program's read-only
+`get_fees` instruction. Normal quotes batch the curve, mint where needed, and
+FeeConfig reads; verified CreateEvent fast-path quotes use event reserves plus
+the continuously refreshed, attested fee snapshot. Unknown quote assets,
+malformed or changed fee data, failed attestation, stale observations, and
+expired attestation all fail closed before submission. There is no hardcoded
+fee fallback. Dry-run initializes the same attested schedule so it exercises
+the executable quote path, while submission policy remains disabled. LetsBonk
+execution remains limited to authoritative `blocks` or `geyser` events,
+funding-state constant product pools, and WSOL.
 
 ---
 
@@ -152,12 +158,12 @@ For pump.fun, zero-RPC preparation is limited to authoritative, correlated
 **CreateEvent** observations. Normalized `geyser` and `blocks` transactions
 retain `state_from_event` and `metadata_verified` only when the event matches
 exactly one create instruction in the same successful transaction. Those
-retained fields include the canonical creator, mayhem/cashback flags, and quote
-mint, so instruction preparation needs no state RPC between detection and
-submission. This is an offline-verifiable latency contract; it does not bypass
-the pump.fun live fee-capability boundary above. That is the point of the mode;
-a single account read costs ~40–50 ms even on a good endpoint, a tenth of a
-slot.
+retained fields include the canonical creator, mayhem/cashback flags, quote
+mint, and raw curve reserves. The fee-aware quote combines them with the
+already-attested in-memory FeeConfig snapshot, so no trade-triggered RPC is
+needed between detection and submission. A background poll keeps that snapshot
+fresh; a stale or expired snapshot blocks the buy. This is an
+offline-verifiable latency contract, not a fee or execution-policy bypass.
 
 `logsSubscribe` is deliberately **not** a zero-RPC source. Its notification has
 logs but no transaction instructions with which to correlate the CreateEvent,
@@ -166,23 +172,26 @@ and event-only quote state. A token detected by the `logs` listener must refresh
 curve state before a buy even when its logs contain a valid CreateEvent.
 
 The `pumpportal` listener also cannot take the zero-RPC path because its payload
-carries none of the authoritative curve state. It performs one batched account
-read (bonding curve + mint in a single slot-consistent `getMultipleAccounts`)
-before buying. If required curve state is not readable within
-`trade.curve_refresh_budget` seconds (default 2.0), the token is **skipped**: a
-buy built from guessed accounts reverts on-chain with `NotAuthorized` (6000) or
-`ConstraintSeeds` (2006) and still costs the fee. The same refresh-and-skip rule
-applies to incomplete, uncorrelated, or downgraded event data.
+carries none of the authoritative curve state. It performs one slot-consistent
+batched read of the bonding curve, mint, and FeeConfig before buying. If the
+required state is not readable within `trade.curve_refresh_budget` seconds
+(default 2.0), the token is **skipped**: a buy built from guessed accounts
+reverts on-chain with `NotAuthorized` (6000) or `ConstraintSeeds` (2006) and
+still costs the fee. The same refresh-and-skip rule applies to incomplete,
+uncorrelated, or downgraded event data.
 
 `trade.trust_create_event: false` turns the zero-RPC path off and forces the
 pre-buy read even for verified `geyser` and `blocks` CreateEvents. This is the
 more conservative fallback if pump.fun changes what the CreateEvent carries; it
 still cannot guarantee a live transaction will succeed.
 
-Machine checks: `learning-examples/verify_extreme_fast_zero_rpc.py` (the
-zero-RPC contract per listener) and
-`learning-examples/verify_pumpportal_buy_path.py` (the refresh/skip path).
-Neither moves funds.
+Machine checks: `learning-examples/verify_pump_fee_schedule.py` (strict layout,
+integer quote vectors, every-tier `get_fees` attestation, plus optional
+read-only WSOL/USDC mainnet simulations with `--live`; that mode requires an
+exported `SOLANA_NODE_RPC_ENDPOINT` and reads neither `.env` nor a private key),
+`learning-examples/verify_extreme_fast_zero_rpc.py` (the zero-RPC contract per
+listener), and `learning-examples/verify_pumpportal_buy_path.py` (the
+refresh/skip path). None moves funds.
 
 ### Non-SOL quote assets
 

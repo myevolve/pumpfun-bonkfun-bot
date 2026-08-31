@@ -484,11 +484,6 @@ def validate_config(config: dict[str, Any]) -> None:
 
     platform_str = config.get("platform", Platform.PUMP_FUN.value)
     platform = Platform(platform_str)
-    if policy.mode is ExecutionMode.LIVE and platform is Platform.PUMP_FUN:
-        raise ValueError(
-            "pump_fun live execution is unavailable until dynamic protocol "
-            "and creator fees are sourced into executable quotes"
-        )
     validate_platform_config(config, platform)
 
 

@@ -7,10 +7,11 @@ Offline machine checks, no network and no funds moved:
   B. In extreme_fast_mode, a buy is SKIPPED when the curve state cannot be
      read within the refresh budget, instead of submitting a buy built from
      listener-guessed defaults (the "racing a doomed buy" failure).
-  C. The curve refresh requests the exact ordered batch [curve, mint] in one
-     slot-consistent getMultipleAccounts round trip, rejects a wrong-order
-     mutation, and corrects token_program_id (pumpportal cannot know it and
-     guesses Token-2022; legacy coins are SPL Token).
+  C. The curve refresh requests the exact ordered batch
+     [curve, mint, FeeConfig] in one slot-consistent getMultipleAccounts round
+     trip, rejects a wrong-order mutation, and corrects token_program_id
+     (pumpportal cannot know it and guesses Token-2022; legacy coins are SPL
+     Token).
 
 Usage:
     uv run learning-examples/verify_pumpportal_buy_path.py
@@ -33,7 +34,10 @@ from spl.token.instructions import get_associated_token_address  # noqa: E402
 from core.pubkeys import WSOL_MINT, SystemAddresses  # noqa: E402
 from core.transaction_state import TransactionOutcome, TransactionStatus  # noqa: E402
 from interfaces.core import Platform, TokenInfo  # noqa: E402
-from platforms.pumpfun.address_provider import PumpFunAddressProvider  # noqa: E402
+from platforms.pumpfun.address_provider import (  # noqa: E402
+    PumpFunAddresses,
+    PumpFunAddressProvider,
+)
 from platforms.pumpfun.curve_manager import PumpFunCurveManager  # noqa: E402
 from platforms.pumpfun.pumpportal_processor import (  # noqa: E402
     PumpFunPumpPortalProcessor,
@@ -153,6 +157,18 @@ def _stub_implementations(curve_manager: object) -> SimpleNamespace:
         )
         return [Instruction(PROVIDER.program_id, b"", accounts)]
 
+    if not hasattr(curve_manager, "calculate_buy_cost"):
+
+        async def calculate_buy_cost(
+            _pool: Pubkey,
+            _token_amount_raw: int,
+            *,
+            pool_state: dict | None = None,  # noqa: ARG001
+        ) -> int:
+            return 100_000
+
+        curve_manager.calculate_buy_cost = calculate_buy_cost
+
     instruction_builder = SimpleNamespace(
         build_buy_instruction=build_buy_instruction,
         get_required_accounts_for_buy=lambda *_a, **_k: [],
@@ -239,21 +255,25 @@ def check_b_skips_when_curve_unreadable() -> bool:
 
 
 def check_b_still_buys_when_curve_readable() -> bool:
-    """B guard: a readable curve still reaches submission."""
+    """B guard: readable curve and mint accounts still reach submission."""
 
     class Readable:
-        async def get_pool_state(
+        async def get_pool_state_and_token_program(
             self,
             _pool: Pubkey,
+            _mint: Pubkey,
             commitment: str | None = None,  # noqa: ARG002
-        ) -> dict:
-            return {
-                "creator": str(TRADER),
-                "is_mayhem_mode": False,
-                "is_cashback_coin": False,
-                "quote_mint": WSOL_MINT,
-                "complete": False,
-            }
+        ) -> tuple[dict, Pubkey]:
+            return (
+                {
+                    "creator": str(TRADER),
+                    "is_mayhem_mode": False,
+                    "is_cashback_coin": False,
+                    "quote_mint": WSOL_MINT,
+                    "complete": False,
+                },
+                SystemAddresses.TOKEN_2022_PROGRAM,
+            )
 
     client = _StubClient()
     buyer = _make_buyer(client, curve_refresh_budget=0.3)
@@ -268,10 +288,11 @@ def check_b_still_buys_when_curve_readable() -> bool:
 
 
 def check_c_curve_manager_batch_read() -> bool:
-    """C: curve manager requests exactly [curve, mint] in one batch call."""
+    """C: curve manager requests exactly [curve, mint, FeeConfig] in one batch."""
     creator = TRADER
     curve = PROVIDER.derive_pool_address(MINT)
-    expected_keys = [curve, MINT]
+    fee_config = PumpFunAddresses.find_fee_config()
+    expected_keys = [curve, MINT, fee_config]
     curve_bytes = _fabricated_curve_bytes(creator, is_mayhem=True)
 
     class BatchClient:
@@ -286,12 +307,11 @@ def check_c_curve_manager_batch_read() -> bool:
             requested = list(pubkeys)
             self.requested_batches.append(requested)
             if requested != expected_keys:
-                raise AssertionError(
-                    f"expected exact batch [curve, mint] {expected_keys}, got {requested}"
-                )
+                raise AssertionError((expected_keys, requested))
             return [
                 SimpleNamespace(data=curve_bytes, owner=PROVIDER.program_id),
                 SimpleNamespace(data=b"", owner=SystemAddresses.TOKEN_PROGRAM),
+                SimpleNamespace(data=b"", owner=PROVIDER.program_id),
             ]
 
     # Prove the recording stub rejects the same addresses in the wrong order.
@@ -306,6 +326,12 @@ def check_c_curve_manager_batch_read() -> bool:
     manager = PumpFunCurveManager(
         client, get_idl_manager().get_parser(Platform.PUMP_FUN)
     )
+
+    class FeeSchedule:
+        async def accept_account(self, _account: object) -> object:
+            return object()
+
+    manager.fee_schedule = FeeSchedule()
     if not hasattr(manager, "get_pool_state_and_token_program"):
         print("    PumpFunCurveManager.get_pool_state_and_token_program missing")
         return False
@@ -385,7 +411,7 @@ def main() -> int:
         ("B: unreadable curve -> buy skipped", check_b_skips_when_curve_unreadable),
         ("B: readable curve -> buy proceeds", check_b_still_buys_when_curve_readable),
         (
-            "C: exact [curve, mint] batch; wrong order rejected",
+            "C: exact [curve, mint, FeeConfig] batch; wrong order rejected",
             check_c_curve_manager_batch_read,
         ),
         (

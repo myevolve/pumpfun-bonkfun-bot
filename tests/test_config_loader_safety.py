@@ -298,7 +298,7 @@ def test_live_config_requires_finite_budgets() -> None:
     assert not policy.can_submit
 
 
-def test_pump_live_mode_is_rejected_until_dynamic_fees_are_sourced() -> None:
+def test_pump_live_mode_is_accepted_for_runtime_fee_attestation() -> None:
     config = minimal_config()
     config["execution"] = {
         "mode": "live",
@@ -307,8 +307,10 @@ def test_pump_live_mode_is_rejected_until_dynamic_fees_are_sourced() -> None:
         "max_total_fee_lamports": 50_000,
     }
 
-    with pytest.raises(ValueError, match="dynamic protocol and creator fees"):
-        validate_config(config)
+    validate_config(config)
+
+    policy = ExecutionPolicy.from_config(config)
+    assert policy.mode is ExecutionMode.LIVE
 
 
 def test_loaded_config_is_dry_run_without_explicit_execution_mode(

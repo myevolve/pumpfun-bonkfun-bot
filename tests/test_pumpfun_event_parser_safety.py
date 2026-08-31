@@ -227,6 +227,10 @@ def test_valid_pump_fixture_retains_provenance_and_derived_accounts() -> None:
     )
     assert token.associated_bonding_curve is not None
     assert token.creator_vault is not None
+    assert isinstance(token.virtual_token_reserves, int)
+    assert isinstance(token.virtual_quote_reserves, int)
+    assert isinstance(token.real_token_reserves, int)
+    assert isinstance(token.token_total_supply, int)
 
 
 def test_create_event_without_program_invocation_provenance_is_rejected() -> None:
@@ -261,7 +265,14 @@ def test_create_event_under_foreign_program_invocation_is_rejected() -> None:
 
 @pytest.mark.parametrize(
     "missing_field",
-    ("is_cashback_enabled", "quote_mint", "virtual_quote_reserves"),
+    (
+        "is_cashback_enabled",
+        "quote_mint",
+        "virtual_token_reserves",
+        "virtual_quote_reserves",
+        "real_token_reserves",
+        "token_total_supply",
+    ),
 )
 def test_incomplete_optional_create_event_is_retained_but_untrusted(
     missing_field: str,
@@ -279,6 +290,39 @@ def test_incomplete_optional_create_event_is_retained_but_untrusted(
     assert token.state_from_event is False
     if missing_field == "quote_mint":
         assert token.quote_mint is None
+    assert token.virtual_token_reserves is None
+    assert token.virtual_quote_reserves is None
+    assert token.real_token_reserves is None
+    assert token.token_total_supply is None
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "virtual_token_reserves",
+        "virtual_quote_reserves",
+        "real_token_reserves",
+        "token_total_supply",
+    ),
+)
+def test_malformed_create_event_reserves_clear_all_fast_path_state(
+    field: str,
+) -> None:
+    mint = Pubkey.new_unique()
+    fields = _canonical_event_fields(mint)
+    fields[field] = True
+    parser = PumpFunEventParser(_StaticEventIDLParser(fields))  # type: ignore[arg-type]
+
+    token = parser.parse_token_creation_from_logs(
+        _pump_event_logs(), signature="malformed-reserves"
+    )
+
+    assert token is not None
+    assert token.state_from_event is False
+    assert token.virtual_token_reserves is None
+    assert token.virtual_quote_reserves is None
+    assert token.real_token_reserves is None
+    assert token.token_total_supply is None
 
 
 def test_multiple_create_events_in_one_transaction_are_rejected() -> None:

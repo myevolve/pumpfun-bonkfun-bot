@@ -44,6 +44,20 @@ async def test_launchlab_quotes_are_capped_by_real_reserves() -> None:
 
 
 @pytest.mark.asyncio
+async def test_launchlab_quotes_reuse_provided_pool_state() -> None:
+    manager = object.__new__(LetsBonkCurveManager)
+    manager.get_pool_state = AsyncMock(
+        side_effect=AssertionError("provided state must avoid an RPC read")
+    )
+    state = _executable_pool_state()
+    pool = Pubkey.new_unique()
+
+    assert await manager.calculate_buy_amount_out(pool, 1_000, pool_state=state) == 2
+    assert await manager.calculate_sell_amount_out(pool, 1_000, pool_state=state) == 3
+    manager.get_pool_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_launchlab_exhausted_and_invalid_real_reserves_fail_safe() -> None:
     manager = object.__new__(LetsBonkCurveManager)
     manager.get_pool_state = AsyncMock(return_value=_executable_pool_state(real_base=0))

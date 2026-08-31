@@ -21,6 +21,13 @@ from core.pubkeys import (
 )
 from interfaces.core import CurveManager, Platform
 from platforms.pumpfun.address_provider import PumpFunAddresses
+from platforms.pumpfun.fee_schedule import (
+    PumpFeeSchedule,
+    PumpFeeSnapshot,
+    quote_buy_exact_in,
+    quote_buy_exact_out,
+    quote_sell_exact_in,
+)
 from utils.idl_parser import IDLParser
 from utils.logger import get_logger
 
@@ -64,15 +71,27 @@ def _require_raw_u64(value: object, name: str, *, positive: bool = False) -> int
 class PumpFunCurveManager(CurveManager):
     """Pump.Fun implementation of CurveManager interface using IDL-based decoding."""
 
-    def __init__(self, client: SolanaClient, idl_parser: IDLParser):
+    def __init__(
+        self,
+        client: SolanaClient,
+        idl_parser: IDLParser,
+        *,
+        fee_schedule: PumpFeeSchedule | None = None,
+    ):
         """Initialize pump.fun curve manager with injected IDL parser.
 
         Args:
             client: Solana RPC client
             idl_parser: Pre-loaded IDL parser for pump.fun platform
+            fee_schedule: Optional injected dynamic-fee schedule
         """
         self.client = client
         self._idl_parser = idl_parser
+        self.fee_schedule = fee_schedule or PumpFeeSchedule(
+            client,
+            PumpFunAddresses.find_fee_config(),
+            PumpFunAddresses.PROGRAM,
+        )
 
         logger.info("Pump.Fun curve manager initialized with injected IDL parser")
 
@@ -108,33 +127,27 @@ class PumpFunCurveManager(CurveManager):
     async def get_pool_state(
         self, pool_address: Pubkey, commitment: str | None = None
     ) -> dict[str, Any]:
-        """Get the current state of a pump.fun bonding curve.
-
-        Args:
-            pool_address: Address of the bonding curve
-            commitment: Optional commitment override. Pass "processed" right
-                after a geyser/logs event so the BC is readable in the same
-                slot it was created (default: confirmed, ~1-2 slot lag).
-
-        Returns:
-            Dictionary containing bonding curve state data
-        """
+        """Read curve and fee config in one slot-consistent RPC batch."""
+        fee_config = PumpFunAddresses.find_fee_config()
         try:
-            account = await self.client.get_account_info(
-                pool_address, commitment=commitment
+            curve_account, fee_account = await self.client.get_multiple_accounts(
+                [pool_address, fee_config],
+                commitment=commitment,
             )
-            account_data = self._validated_curve_data(account, pool_address)
+            account_data = self._validated_curve_data(curve_account, pool_address)
+            if fee_account is None:
+                raise ValueError(f"FeeConfig account {fee_config} not found")
+            snapshot = await self.fee_schedule.accept_account(fee_account)
             curve_state_data = self._decode_curve_state_with_idl(account_data)
-
+            curve_state_data["_pump_fee_snapshot"] = snapshot
             return curve_state_data
-
-        except Exception as e:
-            logger.exception("Failed to get curve state")
-            raise ValueError(f"Invalid bonding curve state: {e!s}")
+        except Exception as exc:
+            logger.exception("Failed to get curve and fee state")
+            raise ValueError(f"Invalid bonding curve state: {exc!s}") from exc
 
     async def get_pool_state_and_token_program(
         self, pool_address: Pubkey, mint: Pubkey, commitment: str | None = None
-    ) -> tuple[dict[str, Any], Pubkey | None]:
+    ) -> tuple[dict[str, Any], Pubkey]:
         """Read curve state and the mint's owning token program together.
 
         One getMultipleAccounts round trip, so both values come from the same
@@ -148,11 +161,11 @@ class PumpFunCurveManager(CurveManager):
             commitment: Optional commitment override (see get_pool_state)
 
         Returns:
-            Tuple of (decoded curve state, token program id or None if the
-            mint account was not readable)
+            Tuple of (decoded curve state, authoritative token program id)
 
         Raises:
-            ValueError: If the bonding curve account is missing or undecodable
+            ValueError: If the bonding curve or mint account is missing or
+                undecodable
         """
         if (
             pool_address
@@ -161,23 +174,50 @@ class PumpFunCurveManager(CurveManager):
             )[0]
         ):
             raise ValueError("Bonding curve address does not match the mint")
+        fee_config = PumpFunAddresses.find_fee_config()
         try:
-            curve_account, mint_account = await self.client.get_multiple_accounts(
-                [pool_address, mint], commitment=commitment
+            (
+                curve_account,
+                mint_account,
+                fee_account,
+            ) = await self.client.get_multiple_accounts(
+                [pool_address, mint, fee_config],
+                commitment=commitment,
             )
-        except Exception as e:
-            logger.exception("Failed to read curve and mint accounts")
-            raise ValueError(f"Invalid bonding curve state: {e!s}") from e  # noqa: TRY003
+        except Exception as exc:
+            logger.exception("Failed to read curve, mint, and fee accounts")
+            raise ValueError(f"Invalid bonding curve state: {exc!s}") from exc
 
         curve_data = self._validated_curve_data(curve_account, pool_address)
         curve_state_data = self._decode_curve_state_with_idl(curve_data)
+        if fee_account is None:
+            raise ValueError(f"FeeConfig account {fee_config} not found")
+        snapshot = await self.fee_schedule.accept_account(fee_account)
+        curve_state_data["_pump_fee_snapshot"] = snapshot
         if mint_account is None:
-            return curve_state_data, None
+            raise ValueError(f"Mint account {mint} not found")
 
         token_program = getattr(mint_account, "owner", None)
         if token_program not in _SUPPORTED_TOKEN_PROGRAMS:
             raise ValueError(f"Mint account {mint} has an unsupported owner")
         return curve_state_data, token_program
+
+    async def prepare_live_execution(self) -> None:
+        """Start an attested fee snapshot before Pump quote processing."""
+        await self.fee_schedule.start()
+
+    async def close(self) -> None:
+        """Stop dynamic-fee polling."""
+        await self.fee_schedule.close()
+
+    def _fee_snapshot_for_state(self, pool_state: dict[str, Any]) -> PumpFeeSnapshot:
+        attached = pool_state.get("_pump_fee_snapshot")
+        if not isinstance(attached, PumpFeeSnapshot):
+            raise ValueError("Pump.fun pool state has no fee snapshot")
+        current = self.fee_schedule.require_snapshot()
+        if attached.config.digest != current.config.digest:
+            raise ValueError("Pump.fun pool state fee snapshot is obsolete")
+        return current
 
     @staticmethod
     def _require_incomplete_curve(state: dict[str, Any]) -> None:
@@ -205,67 +245,54 @@ class PumpFunCurveManager(CurveManager):
         return pool_state["price_per_token"]
 
     async def calculate_buy_amount_out(
-        self, pool_address: Pubkey, amount_in: int
+        self,
+        pool_address: Pubkey,
+        amount_in: int,
+        *,
+        pool_state: dict[str, Any] | None = None,
     ) -> int:
-        """Calculate a pre-fee token-output upper bound in raw units.
-
-        The dynamic protocol and creator fee schedule lives outside the bonding
-        curve account. This helper therefore does not pretend a zero-fee quote
-        is an executable minimum; callers must apply a sourced fee schedule and
-        slippage before instruction construction.
-        """
+        """Calculate fee-adjusted raw token output for a quote budget."""
         amount_in = _require_raw_u64(amount_in, "amount_in", positive=True)
-        pool_state = await self.get_pool_state(pool_address)
-        self._require_incomplete_curve(pool_state)
-        virtual_token_reserves = _require_raw_u64(
-            pool_state["virtual_token_reserves"],
-            "virtual_token_reserves",
-            positive=True,
-        )
-        virtual_quote_reserves = _require_raw_u64(
-            pool_state["virtual_quote_reserves"],
-            "virtual_quote_reserves",
-            positive=True,
-        )
-        real_token_reserves = _require_raw_u64(
-            pool_state["real_token_reserves"], "real_token_reserves"
-        )
+        if pool_state is None:
+            pool_state = await self.get_pool_state(pool_address)
+        snapshot = self._fee_snapshot_for_state(pool_state)
+        return quote_buy_exact_in(pool_state, amount_in, snapshot).amount_out_raw
 
-        tokens_out = (amount_in * virtual_token_reserves) // (
-            virtual_quote_reserves + amount_in
+    async def calculate_buy_cost(
+        self,
+        pool_address: Pubkey,
+        token_amount_out: int,
+        *,
+        pool_state: dict[str, Any] | None = None,
+    ) -> int:
+        """Calculate fee-adjusted raw quote input for an exact token output."""
+        token_amount_out = _require_raw_u64(
+            token_amount_out,
+            "token_amount_out",
+            positive=True,
         )
-        return min(tokens_out, real_token_reserves)
+        if pool_state is None:
+            pool_state = await self.get_pool_state(pool_address)
+        snapshot = self._fee_snapshot_for_state(pool_state)
+        return quote_buy_exact_out(
+            pool_state,
+            token_amount_out,
+            snapshot,
+        ).amount_in_raw
 
     async def calculate_sell_amount_out(
-        self, pool_address: Pubkey, amount_in: int
+        self,
+        pool_address: Pubkey,
+        amount_in: int,
+        *,
+        pool_state: dict[str, Any] | None = None,
     ) -> int:
-        """Calculate a pre-fee quote-output upper bound in raw units.
-
-        Output is capped by the real quote reserves available on the curve.
-        Dynamic protocol and creator fees must be sourced separately before
-        deriving an executable minimum output.
-        """
+        """Calculate fee-adjusted raw quote output for a token input."""
         amount_in = _require_raw_u64(amount_in, "amount_in", positive=True)
-        pool_state = await self.get_pool_state(pool_address)
-        self._require_incomplete_curve(pool_state)
-        virtual_token_reserves = _require_raw_u64(
-            pool_state["virtual_token_reserves"],
-            "virtual_token_reserves",
-            positive=True,
-        )
-        virtual_quote_reserves = _require_raw_u64(
-            pool_state["virtual_quote_reserves"],
-            "virtual_quote_reserves",
-            positive=True,
-        )
-        real_quote_reserves = _require_raw_u64(
-            pool_state["real_quote_reserves"], "real_quote_reserves"
-        )
-
-        quote_out = (amount_in * virtual_quote_reserves) // (
-            virtual_token_reserves + amount_in
-        )
-        return min(quote_out, real_quote_reserves)
+        if pool_state is None:
+            pool_state = await self.get_pool_state(pool_address)
+        snapshot = self._fee_snapshot_for_state(pool_state)
+        return quote_sell_exact_in(pool_state, amount_in, snapshot).amount_out_raw
 
     async def get_reserves(self, pool_address: Pubkey) -> tuple[int, int]:
         """Get current bonding curve reserves.

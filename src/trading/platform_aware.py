@@ -7,6 +7,7 @@ import asyncio
 from decimal import ROUND_DOWN, Decimal
 from math import isfinite
 from time import monotonic
+from typing import Any
 
 from solders.instruction import Instruction
 from solders.pubkey import Pubkey
@@ -16,7 +17,6 @@ from core.client import (
     TransactionStatus,
     TransactionSubmissionUnknown,
 )
-from core.execution_policy import ExecutionMode
 from core.priority_fee.manager import PriorityFeeManager
 from core.pubkeys import (
     TOKEN_DECIMALS,
@@ -157,6 +157,16 @@ def _slippage_bps(slippage: float) -> int:
     return int((decimal_slippage * 10_000).to_integral_value(rounding=ROUND_DOWN))
 
 
+def _is_raw_u64(value: object, *, positive: bool = False) -> bool:
+    """Return whether a value is a non-boolean raw u64 integer."""
+    minimum = 1 if positive else 0
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and minimum <= value <= 0xFFFF_FFFF_FFFF_FFFF
+    )
+
+
 def _base_unit(token_info: TokenInfo) -> int:
     """Return the authoritative base-token unit for execution accounting."""
     decimals = token_info.base_decimals
@@ -172,22 +182,6 @@ def _base_unit(token_info: TokenInfo) -> int:
         )
     token_info.base_decimals = decimals
     return 10**decimals
-
-
-def _require_executable_quote_contract(
-    token_info: TokenInfo, client: SolanaClient
-) -> None:
-    """Reject live Pump.fun execution until its dynamic fees are sourced."""
-    policy = getattr(client, "execution_policy", None)
-    if (
-        token_info.platform is Platform.PUMP_FUN
-        and policy is not None
-        and policy.mode is ExecutionMode.LIVE
-    ):
-        raise RuntimeError(
-            "Pump.fun dynamic protocol and creator fees are unavailable; "
-            "refusing to derive an executable minimum from a pre-fee quote"
-        )
 
 
 async def _read_pool_state_with_retry(
@@ -328,6 +322,10 @@ def _apply_token_program(
     address_provider: AddressProvider,
 ) -> None:
     """Apply authoritative token-program metadata and validate mint-bound PDAs."""
+    if token_info.platform is Platform.PUMP_FUN and token_program is None:
+        raise ValueError(
+            f"Pump.fun mint account owner was not observed for {token_info.mint}"
+        )
     known_programs = (
         SystemAddresses.TOKEN_PROGRAM,
         SystemAddresses.TOKEN_2022_PROGRAM,
@@ -443,6 +441,7 @@ class PlatformAwareBuyer(Trader):
         quote_amounts: dict[Pubkey, float] | None = None,
         curve_refresh_budget: float = 2.0,
         *,
+        allowed_quote_mints: set[Pubkey] | None = None,
         trust_create_event: bool = True,
     ):
         """Initialize platform-aware token buyer.
@@ -462,6 +461,8 @@ class PlatformAwareBuyer(Trader):
                 for coins paired against something other than SOL. A coin whose
                 quote mint is absent from this map is skipped rather than
                 traded with a SOL-denominated amount.
+            allowed_quote_mints: Optional set of normalized quote mints permitted
+                for execution. Checked after authoritative refresh.
             curve_refresh_budget: Seconds to keep retrying the pre-buy curve
                 read before skipping the token. A buy built without fresh curve
                 state guesses fee_recipient/creator_vault and tends to revert
@@ -498,6 +499,9 @@ class PlatformAwareBuyer(Trader):
             WSOL_MINT: amount,
             **(quote_amounts or {}),
         }
+        self.allowed_quote_mints = (
+            frozenset(allowed_quote_mints) if allowed_quote_mints is not None else None
+        )
 
     def _resolve_quote_amount(self, quote_mint: Pubkey) -> float | None:
         """Get the configured spend amount for a quote mint.
@@ -539,6 +543,7 @@ class PlatformAwareBuyer(Trader):
         quote_mint: Pubkey | None = None
         zero_rpc_event_path = False
         native_receipt_destinations: tuple[Pubkey, ...] = ()
+        pool_state: dict[str, Any] | None = None
         try:
             # Get platform-specific implementations
             implementations = get_platform_implementations(
@@ -554,7 +559,7 @@ class PlatformAwareBuyer(Trader):
                 # detection and submission. Otherwise (pumpportal, old-format
                 # events) refresh from chain or skip.
                 if not self._can_skip_refresh(token_info):
-                    skip_reason = await self._refresh_curve_state(
+                    skip_reason, pool_state = await self._refresh_curve_state(
                         token_info, address_provider, curve_manager
                     )
                     if skip_reason is not None:
@@ -563,11 +568,13 @@ class PlatformAwareBuyer(Trader):
                             platform=token_info.platform,
                             error_message=skip_reason,
                         )
+                    pool_address = self._get_pool_address(token_info, address_provider)
                 else:
                     _require_recorded_executable_state(token_info)
                     zero_rpc_event_path = True
                     quote_mint = normalize_quote_mint(token_info.quote_mint)
                     pool_address = self._get_pool_address(token_info, address_provider)
+                    pool_state = self._event_pool_state(token_info, curve_manager)
             else:
                 # Get pool address based on platform using platform-agnostic method
                 pool_address = self._get_pool_address(token_info, address_provider)
@@ -616,6 +623,16 @@ class PlatformAwareBuyer(Trader):
             if quote_mint is None:
                 quote_mint = normalize_quote_mint(token_info.quote_mint)
 
+            if (
+                self.allowed_quote_mints is not None
+                and quote_mint not in self.allowed_quote_mints
+            ):
+                return TradeResult(
+                    success=False,
+                    platform=token_info.platform,
+                    error_message=f"Quote mint {quote_mint} is not allowed",
+                )
+
             # A coin paired against a quote asset we have no configured amount
             # for cannot be traded — spending `amount` of it would be a
             # different order of magnitude entirely.
@@ -633,7 +650,10 @@ class PlatformAwareBuyer(Trader):
             quote_unit = quote_units_per_token(quote_mint)
             quote_label = _quote_symbol(quote_mint)
             quote_amount_raw = _to_raw_units(quote_amount, quote_unit, "quote amount")
-            _require_executable_quote_contract(token_info, self.client)
+            quoted_quote_amount_raw = quote_amount_raw
+            max_quote_amount_raw = (
+                quote_amount_raw * (10_000 + self.slippage_bps) + 9_999
+            ) // 10_000
 
             # Use the venue's nonlinear exact-in quote whenever a curve read is
             # available. A marginal spot price is not a safe execution floor.
@@ -643,10 +663,35 @@ class PlatformAwareBuyer(Trader):
                     _base_unit(token_info),
                     "extreme fast token amount",
                 )
+                if token_info.platform is Platform.PUMP_FUN:
+                    calculate_buy_cost = getattr(
+                        curve_manager, "calculate_buy_cost", None
+                    )
+                    if not callable(calculate_buy_cost):
+                        raise RuntimeError(
+                            "Pump.fun curve manager has no exact-output fee quote"
+                        )
+                    quoted_quote_amount_raw = await calculate_buy_cost(
+                        pool_address,
+                        expected_token_amount_raw,
+                        pool_state=pool_state,
+                    )
+                    if quoted_quote_amount_raw > max_quote_amount_raw:
+                        return TradeResult(
+                            success=False,
+                            platform=token_info.platform,
+                            error_message=(
+                                "Fee-aware Pump.fun buy cost "
+                                f"{quoted_quote_amount_raw} exceeds configured "
+                                f"quote cap {max_quote_amount_raw}"
+                            ),
+                        )
             else:
                 expected_token_amount_raw = (
                     await curve_manager.calculate_buy_amount_out(
-                        pool_address, quote_amount_raw
+                        pool_address,
+                        quote_amount_raw,
+                        pool_state=pool_state,
                     )
                 )
                 if expected_token_amount_raw <= 0:
@@ -657,10 +702,7 @@ class PlatformAwareBuyer(Trader):
             )
             token_unit = _base_unit(token_info)
             token_amount = expected_token_amount_raw / token_unit
-            token_price_sol = quote_amount / token_amount
-            max_quote_amount_raw = (
-                quote_amount_raw * (10_000 + self.slippage_bps) + 9_999
-            ) // 10_000
+            token_price_sol = quoted_quote_amount_raw / quote_unit / token_amount
             builder_quote_amount_raw = (
                 quote_amount_raw
                 if token_info.platform is Platform.LETS_BONK
@@ -708,7 +750,8 @@ class PlatformAwareBuyer(Trader):
                 f"{token_info.platform.value}"
             )
             logger.info(
-                f"Total cost: {quote_amount:.6f} {quote_label} "
+                f"Total cost: {quoted_quote_amount_raw / quote_unit:.6f} "
+                f"{quote_label} "
                 f"(max: {max_quote_amount_raw / quote_unit:.6f} {quote_label})"
             )
 
@@ -885,6 +928,27 @@ class PlatformAwareBuyer(Trader):
             return derived
         raise ValueError(f"Unsupported trading platform: {token_info.platform!r}")
 
+    @staticmethod
+    def _event_pool_state(
+        token_info: TokenInfo,
+        curve_manager: object,
+    ) -> dict[str, Any]:
+        """Build a fee-quote state from one fully validated CreateEvent."""
+        fee_schedule = getattr(curve_manager, "fee_schedule", None)
+        require_snapshot = getattr(fee_schedule, "require_snapshot", None)
+        if not callable(require_snapshot):
+            raise RuntimeError("Pump.fun curve manager has no fee schedule")
+        return {
+            "virtual_token_reserves": token_info.virtual_token_reserves,
+            "virtual_quote_reserves": token_info.virtual_quote_reserves,
+            "real_token_reserves": token_info.real_token_reserves,
+            "token_total_supply": token_info.token_total_supply,
+            "complete": token_info.curve_complete,
+            "creator": token_info.creator,
+            "quote_mint": token_info.quote_mint,
+            "_pump_fee_snapshot": require_snapshot(),
+        }
+
     def _can_skip_refresh(self, token_info: TokenInfo) -> bool:
         """Whether the pre-buy curve read can be skipped entirely.
 
@@ -907,11 +971,22 @@ class PlatformAwareBuyer(Trader):
             ).token_program
         except ValueError:
             return False
+        virtual_token_reserves = token_info.virtual_token_reserves
+        virtual_quote_reserves = token_info.virtual_quote_reserves
+        real_token_reserves = token_info.real_token_reserves
+        token_total_supply = token_info.token_total_supply
         return (
             token_info.platform is Platform.PUMP_FUN
             and self.trust_create_event
             and token_info.state_from_event
             and token_info.curve_complete is False
+            and isinstance(token_info.creator, Pubkey)
+            and _is_raw_u64(virtual_token_reserves, positive=True)
+            and _is_raw_u64(virtual_quote_reserves, positive=True)
+            and _is_raw_u64(real_token_reserves)
+            and _is_raw_u64(token_total_supply, positive=True)
+            and real_token_reserves <= virtual_token_reserves
+            and real_token_reserves <= token_total_supply
             and token_info.quote_token_program_id == expected_quote_program
             and token_info.token_program_id
             in {
@@ -925,7 +1000,7 @@ class PlatformAwareBuyer(Trader):
         token_info: TokenInfo,
         address_provider: AddressProvider,
         curve_manager: object,
-    ) -> str | None:
+    ) -> tuple[str | None, dict[str, Any] | None]:
         """Refresh mayhem/cashback/creator/quote_mint/token program from chain.
 
         Listeners that guess these (pumpportal carries none of them) produce
@@ -940,9 +1015,8 @@ class PlatformAwareBuyer(Trader):
             curve_manager: Platform curve manager
 
         Returns:
-            None on success; on failure a reason to skip the buy — a buy built
-            from listener-guessed defaults tends to revert on-chain
-            (issue #170: 0x1770 / 0x7d6 / pool 3012), which still costs the fee
+            ``(None, state)`` on success; on failure ``(reason, None)`` so a
+            buy built from listener-guessed defaults is never submitted.
         """
         try:
             pool_address = self._get_pool_address(token_info, address_provider)
@@ -957,11 +1031,12 @@ class PlatformAwareBuyer(Trader):
             )
             _record_executable_state(token_info, pool_state)
         except (TypeError, ValueError) as exc:
-            return f"Pool is not executable ({exc}); skipping buy"
+            return f"Pool is not executable ({exc}); skipping buy", None
         except Exception as exc:  # noqa: BLE001
             return (
                 f"Curve state unreadable within {self.curve_refresh_budget:.1f}s "
-                f"({exc}); skipping buy rather than submitting with guessed accounts"
+                f"({exc}); skipping buy rather than submitting with guessed accounts",
+                None,
             )
 
         token_info.is_mayhem_mode = pool_state.get(
@@ -991,7 +1066,7 @@ class PlatformAwareBuyer(Trader):
             token_info.creator_vault = derive_creator_vault(new_creator)
         _apply_token_program(token_info, fresh_token_program, address_provider)
         _sync_letsbonk_execution_metadata(token_info, pool_state, address_provider)
-        return None
+        return None, pool_state
 
     def _get_sol_destination(
         self, token_info: TokenInfo, address_provider: AddressProvider
@@ -1200,12 +1275,13 @@ class PlatformAwareSeller(Trader):
             else:
                 token_balance = token_amount_raw
             token_balance_decimal = token_balance / _base_unit(token_info)
-            _require_executable_quote_contract(token_info, self.client)
 
             quote_method = getattr(curve_manager, "calculate_sell_amount_out", None)
             if quote_method is not None:
                 expected_quote_output_raw = await quote_method(
-                    pool_address, token_balance
+                    pool_address,
+                    token_balance,
+                    pool_state=pool_state,
                 )
             elif token_price is not None:
                 expected_quote_output_raw = _to_raw_units(

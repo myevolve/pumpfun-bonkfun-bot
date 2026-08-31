@@ -61,13 +61,21 @@ def _same_creation(left: TokenInfo, right: TokenInfo) -> bool:
     return True
 
 
+def _clear_event_reserves(token_info: TokenInfo) -> None:
+    """Remove reserve fields that are authoritative only on a trusted event."""
+    token_info.virtual_token_reserves = None
+    token_info.virtual_quote_reserves = None
+    token_info.real_token_reserves = None
+    token_info.token_total_supply = None
+
+
 def _downgrade_unverified_log_token(token_info: TokenInfo) -> TokenInfo:
     """Prevent an uncorrelated logs-only observation from taking zero-RPC state."""
     token_info.state_from_event = False
     token_info.metadata_verified = False
     token_info.quote_mint = None
     token_info.quote_token_program_id = None
-    token_info.virtual_quote_reserves = None
+    _clear_event_reserves(token_info)
     return token_info
 
 
@@ -75,6 +83,7 @@ def _downgrade_instruction_only_token(token_info: TokenInfo) -> TokenInfo:
     """Keep instruction-only creations from inheriting log-event verification."""
     token_info.state_from_event = False
     token_info.metadata_verified = False
+    _clear_event_reserves(token_info)
     return token_info
 
 

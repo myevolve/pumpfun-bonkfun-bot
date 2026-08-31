@@ -488,9 +488,16 @@ class PumpFunEventParser(EventParser):
                     )
 
                     state_from_event = complete_event_state
-                    virtual_quote_reserves = fields.get("virtual_quote_reserves")
-                    if not _is_u64(virtual_quote_reserves, positive=True):
+                    if complete_event_state:
+                        virtual_token_reserves = fields["virtual_token_reserves"]
+                        virtual_quote_reserves = fields["virtual_quote_reserves"]
+                        real_token_reserves = fields["real_token_reserves"]
+                        token_total_supply = fields["token_total_supply"]
+                    else:
+                        virtual_token_reserves = None
                         virtual_quote_reserves = None
+                        real_token_reserves = None
+                        token_total_supply = None
 
                     return TokenInfo(
                         name=fields["name"],
@@ -517,6 +524,9 @@ class PumpFunEventParser(EventParser):
                         quote_mint=quote_mint,
                         quote_token_program_id=quote_program,
                         virtual_quote_reserves=virtual_quote_reserves,
+                        virtual_token_reserves=virtual_token_reserves,
+                        real_token_reserves=real_token_reserves,
+                        token_total_supply=token_total_supply,
                         state_from_event=state_from_event,
                         curve_complete=False,
                         creation_timestamp=monotonic(),

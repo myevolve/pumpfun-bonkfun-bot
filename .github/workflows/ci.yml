@@ -57,6 +57,7 @@ jobs:
           uv run learning-examples/verify_create_v2_optional_args.py
           uv run learning-examples/verify_pumpportal_buy_path.py
           uv run learning-examples/verify_extreme_fast_zero_rpc.py
+          uv run learning-examples/verify_pump_fee_schedule.py
           uv run learning-examples/verify_tx_status_checks.py
           uv run learning-examples/verify_tp_sl_exit_price.py
 
