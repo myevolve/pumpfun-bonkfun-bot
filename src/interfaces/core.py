@@ -54,14 +54,16 @@ class TokenInfo:
     # SOL, which is what buy_v2/sell_v2 expect to be passed.
     quote_mint: Pubkey | None = None
     quote_token_program_id: Pubkey | None = None
+    virtual_token_reserves: int | None = None
     virtual_quote_reserves: int | None = None
+    real_token_reserves: int | None = None
+    token_total_supply: int | None = None
 
-    # True when creator, mayhem/cashback flags and quote_mint were read from
-    # the on-chain CreateEvent (canonical at create time), letting
-    # extreme_fast_mode skip the pre-buy curve refresh entirely — zero RPC
-    # calls between detection and submission. Listeners that guess any of
-    # these (pumpportal) or read them from user-supplied instruction args
-    # must leave it False.
+    # True when creator, mayhem/cashback flags, quote metadata, and the raw
+    # curve reserves above came from the on-chain CreateEvent (canonical at
+    # create time), letting extreme_fast_mode skip the pre-buy curve refresh
+    # entirely. Listeners that guess any field (pumpportal) or read creator
+    # from user-supplied instruction args must leave it False.
     state_from_event: bool = False
 
     # Metadata
@@ -308,13 +310,18 @@ class CurveManager(ABC):
 
     @abstractmethod
     async def calculate_buy_amount_out(
-        self, pool_address: Pubkey, amount_in: int
+        self,
+        pool_address: Pubkey,
+        amount_in: int,
+        *,
+        pool_state: dict[str, Any] | None = None,
     ) -> int:
         """Calculate expected tokens received for a buy operation.
 
         Args:
             pool_address: Address of the pool/curve
             amount_in: Amount of quote tokens to spend
+            pool_state: Optional state already fetched for this quote
 
         Returns:
             Expected amount of base tokens to receive
@@ -323,13 +330,18 @@ class CurveManager(ABC):
 
     @abstractmethod
     async def calculate_sell_amount_out(
-        self, pool_address: Pubkey, amount_in: int
+        self,
+        pool_address: Pubkey,
+        amount_in: int,
+        *,
+        pool_state: dict[str, Any] | None = None,
     ) -> int:
         """Calculate expected quote tokens received for a sell operation.
 
         Args:
             pool_address: Address of the pool/curve
             amount_in: Amount of base tokens to sell
+            pool_state: Optional state already fetched for this quote
 
         Returns:
             Expected amount of quote tokens to receive

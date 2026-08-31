@@ -318,6 +318,7 @@ class UniversalTrader:
                 extreme_fast_mode,
                 compute_units=self.compute_units,
                 quote_amounts=self.quote_amounts,
+                allowed_quote_mints=self.allowed_quote_mints,
                 curve_refresh_budget=curve_refresh_budget,
                 trust_create_event=trust_create_event,
             ),
@@ -478,6 +479,29 @@ class UniversalTrader:
         return value
 
     @staticmethod
+    def _validate_optional_raw_u64(
+        value: object,
+        field_name: str,
+        *,
+        positive: bool = False,
+    ) -> int | None:
+        """Preserve optional raw integers exactly across recovery JSON."""
+        if value is None:
+            return None
+        minimum = 1 if positive else 0
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not minimum <= value <= 0xFFFF_FFFF_FFFF_FFFF
+        ):
+            qualifier = "positive " if positive else ""
+            raise ValueError(
+                f"Recovery token {field_name} must be a {qualifier}raw u64 "
+                "integer or null"
+            )
+        return value
+
+    @staticmethod
     def _token_to_dict(token_info: TokenInfo) -> dict:
         """Serialize only authoritative TokenInfo fields needed for recovery."""
         pubkey_fields = (
@@ -503,7 +527,25 @@ class UniversalTrader:
             "platform": token_info.platform.value,
             "is_mayhem_mode": token_info.is_mayhem_mode,
             "is_cashback_coin": token_info.is_cashback_coin,
-            "virtual_quote_reserves": token_info.virtual_quote_reserves,
+            "virtual_token_reserves": UniversalTrader._validate_optional_raw_u64(
+                token_info.virtual_token_reserves,
+                "virtual_token_reserves",
+                positive=True,
+            ),
+            "virtual_quote_reserves": UniversalTrader._validate_optional_raw_u64(
+                token_info.virtual_quote_reserves,
+                "virtual_quote_reserves",
+                positive=True,
+            ),
+            "real_token_reserves": UniversalTrader._validate_optional_raw_u64(
+                token_info.real_token_reserves,
+                "real_token_reserves",
+            ),
+            "token_total_supply": UniversalTrader._validate_optional_raw_u64(
+                token_info.token_total_supply,
+                "token_total_supply",
+                positive=True,
+            ),
             "state_from_event": token_info.state_from_event,
             "curve_complete": token_info.curve_complete,
             "pool_tradeable": token_info.pool_tradeable,
@@ -574,6 +616,27 @@ class UniversalTrader:
         pool_status = payload.get("pool_status")
         if pool_status is not None and not isinstance(pool_status, str):
             raise ValueError("Recovery token pool_status must be a string or null")
+        event_reserves = {
+            "virtual_token_reserves": UniversalTrader._validate_optional_raw_u64(
+                payload.get("virtual_token_reserves"),
+                "virtual_token_reserves",
+                positive=True,
+            ),
+            "virtual_quote_reserves": UniversalTrader._validate_optional_raw_u64(
+                payload.get("virtual_quote_reserves"),
+                "virtual_quote_reserves",
+                positive=True,
+            ),
+            "real_token_reserves": UniversalTrader._validate_optional_raw_u64(
+                payload.get("real_token_reserves"),
+                "real_token_reserves",
+            ),
+            "token_total_supply": UniversalTrader._validate_optional_raw_u64(
+                payload.get("token_total_supply"),
+                "token_total_supply",
+                positive=True,
+            ),
+        }
         return TokenInfo(
             name=str(payload["name"]),
             symbol=str(payload["symbol"]),
@@ -581,7 +644,7 @@ class UniversalTrader:
             platform=Platform(payload["platform"]),
             is_mayhem_mode=payload.get("is_mayhem_mode", False),
             is_cashback_coin=payload.get("is_cashback_coin", False),
-            virtual_quote_reserves=payload.get("virtual_quote_reserves"),
+            **event_reserves,
             state_from_event=payload.get("state_from_event", False),
             curve_complete=payload.get("curve_complete"),
             pool_tradeable=payload.get("pool_tradeable"),
@@ -944,6 +1007,22 @@ class UniversalTrader:
         primary_traceback = None
 
         try:
+            if self.platform is Platform.PUMP_FUN:
+                curve_manager = getattr(
+                    getattr(self, "platform_implementations", None),
+                    "curve_manager",
+                    None,
+                )
+                prepare_fee_schedule = getattr(
+                    curve_manager,
+                    "prepare_live_execution",
+                    None,
+                )
+                if not callable(prepare_fee_schedule):
+                    raise RuntimeError(
+                        "Pump.fun execution requires fee attestation support"
+                    )
+                await prepare_fee_schedule()
             await self._resume_ledger_bound_submissions()
             await self._resume_staged_cleanups()
             processor_task = asyncio.create_task(self._process_token_queue())
@@ -1274,6 +1353,18 @@ class UniversalTrader:
             except BaseException as exc:
                 record_failure("post-session cleanup", exc)
 
+        curve_manager = getattr(
+            getattr(self, "platform_implementations", None),
+            "curve_manager",
+            None,
+        )
+        close_curve_manager = getattr(curve_manager, "close", None)
+        if callable(close_curve_manager):
+            try:
+                await close_curve_manager()
+            except BaseException as exc:
+                record_failure("curve manager close", exc)
+
         try:
             await self.solana_client.close()
         except BaseException as exc:
@@ -1405,24 +1496,32 @@ class UniversalTrader:
                 )
                 return True
 
-            # Skip coins paired against a quote asset we are not set up to
-            # trade. Cheaper to drop here than to fail a buy on-chain.
-            token_quote_mint = normalize_quote_mint(token_info.quote_mint)
-            if (
-                self.allowed_quote_mints is not None
-                and token_quote_mint not in self.allowed_quote_mints
-            ):
-                logger.info(
-                    f"Skipping {token_info.symbol} - quote mint {token_quote_mint} "
-                    f"not in allowed_quote_mints"
-                )
-                return True
-            if token_quote_mint not in self.quote_amounts:
-                logger.info(
-                    f"Skipping {token_info.symbol} - no buy amount configured for "
-                    f"quote mint {token_quote_mint}"
-                )
-                return True
+            # An unverified Pump listener value is only a hint. PumpPortal omits
+            # the quote mint entirely, and instruction-derived metadata can be
+            # stale; the buyer enforces both the amount map and allowlist after
+            # its authoritative curve refresh.
+            token_quote_mint = None
+            quote_metadata_is_authoritative = (
+                token_info.platform is not Platform.PUMP_FUN
+                or token_info.state_from_event
+            )
+            if quote_metadata_is_authoritative:
+                token_quote_mint = normalize_quote_mint(token_info.quote_mint)
+                if (
+                    self.allowed_quote_mints is not None
+                    and token_quote_mint not in self.allowed_quote_mints
+                ):
+                    logger.info(
+                        f"Skipping {token_info.symbol} - quote mint "
+                        f"{token_quote_mint} not in allowed_quote_mints"
+                    )
+                    return True
+                if token_quote_mint not in self.quote_amounts:
+                    logger.info(
+                        f"Skipping {token_info.symbol} - no buy amount configured "
+                        f"for quote mint {token_quote_mint}"
+                    )
+                    return True
             if not self.extreme_fast_mode:
                 await self._save_token_info(token_info)
                 logger.info(
@@ -1431,11 +1530,17 @@ class UniversalTrader:
                 )
                 await asyncio.sleep(self.wait_time_after_creation)
 
-            logger.info(
-                f"Buying {self.quote_amounts[token_quote_mint]:.6f} of quote "
-                f"{token_quote_mint} worth of {token_info.symbol} "
-                f"on {token_info.platform.value}..."
-            )
+            if token_quote_mint is None:
+                logger.info(
+                    f"Buying {token_info.symbol} on {token_info.platform.value} "
+                    "after authoritative quote-asset refresh..."
+                )
+            else:
+                logger.info(
+                    f"Buying {self.quote_amounts[token_quote_mint]:.6f} of quote "
+                    f"{token_quote_mint} worth of {token_info.symbol} "
+                    f"on {token_info.platform.value}..."
+                )
             token_key = str(token_info.mint)
             if all(
                 str(pending.mint) != token_key

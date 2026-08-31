@@ -60,6 +60,10 @@ def _pump_token(
         user=user,
         token_program_id=token_program_id,
         state_from_event=state_from_event,
+        virtual_token_reserves=101,
+        virtual_quote_reserves=102,
+        real_token_reserves=103,
+        token_total_supply=104,
         metadata_verified=metadata_verified,
     )
 
@@ -151,10 +155,18 @@ def test_pump_log_correlation_keeps_other_unique_create_instructions() -> None:
     assert tokens[0].name == "log token"
     assert tokens[0].state_from_event is True
     assert tokens[0].metadata_verified is True
+    assert tokens[0].virtual_token_reserves == 101
+    assert tokens[0].virtual_quote_reserves == 102
+    assert tokens[0].real_token_reserves == 103
+    assert tokens[0].token_total_supply == 104
     assert tokens[0].additional_data is not None
     assert tokens[0].additional_data["monitoring"]["instruction_index"] == 1
     assert tokens[1].name == "extra instruction token"
     assert tokens[1].state_from_event is False
     assert tokens[1].metadata_verified is False
+    assert tokens[1].virtual_token_reserves is None
+    assert tokens[1].virtual_quote_reserves is None
+    assert tokens[1].real_token_reserves is None
+    assert tokens[1].token_total_supply is None
     assert tokens[1].additional_data is not None
     assert tokens[1].additional_data["monitoring"]["instruction_index"] == 4

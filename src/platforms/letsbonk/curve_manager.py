@@ -231,11 +231,16 @@ class LetsBonkCurveManager(CurveManager):
         return price
 
     async def calculate_buy_amount_out(
-        self, pool_address: Pubkey, amount_in: int
+        self,
+        pool_address: Pubkey,
+        amount_in: int,
+        *,
+        pool_state: dict[str, Any] | None = None,
     ) -> int:
         """Calculate constant-product base output for raw quote input."""
         self._require_positive_raw_amount(amount_in, "amount_in")
-        pool_state = await self.get_pool_state(pool_address)
+        if pool_state is None:
+            pool_state = await self.get_pool_state(pool_address)
         fees = self._require_executable_state(pool_state)
         quote_in = self._deduct_transfer_fee(
             amount_in, pool_state["quote_transfer_fee"]
@@ -253,11 +258,16 @@ class LetsBonkCurveManager(CurveManager):
         )
 
     async def calculate_sell_amount_out(
-        self, pool_address: Pubkey, amount_in: int
+        self,
+        pool_address: Pubkey,
+        amount_in: int,
+        *,
+        pool_state: dict[str, Any] | None = None,
     ) -> int:
         """Calculate fee-adjusted quote output for raw base input."""
         self._require_positive_raw_amount(amount_in, "amount_in")
-        pool_state = await self.get_pool_state(pool_address)
+        if pool_state is None:
+            pool_state = await self.get_pool_state(pool_address)
         fees = self._require_executable_state(pool_state)
 
         effective_base_in = self._deduct_transfer_fee(
