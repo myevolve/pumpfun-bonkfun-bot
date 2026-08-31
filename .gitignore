@@ -5,6 +5,7 @@ blocksubscribe-transactions/
 # Live bot state and structured logs are local operational data.
 .state/
 logs/
+.worktrees/
 
 .vscode
 .pylintrc
