@@ -25,7 +25,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from dotenv import load_dotenv  # noqa: E402
-from solders.compute_budget import set_compute_unit_limit, set_compute_unit_price  # noqa: E402
+from solders.compute_budget import (  # noqa: E402
+    set_compute_unit_limit,
+    set_compute_unit_price,
+)
 from solders.message import Message  # noqa: E402
 from solders.transaction import Transaction  # noqa: E402
 
@@ -34,6 +37,7 @@ from core.priority_fee.manager import PriorityFeeManager  # noqa: E402
 from core.wallet import Wallet  # noqa: E402
 from interfaces.core import Platform, TokenInfo  # noqa: E402
 from monitoring.listener_factory import ListenerFactory  # noqa: E402
+from platforms import get_platform_implementations  # noqa: E402
 from trading.platform_aware import PlatformAwareBuyer  # noqa: E402
 
 load_dotenv(PROJECT_ROOT / ".env")
@@ -98,6 +102,7 @@ def install_simulation_hook(client: SolanaClient) -> dict:
         priority_fee=None,
         compute_unit_limit=None,
         account_data_size_limit=None,
+        **_submission_context: object,
     ):
         preamble = []
         if compute_unit_limit:
@@ -194,16 +199,24 @@ async def main() -> int:
         extreme_fast_mode=extreme_fast,
     )
 
-    if not extreme_fast:
-        # Mirror the bot's retries.wait_after_creation pause. Without it the
-        # curve read races the account's confirmation and fails before any
-        # instruction is built.
-        print(f"Waiting {CURVE_STABILIZE_SECONDS}s for the curve to stabilize...")
-        await asyncio.sleep(CURVE_STABILIZE_SECONDS)
-
+    curve_manager = get_platform_implementations(
+        Platform.PUMP_FUN, client
+    ).curve_manager
     try:
+        # UniversalTrader.start performs this attestation before starting its
+        # listener. Mirror that lifecycle so CreateEvent-backed simulations
+        # carry the same validated fee snapshot as the production buy path.
+        await curve_manager.prepare_live_execution()
+        if not extreme_fast:
+            # Mirror the bot's retries.wait_after_creation pause. Without it the
+            # curve read races the account's confirmation and fails before any
+            # instruction is built.
+            print(f"Waiting {CURVE_STABILIZE_SECONDS}s for the curve to stabilize...")
+            await asyncio.sleep(CURVE_STABILIZE_SECONDS)
+
         result = await buyer.execute(token_info)
     finally:
+        await curve_manager.close()
         await client.close()
 
     if not outcome:
