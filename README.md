@@ -47,6 +47,10 @@ quote assets, malformed or changed fee data, failed attestation, stale
 observations, and expired attestation all fail closed before submission. There
 is no hardcoded fee fallback. Dry-run initializes the same attested schedule so
 it exercises the executable quote path while submission remains disabled.
+The current FeeConfig layout includes the required trailing `exotic_flat_fees`
+tuple. It is decoded and validated, not treated as padding; this does **not**
+enable exotic quote assets such as PUMP. Unknown nonzero trailing data remains
+an error.
 LetsBonk execution remains limited to authoritative `blocks` or `geyser`
 events, funding-state constant product pools, and WSOL.
 
@@ -142,7 +146,16 @@ The YAML files are commented inline. The sections that matter most:
   `extreme_fast_mode` control execution. Extreme-fast mode skips the
   bonding-curve price read and buys a fixed token amount instead. See
   [Extreme fast mode](#extreme-fast-mode-zero-rpc-buys) for its two provenance
-  controls, `trust_create_event` and `curve_refresh_budget`.
+  controls, `trust_create_event` and `curve_refresh_budget`. For SOL-only
+  `tp_sl`, `take_profit_percentage` is a net ROI target: the executable
+  nonlinear sell quote must cover the confirmed buy spend, buy and sell
+  transaction fees, configured success-cleanup fee, and the requested return.
+  When configured, stop-loss and maximum-hold exits remain unconditional safety exits.
+  The position monitor's read-only price check rides out an RPC/DNS outage for
+  `price_read_outage_budget` seconds (default 300; 0 fails on the first error)
+  before the process fails closed with the position still journaled; data or
+  fee-attestation errors are never retried. A reverted exit sell is retried up
+  to `max_exit_sell_attempts` (default 3) per burst.
 - **`priority_fees`** — fixed or dynamic. Dynamic costs an extra RPC call, which slows the buy.
 - **`filters`** — `listener_type`, `max_token_age`, name/creator matching, `marry_mode` (buy only, never sell), `yolo_mode` (trade continuously).
 - **`retries`** — attempts and the wait windows around creation, buy, and the next token.
@@ -186,8 +199,10 @@ test a code change by starting a live bot.
    uv run src/bot_runner.py --config "$CONFIG" --status
    ```
 
-   Resolve or explicitly account for every active position, pending exit, and
-   unresolved buy. Do not delete either `.state` file to make the report clear.
+   Resolve or explicitly account for every active position, pending exit,
+   unresolved buy, `active_submissions` entry (a ledger wire with no terminal
+   outcome yet) and `pending_cleanups` entry (an unresolved or failed account
+   close). Do not delete any `.state` file to make the report clear.
 3. Run the networked, non-submitting readiness check:
 
    ```bash
@@ -206,6 +221,29 @@ test a code change by starting a live bot.
 
    `--authorize-live` is process-local; it is not stored in YAML. Starting
    without `--config` still refuses every live bot.
+
+   To resume automatic exits for journaled positions without opening a token
+   listener, preflight and start the same recovery-only mode:
+
+   ```bash
+   uv run src/bot_runner.py --config "$CONFIG" --preflight --resume-only
+   uv run src/bot_runner.py --config "$CONFIG" --resume-only --authorize-live
+   ```
+
+   Recovery-only mode rejects pending or unresolved buys and positions without
+   an automatic exit. Its preflight reserves the configured exit-attempt and
+   per-position cleanup fees, but requires no new-buy quote or rent budget.
+   Pre-existing staged cleanups remain durable and are deferred.
+
+   Run live processes under a supervisor that restarts on a non-zero exit
+   (`systemd` `Restart=on-failure`, or equivalent). The process fails closed
+   and exits `1` on a fatal condition — an RPC outage longer than
+   `price_read_outage_budget`, a fee-attestation mismatch, or an unresolved
+   buy that cannot be reconciled — with every position still journaled, so a
+   restart with the same flags resumes monitoring. Keep `enabled: true` while
+   supervised; a listener that dies (for example, Geyser reconnect exhaustion)
+   only stops new buys: held positions keep their tp/sl monitors and the
+   process exits with the listener error after the last one closes.
 5. During and after the run, use `--status`. Stop the listener before manual
    intervention. To liquidate one journaled mint without starting a listener:
 
@@ -271,6 +309,35 @@ exported `SOLANA_NODE_RPC_ENDPOINT` and reads neither `.env` nor a private key),
 `learning-examples/verify_extreme_fast_zero_rpc.py` (the zero-RPC contract per
 listener), and `learning-examples/verify_pumpportal_buy_path.py` (the
 refresh/skip path). None moves funds.
+
+### Graduated-coin cycle scanner (`src/cycles/`)
+
+A standalone read-mostly scanner for curve↔venue divergence on graduated pump.fun
+coins: `runner.py --event` decodes graduation events
+(`CompleteEvent`, `CompletePumpAmmMigrationEvent`, PumpSwap `CreatePoolEvent`)
+from the shared geyser stream and evaluates slot-scale; bare `runner.py` walks
+top-volume pools and evaluates every decodable venue pair. Both modes are
+log-only by default; **`--authorize-live` is required for submission**, and live
+submission stays bound to the AGENTS.md one-cycle rule.
+
+What is proven (2026-09-24): detection catches 12 graduations in 10 minutes; the
+`buy_v2` wire builds and simulates clean on a live Token-2022 coin (`err: None`,
+~114k CU — the scanner reads the mint account's owner because `create_v2` coins
+are Token-2022, and a hardcoded SPL program reverts with `IncorrectProgramId`);
+the pAMM sell wire is the audited builder; fees come from the attested fee
+program (curve 125 bps = proto 95 + creator 30; PumpSwap tiers by market cap),
+and the profit gate subtracts the on-chain fee floor plus the transaction budget
+(~58,000 lamports at 0.01 SOL buys) — a `min_profit` below that floor accepts
+certain-loss trades. CPMM pools quote with the pinned Raydium CPMM config
+offsets (trade fee @12, creator @108, fee flags from the pool state; `config+8`
+is bump/index, not a rate).
+
+Measured outcome (sealed under `state/paper-trading/deep-audit-20260924.json`
+and neighbors): every graduated coin scanned had a drained curve at evaluation
+time, so zero candidates cleared the all-in gate — the honest result, not a
+wiring gap. The divergence window is ~2 slots after pool creation and the
+measured economics say it is net-negative at retail latency. Use this scanner
+to observe, not to assume an edge.
 
 ### Non-SOL quote assets
 
@@ -338,14 +405,55 @@ saved fixtures beside them (`raw_*.json`), which are recaptured from mainnet
 rather than hand-edited—a stale fixture makes a working decoder look broken and
 a broken one look fine.
 
-Two offline verifiers and one RPC simulation are useful after a pump.fun
-program upgrade:
+These checks are useful after a pump.fun program upgrade:
 
 ```bash
 uv run learning-examples/verify_v2_account_layout.py    # offline: account layouts, PDAs, encoding
 uv run learning-examples/verify_tx_status_checks.py     # offline: examples check transaction meta.err
 uv run learning-examples/simulate_v2_trades.py <MINT>   # RPC simulation only; not proof of live success
+uv run learning-examples/simulate_bot_buy_path.py
+uv run learning-examples/simulate_bot_buy_path.py --no-extreme-fast
 ```
+
+Both simulation scripts use default (zero) signatures and read neither `.env`
+nor a wallet key. They default to public RPC/log subscriptions; exported
+`SOLANA_NODE_RPC_ENDPOINT` and `SOLANA_NODE_WSS_ENDPOINT` override those endpoints.
+Without a mint, the v2 script discovers one through the logs listener; an
+unsupported quote asset is rejected rather than traded with guessed fees.
+Public logs deliberately require a curve refresh: these live probes do not
+prove the verified-CreateEvent zero-RPC path, which the offline verifier covers.
+The v2 combined probe buys an exact quantity, sells **all** of it, and closes
+the newly opened base ATA. Success requires matching pre/post balances and
+closed-account state; pre-existing inventory or missing evidence fails the check.
+Other program-account rent can remain, so the reported native balance change is
+not automatically trading PnL. This is not a funded position, later-time exit,
+or live-inclusion test.
+
+`--configured-size --payer <PUBLIC_KEY>` selects the unchanged public readiness
+profile's exact 250,000-token quantity, 13,000,000-lamport quote ceiling, fixed
+priority fee and 140k/110k CU limits. It does not load that profile's provider
+file or signer. The combined transaction uses the sum of the two CU limits;
+its success does not prove a separately submitted sell fits 110k CU.
+
+Additional bounded checks:
+
+```bash
+uv run learning-examples/verify_durable_position_recovery.py
+uv run learning-examples/verify_durable_position_recovery.py --platform pump_fun
+uv run learning-examples/token-lifecycles/probe_creation_execution.py --self-check
+```
+
+The recovery check uses disposable state and synthetic identities in four fresh
+processes; network, signing and submission are blocked. Its default exercises
+LetsBonk unknown/reverted-exit recovery. `--platform pump_fun` verifies that
+unavailable fee accounts or native fee attestation refuse recovery before work
+admission, preserving durable rows. Neither proves ready/funded Pump.fun recovery
+or successful liquidation.
+The creation probe's explicit-provider mode observes verified Geyser CreateEvents,
+the actual buyer's unsigned simulation, and one fixed 10-second shadow mark.
+See [its commands and evidence](learning-examples/token-lifecycles/README.md#creation-slot-execution-continuation-2026-09-13).
+The later [configured-size proof and source-bound cohort](learning-examples/token-lifecycles/README.md#configured-size-and-source-bound-cohort-2026-09-13)
+remain separate from that ungated creation probe.
 
 Related docs: [Listening to pump.fun migrations](https://docs.chainstack.com/docs/solana-listening-to-pumpfun-migrations-to-raydium) · [Sniping with only logsSubscribe](https://docs.chainstack.com/docs/solana-listening-to-pumpfun-token-mint-using-only-logssubscribe)
 

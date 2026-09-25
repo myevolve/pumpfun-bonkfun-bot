@@ -6,10 +6,77 @@ Solana trading bot for pump.fun and letsbonk.fun. Snipes newly created tokens an
 
 ## Ground rules
 
-- **Never run a bot with real funds** to test a change. Use `learning-examples/`, or the simulation scripts below, which move no funds.
+- **Never run a bot with real funds** except for one explicitly requested, bounded live test using wallet `9MFfWXdTmtWi9CdnduujpKGVP2gCgyjtyD9e2XC7wLCe` and `.state/configs/live-readiness.yaml`.
+  The exception is valid only when all of the following hold:
+  - `execution.expected_wallet` resolves to that exact address; use only `.state/wallets/live-readiness.secrets` and never the root `.env`.
+  - Immediately before execution, `--status` shows no active, pending, unresolved, or reserved work and `--preflight` returns `"ready": true`.
+  - Do not raise any configured amount, fee, retry, or session cap. Require `--authorize-live`.
+  - Execute at most one buy and its configured bounded exit. Stop after closure or immediately on any failure, timeout, or unknown outcome; never continue to another token.
+  - Afterward, stop the bot, restore `enabled: false`, and verify wallet balance plus durable status and ledger state.
+  This exception applies to no other wallet.
 - **Never** touch `.env` or print its contents. `SOLANA_PRIVATE_KEY` is a live key.
 - Don't commit anything from `logs/`.
 - Test with a learning example before touching `src/`.
+
+## Infrastructure and research continuity
+
+- **Public on-chain data does not mean anonymous/free RPC.** A task named
+  "public discovery" can and should use the configured authenticated node.
+
+- **The user identifies the root `.env` as the existing RPC/Geyser settings
+  source.** Do not mistake a missing provider-only projection for missing
+  credentials or repeat credential-location searches. The prohibition on
+  opening `.env` still applies. If the user explicitly supplies a separate copy
+  such as `ENVFILE`, extract only allowlisted RPC/Geyser fields in an isolated
+  process, never display/load wallet fields, and keep the sensitive copy ignored.
+  Otherwise obtain an owner-created service-only projection; never ask for
+  credentials in chat or a different provider.
+
+- **Use the user's existing dedicated Chainstack Solana node and Yellowstone
+  Geyser by default.** Its existence is user-confirmed, not a hypothesis to
+  re-check. Geyser supplies discovery/account/slot updates; the dedicated RPC
+  supplies state reads and unsigned simulations. Do not switch to anonymous
+  providers, shop for services, or propose an upgrade without a concrete need
+  and explicit user approval.
+- **Geyser slot delivery does not guarantee RPC bank readiness.** Solana
+  `-32016` means the requested minimum context slot has not been reached, not
+  HTTP throttling or bad authentication. Keep the slot floor and current
+  capture's retry/stop policy; do not respond by switching providers or claiming
+  a native simulation ran when its preceding state read failed.
+  The six-venue diagnostic now censors a bounded read's correlated `-32016`
+  without retrying; later fresh updates may proceed. Public on-chain metadata
+  URLs must not trigger credential rejection. Match configured service secrets
+  instead, and keep provider error bodies out of retained evidence.
+- **Service authentication is not wallet access.** Reuse the provider-only JSON
+  interface (`rpc_url`, `geyser_endpoint`, `geyser_token`) in
+  `learning-examples/token-lifecycles/simulate_geyser_cycles.py`. Never obtain it
+  by opening the root `.env` or a wallet-secret file. Never print endpoint
+  credentials, tokens, or raw transport errors that might echo them.
+  `listen-new-tokens/listen_geyser.py` loads dotenv at import; do not launch it
+  unchanged for a wallet-isolated diagnostic. Do not start `bot_runner` for
+  read-only research.
+  A bare `GEYSER_ENDPOINT` authority needs an `https://` prefix in that JSON
+  projection; it is not missing or invalid service authentication.
+- **Latency acquisition belongs on the bounded London cloud runner**
+  (`chainstack-pumpfun`, `europe-west2`), not the development machine. Reuse the
+  documented provider-only projection workflow; keep offline checks/replay
+  local. Check the current resource state before reuse, since prior temporary
+  Jobs and provider projections were cleaned up.
+- Before continuing research, reconcile the user's latest instructions with
+  existing code, configuration, and retained evidence. An old anonymous-only
+  experiment is not the current infrastructure choice. Public-provider
+  failures do not assess Chainstack readiness, and an old Chainstack refusal
+  does not establish a current failure or its cause. Preserve historical
+  captures/locks rather than rewriting them to match a new decision.
+- Changing transport does **not** change the research question: retain every
+  approved venue/program, sampling rule, commitment, accounting gate, freshness
+  deadline, size/fee/request cap, and zero-retry/no-signing/no-submission boundary.
+  Do not substitute Pump.fun creation events for the six-venue cycle study,
+  historical winners for fresh discovery, or connectivity for economic proof.
+- If service-only access is missing, finish reachable offline work and report
+  the exact missing projection/access prerequisite once. Do not repeat failed
+  probes, broaden credential access, or offer another public provider as a
+  workaround. A continuation request is not permission to relax safety limits.
 
 ## Layout
 
@@ -190,6 +257,19 @@ with `BuybackFeeRecipientMissing` (6062) printed as confirmed buys.
   `ClientError`, so leaving it out lets every RPC timeout escape unretried —
   and `str()` on it is empty, so the caller logs a blank reason. A slow
   `getAccountInfo` is enough to take down a whole listener run this way.
+- **Only `core.client.RpcUnavailableError` means "retry later".** `_read_rpc`
+  raises it after transport exhaustion (cause preserved) and `post_rpc` returns
+  `None` for the same condition; the pump fee schedule maps that `None` to
+  `_FeeAttestationUnavailable`, a subclass. A permanent 4xx (anything but
+  408/429), a 2xx with a non-JSON body, decode failures and an attestation
+  mismatch are **not** transient and surface as `JsonRpcError`/`ValueError`/
+  plain `_FeeAttestationError`. The position monitor rides out only
+  `RpcUnavailableError` on its read-only price check, bounded by
+  `trade.price_read_outage_budget`; a live DNS outage that raised a cause-less
+  `_FeeAttestationError` used to kill the monitor and strand the position. The
+  curve managers' `except Exception -> ValueError` wraps re-raise the typed
+  error first — keep that ordering, and never widen the monitor's catch to
+  `Exception`: a mismatch or a bad price must fail immediately.
 
 ### Verifying the tp/sl exit path (issue #189)
 
@@ -220,6 +300,22 @@ position is left open and unmonitored — logged loudly, since the tokens are
 still held. Watch the `break`: before #189 it sat outside both branches of
 `if sell_result.success:`, so a failed sell abandoned the position after a
 single try while leaving `is_active=True`.
+
+### Strategy research: read before proposing an entry rule
+
+`learning-examples/token-lifecycles/README.md` records what was measured on
+exact on-chain data (10k+ coins, 7 live trades, the Slinky21 corpus) and the
+scripts to re-measure it. Short version: at retail latency and 0.01-0.1 SOL,
+every window after the creation slot is negative out-of-sample — slots 1-10,
+curve milestones, and post-graduation (which in Sep 2026 is a manufactured
+dump: curve bought out in <=10 trades, 50-100 SOL sniped at pool creation,
+pool drained within 25 min). Re-run `record_lifecycles.py` and the two
+`summarize_*.py` scripts before believing a new signal; rank on one time
+half and score on the other, and never count wallet `BwWK17cb…` (the System
+Program) as a buyer. `src/monitoring/trade_flow.py` (entry gate, exit rules,
+trade hub) and the `entry_gate`/`flow_exit` config sections exist and are
+tested but are not a source of edge; leave them disabled unless new data says
+otherwise.
 
 ### Listener and decoder pitfalls
 

@@ -57,7 +57,7 @@ trade:
 
   # Exit strategy configuration
   exit_strategy: "time_based" # Options: "time_based", "tp_sl", "manual"
-  #take_profit_percentage: 0.1 # Take profit at 10% gain (0.1 = 10%)
+  #take_profit_percentage: 0.1 # Require 10% net ROI after transaction/cleanup fees
   #stop_loss_percentage: 0.1 # Stop loss at 10% loss (0.1 = 10%)
   max_hold_time: 5 # Maximum hold time in seconds for TP/SL strategy, for time_based - see wait_after_buy
   #price_check_interval: 2 # Check price every 2 seconds
@@ -66,6 +66,10 @@ trade:
   # floor matches the market. After this many attempts the bot gives up and
   # leaves the position open - tokens are still held.
   #max_exit_sell_attempts: 3
+  # Read-only price checks ride out an RPC/DNS outage for this many seconds
+  # before the monitor fails closed (position stays journaled; restart with
+  # --resume-only). 0 fails on the first read error.
+  price_read_outage_budget: 300
 
   # EXTREME FAST mode configuration
   # When enabled, skips waiting for the bonding curve to stabilize and RPC price check.
@@ -103,6 +107,9 @@ priority_fees:
 
 # Compute unit limits for transaction processing
 # Pump v2 defaults are buy=180K and sell=160K; override only from simulation data.
+# Measured 2026-09-03 (SOL-paired Token-2022, on-chain + simulate_v2_trades.py):
+# buy_v2 99-105k CU, sell_v2 67-73k CU. A SOL-only curve bot can safely run
+# buy: 140_000 / sell: 110_000; keep defaults for USDC quotes or PumpSwap exits.
 compute_units: {}
   # buy: 180_000
   # sell: 160_000
