@@ -140,6 +140,7 @@ celerybeat.pid
 # Environments
 .env
 .env.*
+/ENVFILE
 !.env.example
 .venv
 env/
@@ -181,3 +182,35 @@ cython_debug/
 trades/trades.log
 # Mac OS X
 .DS_Store
+# Lifecycle recordings (regenerate with learning-examples/token-lifecycles/record_lifecycles.py)
+learning-examples/token-lifecycles/*.jsonl
+
+# Cloud runner / provider projections and editor temp files are local.
+.chainstack
+.env~
+
+# Lifecycle capture tapes and raw evidence are local research data, not source.
+learning-examples/token-lifecycles/*.jsonl
+learning-examples/token-lifecycles/*.zip
+learning-examples/token-lifecycles/*.account-report*.json
+learning-examples/token-lifecycles/account-*.json
+learning-examples/token-lifecycles/*.marks.jsonl
+
+# Sealed research evidence artifacts are local; scripts and README are source.
+learning-examples/token-lifecycles/*_2026090*.json
+learning-examples/token-lifecycles/*_2026091*.json
+learning-examples/token-lifecycles/empirical-*.json
+learning-examples/token-lifecycles/account-0914120619_storage_catalog.json
+learning-examples/token-lifecycles/coverage-*.json
+learning-examples/token-lifecycles/entry-*.json
+learning-examples/token-lifecycles/account-*.jsonl
+learning-examples/token-lifecycles/*.gz
+learning-examples/token-lifecycles/*verification*.json
+learning-examples/token-lifecycles/meme-exit-history-*/
+learning-examples/token-lifecycles/preentry-*.json
+learning-examples/token-lifecycles/public-*-provenance.json
+learning-examples/token-lifecycles/public-*-lock.json
+learning-examples/token-lifecycles/realtime-*.json
+learning-examples/token-lifecycles/trade-evidence-audit-*.json
+learning-examples/token-lifecycles/raw_trade_receipt_from_geyser.json
+learning-examples/token-lifecycles/*.sol
