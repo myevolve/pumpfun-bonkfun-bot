@@ -52,7 +52,7 @@ def _curve_state() -> dict:
         "real_sol_reserves": 100_000_000,
         "real_token_reserves": 10_000_000_000_000,
         "token_total_supply": 1_000_000_000_000_000,
-        "complete": True,
+        "complete": False,
         "creator": str(CREATOR),
         "is_mayhem_mode": False,
         "is_cashback_coin": False,
@@ -184,12 +184,14 @@ def test_full_cycle_wire() -> None:
     assert instructions[3].data[:8] == bytes(
         _idl("pump_swap_idl.json", "sell")["discriminator"]
     )
-    # Args encode the 2%-slippage floors from the candidate legs.
-    buy_floor = int(2_000_000_000_000 * (1 - SLIPPAGE_FLOOR))
+    # buy_v2 arg0 is the EXACT base-token output (not a minimum), so the
+    # sell leg must spend exactly that haircut quantity. One haircut
+    # quantity feeds both legs.
+    sell_tokens = int(2_000_000_000_000 * (1 - SLIPPAGE_FLOOR))
     sell_floor = int(11_000_000 * (1 - SLIPPAGE_FLOOR))
-    assert instructions[1].data[8:16] == buy_floor.to_bytes(8, "little")
+    assert instructions[1].data[8:16] == sell_tokens.to_bytes(8, "little")
     assert instructions[1].data[16:24] == (10_000_000).to_bytes(8, "little")
-    assert instructions[3].data[8:16] == (2_000_000_000_000).to_bytes(8, "little")
+    assert instructions[3].data[8:16] == sell_tokens.to_bytes(8, "little")
     assert instructions[3].data[16:24] == sell_floor.to_bytes(8, "little")
 
 

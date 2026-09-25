@@ -46,6 +46,10 @@ class Pool:
             *self.mints,
             *self.vaults,
             *([self.config] if self.config else []),
+            # The CPMM hydrate branch attests pool_not_open against the
+            # Clock sysvar; missing it makes every CPMM hydration a
+            # KeyError that the caller's per-pool catch silently drops.
+            *([CLOCK] if self.program == CPMM else []),
         ]
 
     def quote(self, input_mint: str, amount: int) -> int:

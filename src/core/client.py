@@ -876,6 +876,31 @@ class SolanaClient:
             not isinstance(instruction, Instruction) for instruction in instructions
         ):
             raise TypeError("instructions must be a list of solders Instruction values")
+        # Explicit intent IDs are logical operation keys. On restart, their
+        # newly built message may differ because fee recipients, WSOL seeds,
+        # and priority fees are dynamic — and a caller that signed the
+        # canonical final wire (fee instructions embedded) legitimately
+        # passes them in. Recover the exact durable wire FIRST: a prepared
+        # record replays its stored bytes verbatim, so the fee guard below
+        # only governs freshly built wires.
+        tx_opts = TxOpts(
+            skip_preflight=self._resolve_skip_preflight(requested=skip_preflight),
+            preflight_commitment=Processed,
+            max_retries=0,
+        )
+        if intent_id is not None and self.ledger is not None:
+            existing_record = await asyncio.to_thread(
+                self.ledger.get_active_submission_record,
+                intent_id,
+            )
+            if existing_record is not None:
+                reused_signature = await self._reuse_active_submission(
+                    intent_id,
+                    existing_record,
+                    tx_opts,
+                )
+                if reused_signature is not None:
+                    return reused_signature
         if any(
             instruction.program_id == COMPUTE_BUDGET_PROGRAM_ID
             for instruction in instructions
@@ -977,22 +1002,6 @@ class SolanaClient:
             preflight_commitment=Processed,
             max_retries=0,
         )
-        # Explicit intent IDs are logical operation keys. On restart, their
-        # newly built message may differ because fee recipients, WSOL seeds,
-        # and priority fees are dynamic. Recover the exact durable wire first.
-        if intent_id is not None:
-            existing_record = await asyncio.to_thread(
-                self.ledger.get_active_submission_record,
-                resolved_intent_id,
-            )
-            if existing_record is not None:
-                reused_signature = await self._reuse_active_submission(
-                    resolved_intent_id,
-                    existing_record,
-                    tx_opts,
-                )
-                if reused_signature is not None:
-                    return reused_signature
 
         await asyncio.to_thread(
             self.ledger.record_intent,

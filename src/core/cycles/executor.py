@@ -53,9 +53,7 @@ from solders.message import Message
 from solders.pubkey import Pubkey
 from solders.signature import Signature
 from solders.transaction import Transaction
-
 from core.client import (
-    COMPUTE_BUDGET_PROGRAM_ID,
     SolanaClient,
     TransactionSubmissionUnknown,
     estimate_transaction_fee_lamports,
@@ -177,6 +175,10 @@ class CycleExecutor:
     ) -> tuple[str, bytes, str]:
         """Verify the signed wire matches the declared cycle; return signature/wire/hash.
 
+        ``instructions`` is the canonical FINAL list — Compute Budget fee
+        instructions first, then the swaps — exactly as signed. The RPC
+        fallback replays these prepared bytes (the client's intent-reuse
+        path never rebuilds), so fee settings are present exactly once.
         The message hash is derived exactly like the client's
         ``_derive_intent_id`` (blockhash-less message bytes), so both
         submission channels bind the same ledger intent.
@@ -189,12 +191,6 @@ class CycleExecutor:
             raise CycleSubmissionError(  # noqa: TRY003
                 "signer keypair does not match the wire's fee payer"
             )
-        for instruction in instructions:
-            if instruction.program_id == COMPUTE_BUDGET_PROGRAM_ID:
-                raise CycleSubmissionError(  # noqa: TRY003
-                    "Compute Budget instructions belong to fee arguments, "
-                    "not cycle swap instructions"
-                )
         rebuilt = Message.new_with_blockhash(
             list(instructions), signer, transaction.message.recent_blockhash
         )

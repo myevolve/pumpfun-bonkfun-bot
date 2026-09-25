@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from monitoring.migration_events import MigrationHub
-
+    from utils.idl_parser import IDLParser
 logger = get_logger(__name__)
 
 _PROGRAM_DATA = "Program data: "
@@ -319,7 +319,9 @@ class TradeFlowHub:
                         delivered += 1
                     except asyncio.QueueFull:
                         self.dropped += 1
-        return delivered + self._publish_migrations(logs, slot=slot, signature=signature)
+        return delivered + self._publish_migrations(
+            logs, slot=slot, signature=signature
+        )
 
     def _publish_migrations(self, logs: list[str], *, slot: int, signature: str) -> int:
         """Decode and schedule migration-event fan-out; contained, never raises."""

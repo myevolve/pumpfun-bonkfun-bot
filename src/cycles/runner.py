@@ -263,6 +263,7 @@ async def read_pamm_pool_state(
         "needs_extension": len(raw) < 300,  # noqa: PLR2004 - current Pool layout
     }
 
+
 async def _pamm_fee_recipients(
     session: aiohttp.ClientSession, rpc: str, *, is_mayhem_mode: bool
 ) -> tuple[Pubkey, Pubkey]:
@@ -326,17 +327,25 @@ def build_cycle_instructions(  # noqa: PLR0913 - contract signature
         )
 
     mint = candidate.mints[0]
+    # buy_v2's first arg is the EXACT base-token output, not a minimum, so
+    # the sell leg must spend exactly what the buy yields. One haircut
+    # quantity feeds both legs: buy exactly sell_tokens, sell all of them.
+    sell_tokens = int(buy.amount_out * (1 - SLIPPAGE_FLOOR))
+    if sell_tokens <= 0:
+        raise ValueError(  # noqa: TRY003
+            "cycle quantity collapses to zero after the slippage haircut"
+        )
     buy_instructions = build_curve_buy_instructions(
         token_info=curve_token_info(mint, curve_state),
         user=payer,
         amount_in=buy.amount_in,
-        min_tokens_out=int(buy.amount_out * (1 - SLIPPAGE_FLOOR)),
+        min_tokens_out=sell_tokens,
     )
     sell_instructions = build_pamm_sell_instructions(
         user=payer,
         pool_state=pamm_state,
         base_token_program=Pubkey.from_string(pamm_state["base_token_program"]),
-        amount_in=sell.amount_in,
+        amount_in=sell_tokens,
         min_quote_out=int(sell.amount_out * (1 - SLIPPAGE_FLOOR)),
         fee_recipients=fee_recipients,
     )
@@ -358,8 +367,12 @@ async def evaluate_cycle(
     # Executable-reserve gate (same rationale as evaluate_pamm_cycle): a
     # completed curve has zero real reserves; CPMM against an empty quote
     # side fabricates infinite margin and every curve-side trade reverts.
+    # The program itself refuses COMPLETE curves even with reserves, so a
+    # mixed-bank read that pairs a pre-completion curve snapshot with a
+    # post-completion pool must be rejected here, not on-chain.
     if (
         vsol <= 0
+        or curve_state.get("complete") is not False
         or curve_state.get("real_sol_reserves", 0) <= 0
         or curve_state.get("real_token_reserves", 0) <= 0
     ):
@@ -444,9 +457,16 @@ def evaluate_pamm_cycle(
     # Executable-reserve gate: a COMPLETED curve has had its real liquidity
     # withdrawn to the migration pool (real_quote==0). CPMM math against an
     # empty quote side prices the whole inventory at zero and fabricates an
-    # infinite margin; any curve-side trade reverts on-chain. The divergence
-    # window only exists BEFORE real reserves hit zero — during migration.
-    if vsol <= 0 or real_quote <= 0 or real_token <= 0:
+    # infinite margin; any curve-side trade reverts on-chain. The program
+    # also refuses complete curves outright, so a mixed-bank read that
+    # pairs a stale incomplete curve snapshot with a fresh pool must be
+    # rejected here, not on-chain.
+    if (
+        vsol <= 0
+        or curve_state.get("complete") is not False
+        or real_quote <= 0
+        or real_token <= 0
+    ):
         return None, -amount_lamports
 
     # Direction 1: buy tokens on curve, sell on PumpSwap
@@ -863,14 +883,29 @@ async def run_session(
                         )
                         continue
                     blockhash = await client.get_cached_blockhash()
+                    # Canonical final wire: CU limit + priority price first,
+                    # then the swaps. The executor attests THIS list against
+                    # the signed wire and the RPC fallback replays the exact
+                    # prepared bytes, so the fee settings land on-chain
+                    # exactly once — never dropped, never doubled.
+                    from solders.compute_budget import (
+                        set_compute_unit_limit,
+                        set_compute_unit_price,
+                    )
+
+                    final_instructions = [
+                        set_compute_unit_limit(compute_unit_limit),
+                        set_compute_unit_price(priority_fee),
+                        *instructions,
+                    ]
                     from solders.message import Message
 
-                    message = Message(instructions, payer.pubkey())
+                    message = Message(final_instructions, payer.pubkey())
                     transaction = Transaction([payer], message, blockhash)
                     result = await executor.execute(
                         transaction,
                         signer_keypair=payer,
-                        instructions=instructions,
+                        instructions=final_instructions,
                         quote_amount_raw=amount_lamports,
                         fee_lamports=fee_lamports,
                         priority_fee=priority_fee,
@@ -893,10 +928,20 @@ async def run_session(
                     raise StopAsyncIteration
 
         except StopAsyncIteration:
-            pass
-        except Exception:
+            # The one-shot stop is the intended normal exit after a
+            # submitted candidate, not a failure.
+            summary["completed"] = True
+        except Exception as exc:
+            # A mid-session failure (RPC transport, signing, ledger
+            # reservation) is NOT a successful scan: automation must see it
+            # as a non-zero exit and a prepared wire may need reconciliation
+            # via --status. Deadline expiry and the one-shot stop are the
+            # only normal exits.
             logger.exception("Session error")
-        summary["completed"] = True
+            summary["completed"] = False
+            summary["session_error"] = f"{type(exc).__name__}: {exc}"[:300]
+        else:
+            summary["completed"] = True
 
     await tpu.stop()
     await client.close()
@@ -942,25 +987,19 @@ async def run_event_session(
     global _fee_snapshot_cache
 
     rpc = secrets["SOLANA_NODE_RPC_ENDPOINT"]
-    payer = Keypair.from_base58_string(secrets["SOLANA_PRIVATE_KEY"].strip())
-
-    policy = ExecutionPolicy.from_config(cfg, live_authorized=True)
-    # Log-only session: no wire is ever built, so require_submission() (as in
-    # run_session) is intentionally not enforced here.
-    ledger = TransactionLedger(
-        Path(".state/transaction-ledgers") / f"{policy.expected_wallet}.sqlite3"
-    )
-    client = SolanaClient(rpc, execution_policy=policy, ledger=ledger)
+    # Log-only observation: no signer, no ledger, no TPU, no executor.
+    # A provider-only credentials projection (RPC+geyser fields, no wallet
+    # key) is sufficient. The CLIENT runs under a dry-run policy so its
+    # constructor never builds the TPU submit transport; the configured
+    # wallet address is carried separately for reporting.
+    client_policy = ExecutionPolicy(mode="dry_run")
+    client = SolanaClient(rpc, execution_policy=client_policy)
+    wallet = ExecutionPolicy.from_config(cfg, live_authorized=True).expected_wallet
 
     from platforms.pumpfun.pumpswap import PumpSwapManager
 
     pumpswap = PumpSwapManager(client)
     await pumpswap.start()
-
-    tpu = TpuSubmitter(client._read_rpc, rpc_endpoint=rpc)  # noqa: SLF001
-    tpu.start()
-    # Setup parity with run_session; never called in the log-only phase.
-    executor = CycleExecutor(client, ledger, policy, tpu=tpu)  # noqa: F841
 
     amount_lamports = int(buy_amount_sol * 1e9)
     curve_fee_bps = 125  # pump.fun curve: proto 95 + creator 30 (attested live)
@@ -1011,7 +1050,7 @@ async def run_event_session(
         "events_seen": 0,
         "candidates_found": 0,
         "best_margin_lamports": None,
-        "wallet": str(payer.pubkey()),
+        "wallet": wallet,
         "session_start": time.time(),
     }
 
@@ -1206,9 +1245,12 @@ async def run_event_session(
                         except Exception:
                             pass
                     await asyncio.sleep(min(5.0, remaining))
-            except Exception:
+            except Exception as exc:
                 logger.exception("Event session error")
-            summary["completed"] = True
+                summary["completed"] = False
+                summary["session_error"] = f"{type(exc).__name__}: {exc}"[:300]
+            else:
+                summary["completed"] = True
     finally:
         if listener_task is not None:
             listener_task.cancel()
@@ -1216,7 +1258,6 @@ async def run_event_session(
                 await listener_task
             except asyncio.CancelledError:
                 pass
-        await tpu.stop()
         await client.close()
         summary["session_end"] = time.time()
         summary["elapsed_s"] = round(

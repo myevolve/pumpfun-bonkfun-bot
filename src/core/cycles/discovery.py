@@ -307,6 +307,7 @@ def self_check() -> bool:  # noqa: PLR0915 - one linear scenario reads best
             virtual_sol_reserves=vsol,
             virtual_token_reserves=vtoken,
             real_sol_reserves=real_sol,
+            real_token_reserves=10_000_000_000_000,
             slot=slot,
             signature=f"sig{slot}",
             timestamp=0,
