@@ -17,7 +17,7 @@ import httpx
 import pytest
 from solana.exceptions import SolanaRpcException
 from solana.rpc.core import RPCException
-from solders.compute_budget import set_compute_unit_limit
+from solders.compute_budget import set_compute_unit_limit, set_compute_unit_price
 from solders.hash import Hash
 from solders.instruction import Instruction
 from solders.keypair import Keypair
@@ -661,6 +661,62 @@ async def test_prepared_recovery_ignores_rebuilt_message_and_receipt_context(
     assert await client.get_submission_receipt_destinations(
         prepared_signature
     ) == tuple(Pubkey.from_string(item) for item in original_destinations)
+
+
+@pytest.mark.asyncio
+async def test_prepared_recovery_precedes_compute_budget_guard(tmp_path) -> None:
+    """A caller that signed the canonical final wire (fee instructions
+    embedded) passes that same list with an explicit intent_id. Recovery
+    must find the prepared record BEFORE the caller-supplied Compute Budget
+    guard and replay the exact stored bytes once — no rebuild, no doubled
+    fee instructions, no ExecutionBlocked."""
+    captured: list[bytes] = []
+
+    async def send_raw_transaction(wire: bytes, _opts) -> object:
+        captured.append(wire)
+        return SimpleNamespace(value=prepared_signature)
+
+    rpc = SimpleNamespace(send_raw_transaction=send_raw_transaction)
+    client, ledger, signer = _live_client(tmp_path, rpc)
+    swap = _instruction()
+    final_instructions = [
+        set_compute_unit_limit(180_000),
+        set_compute_unit_price(500_000),
+        swap,
+    ]
+    message = Message(final_instructions, signer.pubkey())
+    transaction = Transaction([signer], message, Hash.default())
+    prepared_wire = bytes(transaction)
+    prepared_signature = transaction.signatures[0]
+    ledger.record_intent(
+        "cycle-final-wire",
+        str(signer.pubkey()),
+        10,
+        5_000,
+        hashlib.sha256(bytes(message)).hexdigest(),
+    )
+    ledger.record_submission(
+        "cycle-final-wire",
+        str(prepared_signature),
+        str(Hash.default()),
+        100,
+        wire_bytes=prepared_wire,
+        state="prepared",
+    )
+
+    returned = await client.build_and_send_transaction(
+        final_instructions,
+        signer,
+        quote_amount_raw=10,
+        fee_lamports=5_000,
+        intent_id="cycle-final-wire",
+        quote_mint=WSOL_MINT,
+    )
+
+    assert returned == prepared_signature
+    assert captured == [prepared_wire]
+    rec = ledger.get_active_submission_record("cycle-final-wire")
+    assert rec.state == "submitted"
 
 
 @pytest.mark.asyncio
