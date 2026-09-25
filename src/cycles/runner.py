@@ -1264,6 +1264,64 @@ async def run_event_session(
                                 f"Letsbonk migration detected: {lb_mint[:12]} "
                                 f"(FUNDING -> {lb_val})"
                             )
+                            # Evaluate the migration window: the migrated
+                            # coin's fresh Raydium AMM/CPMM pool (discovered
+                            # via the existing Raydium-API path) vs a second
+                            # venue for the same mint, exactly like the
+                            # pump.fun pool-vs-pool path. Log-only.
+                            try:
+                                records = await discover_pools_for_mint(
+                                    session, lb_mint
+                                )
+                                summary["http_requests"] = (
+                                    summary.get("http_requests", 0) + 1
+                                )
+                                venue_pools = []
+                                for record in records:
+                                    pool_addr = record["id"]
+                                    bank = await _fetch_accounts(
+                                        session, rpc, [pool_addr]
+                                    )
+                                    if pool_addr not in bank:
+                                        continue
+                                    decoded = decode_pool(pool_addr, bank[pool_addr])
+                                    bank.update(
+                                        await _fetch_accounts(
+                                            session, rpc, decoded.dependencies()
+                                        )
+                                    )
+                                    venue_pools.append(hydrate_pool(decoded, bank))
+                                for i in range(len(venue_pools)):
+                                    for j in range(i + 1, len(venue_pools)):
+                                        pair_cand, pair_margin = (
+                                            evaluate_pool_pair_cycle(
+                                                venue_pools[i],
+                                                venue_pools[j],
+                                                lb_mint,
+                                                amount_lamports,
+                                            )
+                                        )
+                                        if pair_cand is None:
+                                            continue
+                                        if (
+                                            summary["best_margin_lamports"] is None
+                                            or pair_margin
+                                            > summary["best_margin_lamports"]
+                                        ):
+                                            summary["best_margin_lamports"] = (
+                                                pair_margin
+                                            )
+                                        logger.info(
+                                            f"Letsbonk pool-vs-pool "
+                                            f"{lb_mint[:12]}: margin={pair_margin} "
+                                            f"[log-only, not submitted]"
+                                        )
+                                        if pair_margin >= min_profit_lamports:
+                                            summary["candidates_found"] += 1
+                            except Exception as exc:
+                                logger.debug(
+                                    f"letsbonk eval failed {lb_mint[:12]}: {exc}"
+                                )
                     await asyncio.sleep(min(5.0, remaining))
             except Exception as exc:
                 logger.exception("Event session error")
