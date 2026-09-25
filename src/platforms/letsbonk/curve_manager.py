@@ -500,46 +500,36 @@ class LetsBonkCurveManager(CurveManager):
             raise ValueError("Token-2022 mint is not initialized")
         if len(mint_data) == cls._MINT_BASE_LENGTH:
             return None
-        # Token-2022 spec puts AccountType at offset 82, but live LaunchLab
-        # mints (verified via the RPC's own jsonParsed decoder) carry
-        # Uninitialized (0) there and start the TLV later, with zero
-        # padding before the first record. The owner check above plus the
-        # TLV parse below are the real validation; the byte at 82 carries
-        # no additional information on these mints.
-        offset = cls._MINT_BASE_LENGTH + 1
+        # Live LaunchLab mints (mapped against the RPC's own jsonParsed
+        # decoder, 2026-09-25) do not follow the classic fixed offsets:
+        # AccountType(Mint)=1 sits at offset 165 (base 0..81 unchanged),
+        # the first TLV record starts at 166, and records appear in
+        # creation order (MetadataPointer, TransferFeeConfig,
+        # TokenMetadata). The robust read is a scan for the unique
+        # TransferFeeConfig header [tag=1 LE][len=108 LE]; the 108-byte
+        # record must end inside the account.
         transfer_fee_data: bytes | None = None
-        while offset < len(mint_data):
-            remaining = mint_data[offset:]
-            if not any(remaining):
+        fee_header = cls._TRANSFER_FEE_CONFIG_EXTENSION.to_bytes(
+            2, "little"
+        ) + cls._TRANSFER_FEE_CONFIG_LENGTH.to_bytes(2, "little")
+        scan_from = cls._MINT_BASE_LENGTH
+        while True:
+            pos = mint_data.find(fee_header, scan_from)
+            if pos < 0:
                 break
-            if remaining[0] == 0:
-                # Zero padding before the first record: skip one byte at a
-                # time until a real record header appears.
-                offset += 1
-                continue
-            if len(remaining) < 4:
-                raise ValueError("Token-2022 mint extension header is truncated")
-            extension_type, extension_length = struct.unpack_from(
-                "<HH", mint_data, offset
-            )
-            offset += 4
-            extension_end = offset + extension_length
-            if extension_type == 0 or extension_end > len(mint_data):
+            data_start = pos + 4
+            data_end = data_start + cls._TRANSFER_FEE_CONFIG_LENGTH
+            if data_end > len(mint_data):
                 raise ValueError("Token-2022 mint extension data is malformed")
-            extension_data = mint_data[offset:extension_end]
-            offset = extension_end
-            if extension_type != cls._TRANSFER_FEE_CONFIG_EXTENSION:
-                continue
             if transfer_fee_data is not None:
                 raise ValueError(
                     "Token-2022 mint has duplicate TransferFeeConfig extensions"
                 )
-            if extension_length != cls._TRANSFER_FEE_CONFIG_LENGTH:
-                raise ValueError("Token-2022 TransferFeeConfig has an invalid length")
-            transfer_fee_data = extension_data
-
+            transfer_fee_data = mint_data[data_start:data_end]
+            scan_from = data_end
         if transfer_fee_data is None:
             return None
+
         older_epoch, older_maximum, older_bps = struct.unpack_from(
             "<QQH", transfer_fee_data, 72
         )
