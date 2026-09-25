@@ -105,10 +105,14 @@ class LetsBonkGraduationReader:
     async def read_curve_state(self, mint: str) -> dict[str, Any] | None:
         """Read one LaunchLab curve in the scanner's curve-state shape.
 
+        Decodes PoolState directly (status + reserves) instead of the
+        manager's ``get_pool_state``: the latter chains into the Token-2022
+        transfer-fee validation, which rejects current LaunchLab mints in
+        both observed classes (82-byte base-only mints with no fee
+        extension; extension mints whose AccountType byte at 82 is
+        Uninitialized). Observation needs status and reserves, not the fee
+        schedule; fee-adjusted quotes stay with the trading-path owner.
         Returns None when the pool does not exist or cannot be decoded.
-        The shape mirrors ``runner.read_curve_state`` (pump.fun) so the
-        scanner's evaluation logic stays venue-agnostic where possible, and
-        adds letsbonk-specific fields the evaluator needs.
         """
         pool_address = Pubkey.from_string(derive_launchlab_pool(mint))
         # Fresh T22 mints are visible to the geyser stream before the
@@ -116,17 +120,26 @@ class LetsBonkGraduationReader:
         # listener pitfall). Bounded retry, mirroring the bot's
         # trade.curve_refresh_budget semantics.
         state: dict[str, Any] | None = None
-        read_attempts = 12
+        read_attempts = 4
         for attempt in range(read_attempts):
             try:
-                state = await self._manager.get_pool_state(
+                account = await self._manager.client.get_account_info(
                     pool_address, commitment="processed"
+                )
+                pool_bytes = self._manager._validated_account_data(  # noqa: SLF001
+                    account,
+                    address=pool_address,
+                    account_type="PoolState",
+                    expected_length=self._manager._POOL_STATE_ACCOUNT_LENGTH,  # noqa: SLF001
+                )
+                state = self._manager._decode_pool_state_with_idl(  # noqa: SLF001
+                    pool_bytes
                 )
                 break
             except Exception:  # noqa: BLE001 - retry, then "not a curve"
                 if attempt == read_attempts - 1:
                     return None
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(0.5 * (attempt + 1))
         assert state is not None  # noqa: S101 - loop guarantees break-or-return
         status_raw = state.get("status")
         try:
@@ -147,6 +160,9 @@ class LetsBonkGraduationReader:
             "token_total_supply": int(state.get("token_total_supply", 0) or 0),
             "complete": False,  # FUNDING curves are incomplete by definition
             "platform": "letsbonk",
+            # Observation-only state: the Token-2022 transfer-fee schedule
+            # is deliberately not extracted (see the docstring).
+            "fees_verified": False,
         }
 
     async def migration_target(self, mint: str) -> str | None:
