@@ -112,7 +112,7 @@ class LetsBonkGraduationReader:
         pool_address = Pubkey.from_string(derive_launchlab_pool(mint))
         try:
             state = await self._manager.get_pool_state(pool_address)
-        except Exception:
+        except Exception:  # noqa: BLE001 - decode failure means "not a letsbonk curve"
             return None
         status_raw = state.get("status")
         try:
@@ -140,7 +140,7 @@ class LetsBonkGraduationReader:
         pool_address = Pubkey.from_string(derive_launchlab_pool(mint))
         try:
             state = await self._manager.get_pool_state(pool_address)
-        except Exception:
+        except Exception:  # noqa: BLE001 - decode failure means "not a letsbonk curve"
             return None
         migrate_type = state.get("curve_param", {}).get("migrate_type")
         target = _MIGRATION_TARGETS.get(int(migrate_type or 0))
@@ -151,7 +151,7 @@ class LetsBonkGraduationReader:
         pool_address = Pubkey.from_string(derive_launchlab_pool(mint))
         try:
             state = await self._manager.get_pool_state(pool_address)
-        except Exception:
+        except Exception:  # noqa: BLE001 - decode failure means "not a letsbonk curve"
             return None
         try:
             return LaunchLabPoolStatus(int(state.get("status")))
@@ -162,14 +162,22 @@ class LetsBonkGraduationReader:
 def self_check() -> bool:
     """Offline shape checks: derivations and migration-target mapping."""
     if _LAUNCHLAB_PROGRAM != str(LetsBonkAddresses.PROGRAM):
-        raise ValueError("LaunchLab program constant drifted from the provider")
+        raise ValueError(  # noqa: TRY003 - offline self-check
+            "LaunchLab program constant drifted from the provider"
+        )
     if _MIGRATION_TARGETS[0] != AMM or _MIGRATION_TARGETS[1] != CPMM:
-        raise ValueError("migration-target mapping drifted")
+        raise ValueError(  # noqa: TRY003
+            "migration-target mapping drifted"
+        )
     pool = derive_launchlab_pool("So11111111111111111111111111111111111111112")
     if len(pool) != 44:  # noqa: PLR2004 - base58 PDA length
-        raise ValueError("pool PDA derivation is malformed")
+        raise ValueError(  # noqa: TRY003 - offline self-check
+            "pool PDA derivation is malformed"
+        )
     if pool == derive_launchlab_pool("11111111111111111111111111111111"):
-        raise ValueError("pool PDA derivation is not mint-dependent")
+        raise ValueError(  # noqa: TRY003
+            "pool PDA derivation is not mint-dependent"
+        )
     return True
 
 
