@@ -17,19 +17,20 @@ import json
 import struct
 import sys
 import time
-import aiohttp
 from pathlib import Path
+
+import aiohttp
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from argparse import ArgumentParser
+from pathlib import Path
+
 from dotenv import dotenv_values
+from solders.instruction import Instruction
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 from solders.transaction import Transaction
-from solders.instruction import Instruction
-
-from argparse import ArgumentParser
-from pathlib import Path
 
 from config_loader import get_platform_from_config, load_bot_config
 from core.client import SolanaClient, estimate_transaction_fee_lamports
@@ -50,6 +51,8 @@ from core.cycles.pool import (
 from core.execution_policy import ExecutionPolicy
 from core.tpu import TpuSubmitter
 from core.transaction_ledger import TransactionLedger
+from cycles.letsbonk_reader import LetsBonkGraduationReader
+from interfaces.core import Platform
 from monitoring.migration_events import MigrationEvent, MigrationHub
 from monitoring.trade_flow import TradeFlowHub
 from monitoring.universal_geyser_listener import UniversalGeyserListener
@@ -1033,17 +1036,27 @@ async def run_event_session(
         endpoint,
         api_token,
         auth_type,
-        platforms=[platform],
-        migration_hub=migration_hub,
+        platforms=[platform, Platform.LETS_BONK],
     )
     # Same injection point universal_trader uses: the hub rides the listener's
     # one program-wide stream (trade subscribers stay empty here, but the
     # migration fan-out keeps the hub active).
     listener.trade_hub = trade_hub
 
-    async def _no_token_callback(_token_info: object) -> None:
-        """Token creations are irrelevant here; migration events drive the scan."""
-        return None
+    # Letsbonk tracking: LaunchLab has no graduation event; the signal is
+    # the PoolState.status flip (FUNDING -> WAITING_FOR_MIGRATION ->
+    # MIGRATED). Token creations feed a bounded watch set; a poller checks
+    # each mint's status and evaluates divergence on the flip.
+    letsbonk_watch: dict[str, int] = {}  # mint -> last seen status (-1 unknown)
+    letsbonk_reader = LetsBonkGraduationReader(client)
+
+    async def _no_token_callback(token_info: object) -> None:
+        """Collect letsbonk creations; pump.fun creations are pump events' job."""
+        platform = getattr(token_info, "platform", None)
+        if platform is not None and platform.value == "letsbonk":
+            mint = str(getattr(token_info, "mint", ""))
+            if mint and mint not in letsbonk_watch and len(letsbonk_watch) < 500:
+                letsbonk_watch[mint] = -1
 
     summary: dict = {
         "completed": False,
@@ -1233,17 +1246,24 @@ async def run_event_session(
                     remaining = deadline - asyncio.get_event_loop().time()
                     if remaining <= 0:
                         break
-                    # Refresh the PumpSwap fee cache each pass (60s TTL).
-                    if _fee_snapshot_cache is None or (
-                        time.time() - _fee_snapshot_cache[0] > 60
-                    ):
+                    # Letsbonk status-flip watcher: poll tracked mints,
+                    # evaluate on the FUNDING -> (WAITING|MIGRATED) flip.
+                    for lb_mint in list(letsbonk_watch)[:50]:
                         try:
-                            _fee_snapshot_cache = (
-                                time.time(),
-                                pumpswap.fee_schedule.require_snapshot(),
-                            )
+                            lb_status = await letsbonk_reader.status(lb_mint)
+                            lb_val = int(lb_status) if lb_status is not None else -1
                         except Exception:
-                            pass
+                            continue
+                        last = letsbonk_watch[lb_mint]
+                        letsbonk_watch[lb_mint] = lb_val
+                        if last == 0 and lb_val >= 1:
+                            summary["letsbonk_migrations"] = (
+                                summary.get("letsbonk_migrations", 0) + 1
+                            )
+                            logger.info(
+                                f"Letsbonk migration detected: {lb_mint[:12]} "
+                                f"(FUNDING -> {lb_val})"
+                            )
                     await asyncio.sleep(min(5.0, remaining))
             except Exception as exc:
                 logger.exception("Event session error")
