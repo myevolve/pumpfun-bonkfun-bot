@@ -214,3 +214,6 @@ learning-examples/token-lifecycles/realtime-*.json
 learning-examples/token-lifecycles/trade-evidence-audit-*.json
 learning-examples/token-lifecycles/raw_trade_receipt_from_geyser.json
 learning-examples/token-lifecycles/*.sol
+
+# Sealed session evidence is local operational data; findings live in README.
+state/
