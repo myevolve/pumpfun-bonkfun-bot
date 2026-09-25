@@ -9,7 +9,7 @@ from typing import Any
 
 from solders.pubkey import Pubkey
 
-from core.client import SolanaClient
+from core.client import RpcUnavailableError, SolanaClient
 from core.pubkeys import (
     LAMPORTS_PER_SOL,
     QUOTE_TOKEN_PROGRAMS,
@@ -144,6 +144,8 @@ class PumpFunCurveManager(CurveManager):
             curve_state_data = self._decode_curve_state_with_idl(account_data)
             curve_state_data["_pump_fee_snapshot"] = snapshot
             return curve_state_data
+        except RpcUnavailableError:
+            raise
         except Exception as exc:
             logger.exception("Failed to get curve and fee state")
             raise ValueError(f"Invalid bonding curve state: {exc!s}") from exc
@@ -187,6 +189,8 @@ class PumpFunCurveManager(CurveManager):
                 [pool_address, mint, fee_config],
                 commitment=commitment,
             )
+        except RpcUnavailableError:
+            raise
         except Exception as exc:
             logger.exception("Failed to read curve, mint, and fee accounts")
             raise ValueError(f"Invalid bonding curve state: {exc!s}") from exc

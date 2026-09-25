@@ -52,6 +52,7 @@ def _snapshot() -> PumpFeeSnapshot:
             flat_fees=fees,
             regular_tiers=(tier,),
             stable_tiers=(tier,),
+            exotic_flat_fees=PumpFees(0, 95, 30),
             digest="fee-config",
         ),
         observed_at=1.0,

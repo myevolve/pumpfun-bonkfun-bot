@@ -14,7 +14,7 @@ from math import isfinite
 from typing import Any
 
 import aiohttp
-from httpx import HTTPError
+from httpx import HTTPError, HTTPStatusError
 from solana.exceptions import SolanaRpcException
 from solana.rpc.async_api import AsyncClient
 from solana.rpc.commitment import Processed
@@ -26,22 +26,28 @@ from solders.instruction import Instruction
 from solders.keypair import Keypair
 from solders.message import Message
 from solders.pubkey import Pubkey
+from solders.rpc.errors import SendTransactionPreflightFailureMessage
 from solders.signature import Signature
 from solders.transaction import Transaction
 from spl.token.instructions import get_associated_token_address
 
-from core.execution_policy import ExecutionBlocked, ExecutionPolicy
+from core.execution_policy import ExecutionBlocked, ExecutionMode, ExecutionPolicy
 from core.pubkeys import is_sol_paired, normalize_quote_mint
 from core.rpc_rate_limiter import TokenBucketRateLimiter
-from core.transaction_ledger import TransactionLedger
+from core.tpu import TpuSubmitter
+from core.transaction_ledger import EvidencePersistenceError, TransactionLedger
 from core.transaction_state import TransactionOutcome, TransactionStatus
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 HTTP_TOO_MANY_REQUESTS = 429
+HTTP_REQUEST_TIMEOUT = 408
 
 DEFAULT_RPC_DEADLINE_SECONDS = 30.0
+# Finalized height must clear last_valid_block_height by this much before an
+# absent signature is treated as expired rather than merely not yet visible.
+EXPIRY_PROOF_MARGIN_BLOCKS = 150
 DEFAULT_BLOCKHASH_READY_TIMEOUT_SECONDS = 10.0
 MAX_LOADED_ACCOUNT_DATA_SIZE_BYTES = 16 * 1024 * 1024
 MAX_COMPUTE_UNIT_LIMIT = 1_400_000
@@ -60,6 +66,64 @@ class JsonRpcError(RuntimeError):
         self.method = method
         self.error = error
         super().__init__(f"JSON-RPC {method} failed: {error}")
+
+
+class RpcUnavailableError(RuntimeError):
+    """A transport-level failure of an idempotent read; safe to retry later.
+
+    Never raised for RPC-level errors, malformed data, or ambiguous sends.
+    """
+
+
+DEFAULT_COMPUTE_UNIT_LIMIT = 85_000
+
+
+def estimate_transaction_fee_lamports(
+    priority_fee: int | None,
+    compute_unit_limit: int | None,
+) -> int:
+    """Return the exact one-signature fee reserved for a transaction."""
+    if priority_fee is not None and (
+        isinstance(priority_fee, bool)
+        or not isinstance(priority_fee, int)
+        or priority_fee < 0
+    ):
+        raise ValueError("priority_fee must be a non-negative integer")
+    if compute_unit_limit is not None and (
+        isinstance(compute_unit_limit, bool)
+        or not isinstance(compute_unit_limit, int)
+        or compute_unit_limit <= 0
+    ):
+        raise ValueError("compute_unit_limit must be a positive integer")
+    effective_cu_limit = (
+        DEFAULT_COMPUTE_UNIT_LIMIT if compute_unit_limit is None else compute_unit_limit
+    )
+    return (
+        LAMPORTS_PER_SIGNATURE
+        + ((priority_fee or 0) * effective_cu_limit + 999_999) // 1_000_000
+    )
+
+
+class PreflightRejected(RuntimeError):
+    """The node simulated the wire and refused to broadcast it: it never left.
+
+    Not ambiguous: the prepared submission is released and the caller may
+    build a fresh wire. Typical cause is a slippage floor the pool can no
+    longer pay (pump 6003 TooLittleSolReceived) between quote and send.
+    """
+
+    def __init__(self, signature: str, error: BaseException | str):
+        self.signature = signature
+        self.error = error
+        super().__init__(f"Preflight rejected {signature}: {error}")
+
+
+def is_preflight_rejection(exc: BaseException) -> bool:
+    """True when an RPCException carries a preflight simulation failure."""
+    payload = exc.args[0] if exc.args else None
+    if isinstance(payload, SendTransactionPreflightFailureMessage):
+        return True
+    return "SendTransactionPreflightFailureMessage" in str(payload)
 
 
 class TransactionSubmissionUnknown(RuntimeError):
@@ -130,6 +194,7 @@ class SolanaClient:
         self.rpc_endpoint = rpc_endpoint
         self.execution_policy = execution_policy or ExecutionPolicy()
         self.ledger = ledger
+        self.evidence_profile_id: str | None = None
         self._client: AsyncClient | None = None
         self._client_lock = asyncio.Lock()
         self._cached_blockhash: _BlockhashContext | None = None
@@ -139,6 +204,11 @@ class SolanaClient:
         self._intent_signatures: dict[str, str] = {}
         self._signature_intents: dict[str, str] = {}
         self._blockhash_updater_task: asyncio.Task[None] | None = None
+        self._tpu = (
+            TpuSubmitter(self._read_rpc, rpc_endpoint=rpc_endpoint)
+            if self.execution_policy.mode is ExecutionMode.LIVE
+            else None
+        )
         self._rate_limiter = TokenBucketRateLimiter(max_rps=max_rps)
         self._session: aiohttp.ClientSession | None = None
         self._session_lock = asyncio.Lock()
@@ -223,12 +293,16 @@ class SolanaClient:
             except asyncio.CancelledError:
                 raise
             except BaseException as exc:
-                if not self._is_transport_exception(exc):
+                if not self._is_transport_exception(
+                    exc
+                ) or self._has_permanent_http_status(exc):
                     raise
                 last_error = exc
                 if attempt == max_attempts - 1:
-                    raise
-        raise TimeoutError("RPC read deadline exceeded") from last_error
+                    raise RpcUnavailableError(
+                        f"RPC read failed after {max_attempts} transport attempts"
+                    ) from exc
+        raise RpcUnavailableError("RPC read deadline exceeded") from last_error
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create the shared aiohttp session.
@@ -243,10 +317,16 @@ class SolanaClient:
                 )
             return self._session
 
+    def _start_tpu_refresher(self) -> None:
+        """Start the live-only TPU leader refresher if the loop is running."""
+        if self._tpu is not None:
+            self._tpu.start()
+
     async def close(self):
         """Close the client connection and stop the blockhash updater."""
+        if self._tpu is not None:
+            await self._tpu.stop()
         if self._blockhash_updater_task:
-            self._blockhash_updater_task.cancel()
             try:
                 await self._blockhash_updater_task
             except asyncio.CancelledError:
@@ -492,6 +572,21 @@ class SolanaClient:
             current = cause if cause is not None else context
         return False
 
+    @staticmethod
+    def _has_permanent_http_status(exc: BaseException) -> bool:
+        """True when the cause chain carries a 4xx that retrying cannot fix."""
+        current: BaseException | None = exc
+        visited: set[int] = set()
+        while current is not None and id(current) not in visited:
+            visited.add(id(current))
+            if isinstance(current, HTTPStatusError):
+                status = current.response.status_code
+                return 400 <= status < 500 and status not in (408, 429)
+            cause = current.__cause__
+            context = current.__context__
+            current = cause if cause is not None else context
+        return False
+
     async def _record_unknown_outcome(
         self, signature: str, error: BaseException | str
     ) -> None:
@@ -603,8 +698,21 @@ class SolanaClient:
                 )
             raise
         except RPCException as exc:
+            if is_preflight_rejection(exc):
+                released = await asyncio.shield(
+                    asyncio.to_thread(
+                        self.ledger.release_prepared_submission,
+                        signature,
+                    )
+                )
+                if released:
+                    self._submission_validity.pop(signature, None)
+                    self._release_intent_signature(signature)
+                raise PreflightRejected(signature, exc) from exc
             await self._record_unknown_outcome(signature, exc)
             raise TransactionSubmissionUnknown(signature, exc) from exc
+        except EvidencePersistenceError:
+            raise
         except BaseException as exc:
             if not send_started:
                 released = await asyncio.shield(
@@ -809,12 +917,10 @@ class SolanaClient:
                 "priority_fee exceeds the unsigned 64-bit wire encoding limit"
             )
 
-        effective_cu_limit = (
-            compute_unit_limit if compute_unit_limit is not None else 85_000
-        )
-        estimated_fee = (
-            LAMPORTS_PER_SIGNATURE
-            + ((priority_fee or 0) * effective_cu_limit + 999_999) // 1_000_000
+        effective_cu_limit = compute_unit_limit or DEFAULT_COMPUTE_UNIT_LIMIT
+        estimated_fee = estimate_transaction_fee_lamports(
+            priority_fee,
+            compute_unit_limit,
         )
         if quote_amount_raw is None:
             raise ExecutionBlocked(
@@ -937,6 +1043,7 @@ class SolanaClient:
                 wire_bytes=wire_bytes,
                 state="prepared",
                 receipt_destinations=receipt_destinations,
+                evidence_profile_id=self.evidence_profile_id,
                 quote_mint=str(normalized_quote_mint),
                 risk_session_id=risk_session_id,
                 max_session_quote_raw=max_session_quote_raw,
@@ -969,19 +1076,25 @@ class SolanaClient:
                     wire_bytes=wire_bytes,
                     state="prepared",
                     receipt_destinations=receipt_destinations,
+                    evidence_profile_id=self.evidence_profile_id,
                     risk_session_id=risk_session_id,
                     quote_mint=str(normalized_quote_mint),
                     max_session_quote_raw=max_session_quote_raw,
                     max_session_fee_lamports=max_session_fee_lamports,
                     intent_message_hash=message_hash,
                 )
-                if reserved_signature != signature_text:
-                    raise TransactionSubmissionUnknown(
-                        reserved_signature,
-                        "concurrent submission replaced a stale reservation",
-                    )
-
             self._remember_intent_signature(resolved_intent_id, signature_text)
+            # Fire-and-forget secondary channel: QUIC to current leader TPUs
+            # (tpuQuic) ahead of the rate-limited HTTP RPC send. Never fatal;
+            # validators deduplicate by signature if both channels land.
+            self._start_tpu_refresher()
+            if self._tpu is not None:
+                delivered = await self._tpu.send_quic(wire_bytes)
+                if delivered:
+                    logger.info(f"TPU QUIC submission sent to {delivered} leader(s)")
+                udp_delivered = self._tpu.send(wire_bytes)
+                if udp_delivered:
+                    logger.info(f"TPU UDP submission sent to {udp_delivered} leader(s)")
             send_started = False
             try:
                 await asyncio.wait_for(
@@ -1020,11 +1133,24 @@ class SolanaClient:
                     )
                 raise
             except RPCException as exc:
+                if is_preflight_rejection(exc):
+                    released = await asyncio.shield(
+                        asyncio.to_thread(
+                            self.ledger.release_prepared_submission,
+                            signature_text,
+                        )
+                    )
+                    if released:
+                        self._submission_validity.pop(signature_text, None)
+                        self._release_intent_signature(signature_text)
+                    raise PreflightRejected(signature_text, exc) from exc
                 await self._record_unknown_outcome(signature_text, exc)
                 raise TransactionSubmissionUnknown(
                     signature_text,
                     exc,
                 ) from exc
+            except EvidencePersistenceError:
+                raise
             except BaseException as exc:
                 if not send_started:
                     released = await asyncio.shield(
@@ -1154,6 +1280,8 @@ class SolanaClient:
             )
             if confirmation_response.value:
                 confirmation_status = confirmation_response.value[0]
+        except EvidencePersistenceError:
+            raise
         except Exception as exc:
             confirmation_error = str(exc) or type(exc).__name__
 
@@ -1162,6 +1290,8 @@ class SolanaClient:
                 signature_text,
                 commitment=commitment,
             )
+        except EvidencePersistenceError:
+            raise
         except Exception as exc:
             result = None
             if confirmation_error is None:
@@ -1329,21 +1459,37 @@ class SolanaClient:
         last_valid_height: int,
         requested_commitment: str,
     ) -> bool:
-        """Fail closed until durable ledger-range coverage can prove expiry.
+        """Prove a signed transaction can no longer land.
 
-        Finalized RPC history is prunable, so block-height advancement plus an
-        absent status or transaction cannot prove that a signed transaction
-        never landed. Avoid spending RPC reads on evidence that can only produce
-        the same unresolved result.
+        A transaction is only valid through its blockhash's last valid block
+        height. Once the finalized block height is past that (plus a margin
+        for node skew), no status in full signature history and no finalized
+        transaction record together mean it never landed. Every read must
+        succeed; any RPC failure keeps the outcome unknown (fail closed).
+
+        Live 2026-09-03: without this, a sell whose wire expired stayed
+        UNKNOWN for an hour while the coin dumped under the held position.
         """
-        del signature, last_valid_height, requested_commitment
-        return False
+        del requested_commitment
+        available, status = await self._read_signature_status(signature)
+        if not available or status is not None:
+            return False
+        present_available, exists = await self._read_transaction_presence(
+            str(signature), "finalized"
+        )
+        if not present_available or exists:
+            return False
+        return await self._current_block_height_exceeds(
+            last_valid_height + EXPIRY_PROOF_MARGIN_BLOCKS, commitment="finalized"
+        )
 
     async def verify_transaction_succeeded(self, signature: str | Signature) -> bool:
         """Compatibility check returning true only for a proven on-chain success."""
         signature_text = str(signature)
         try:
             result = await self._get_transaction_result(signature_text)
+        except EvidencePersistenceError:
+            raise
         except Exception as exc:
             logger.warning(
                 f"Could not fetch transaction {signature_text[:16]}...: {exc!s}"
@@ -1683,17 +1829,58 @@ class SolanaClient:
             return None
         return received
 
+    async def get_buyer_pre_token_balance(
+        self,
+        signature: str | Signature,
+        mint: Pubkey,
+        owner: Pubkey,
+    ) -> int | None:
+        """Return the owner's balance of ``mint`` before a confirmed transaction.
+
+        Read validated pre/post token endpoints from the receipt. A missing
+        pre endpoint is zero only when the account had zero pre-lamports.
+        Unavailable or ambiguous inventory remains None.
+        """
+        result = await self._get_transaction_result(str(signature))
+        if not isinstance(result, dict):
+            return None
+        meta = result.get("meta")
+        if not isinstance(meta, dict) or meta.get("err"):
+            return None
+        transaction = result.get("transaction")
+        message = transaction.get("message") if isinstance(transaction, dict) else None
+        account_keys = message.get("accountKeys") if isinstance(message, dict) else None
+        if not isinstance(account_keys, list) or not account_keys:
+            return None
+        for key in account_keys:
+            raw_key = (
+                key
+                if isinstance(key, str)
+                else (key.get("pubkey") if isinstance(key, dict) else None)
+            )
+            if not isinstance(raw_key, str):
+                return None
+            try:
+                Pubkey.from_string(raw_key)
+            except (TypeError, ValueError):
+                return None
+        totals = self._extract_token_balance_totals(
+            meta, str(mint), owner=str(owner), account_count=len(account_keys)
+        )
+        return totals[0] if totals is not None else None
+
+    # Keep paired endpoint validation together so every ambiguity fails closed.
     @staticmethod
-    def _extract_positive_token_diff(  # noqa: PLR0912
+    def _extract_token_balance_totals(  # noqa: C901, PLR0911, PLR0912, PLR0915
         meta: dict,
         mint_str: str,
         *,
         owner: str | None = None,
         account_index: int | None = None,
         account_count: int | None = None,
-    ) -> int | None:
-        """Return the attributed net positive mint delta, or fail closed."""
-        if owner is None and account_index is None:
+    ) -> tuple[int, int] | None:
+        """Return known attributed pre/post mint totals, or fail closed."""
+        if not isinstance(meta, dict) or (owner is None and account_index is None):
             return None
         if (
             account_count is None
@@ -1711,7 +1898,7 @@ class SolanaClient:
 
         indexed_balances: list[dict[int, dict]] = []
         for field in ("preTokenBalances", "postTokenBalances"):
-            entries = meta.get(field, [])
+            entries = meta.get(field)
             if not isinstance(entries, list):
                 return None
             by_index: dict[int, dict] = {}
@@ -1726,11 +1913,19 @@ class SolanaClient:
                     or index in by_index
                 ):
                     return None
+                mint = balance.get("mint")
+                if not isinstance(mint, str):
+                    return None
+                try:
+                    Pubkey.from_string(mint)
+                except (TypeError, ValueError):
+                    return None
                 by_index[index] = balance
             indexed_balances.append(by_index)
 
         pre_by_idx, post_by_idx = indexed_balances
-        total_delta = 0
+        total_pre = total_post = 0
+        lamport_balances = None
         matched = False
         for index in set(pre_by_idx) | set(post_by_idx):
             if account_index is not None and index != account_index:
@@ -1740,18 +1935,31 @@ class SolanaClient:
             if pre is not None and post is not None:
                 if pre.get("mint") != post.get("mint"):
                     return None
-                if (
-                    pre.get("owner") is not None
-                    and post.get("owner") is not None
-                    and pre.get("owner") != post.get("owner")
-                ):
+                if pre.get("owner") != post.get("owner"):
                     return None
             balance = post or pre
             if balance is None or balance.get("mint") != mint_str:
                 continue
             balance_owner = balance.get("owner")
-            if owner is not None and balance_owner != owner:
-                continue
+            if not isinstance(balance_owner, str):
+                return None
+            try:
+                Pubkey.from_string(balance_owner)
+            except (TypeError, ValueError):
+                return None
+
+            if pre is None or post is None:
+                if lamport_balances is None:
+                    lamport_balances = SolanaClient._validated_lamport_balances(
+                        meta, account_count
+                    )
+                if lamport_balances is None:
+                    return None
+                pre_lamports, post_lamports = lamport_balances
+                if (pre is None and pre_lamports[index] != 0) or (
+                    post is None and post_lamports[index] != 0
+                ):
+                    return None
 
             pre_amount = (
                 SolanaClient._parse_raw_token_amount(pre) if pre is not None else 0
@@ -1761,15 +1969,40 @@ class SolanaClient:
             )
             if pre_amount is None or post_amount is None:
                 return None
-            total_delta += post_amount - pre_amount
+            if owner is not None and balance_owner != owner:
+                continue
+            total_pre += pre_amount
+            total_post += post_amount
             if (
-                total_delta < -0xFFFF_FFFF_FFFF_FFFF
-                or total_delta > 0xFFFF_FFFF_FFFF_FFFF
+                total_pre > 0xFFFF_FFFF_FFFF_FFFF  # noqa: PLR2004
+                or total_post > 0xFFFF_FFFF_FFFF_FFFF  # noqa: PLR2004
             ):
                 return None
             matched = True
 
-        return total_delta if matched and total_delta > 0 else None
+        return (total_pre, total_post) if matched else None
+
+    @staticmethod
+    def _extract_positive_token_diff(
+        meta: dict,
+        mint_str: str,
+        *,
+        owner: str | None = None,
+        account_index: int | None = None,
+        account_count: int | None = None,
+    ) -> int | None:
+        """Return the attributed net positive mint delta, or fail closed."""
+        totals = SolanaClient._extract_token_balance_totals(
+            meta,
+            mint_str,
+            owner=owner,
+            account_index=account_index,
+            account_count=account_count,
+        )
+        if totals is None:
+            return None
+        delta = totals[1] - totals[0]
+        return delta if delta > 0 else None
 
     @staticmethod
     def _is_canonical_transaction_result(result: object, signature: str) -> bool:
@@ -1821,6 +2054,9 @@ class SolanaClient:
         # A Signature is not JSON serializable, so it has to be stringified here
         # rather than relying on every caller to remember.
         signature = str(signature)
+        if commitment not in {"confirmed", "finalized"}:
+            message = "commitment must be confirmed or finalized"
+            raise ValueError(message)
         body = {
             "jsonrpc": "2.0",
             "id": 1,
@@ -1852,9 +2088,31 @@ class SolanaClient:
             return None
 
         result = response["result"]
+        if result is None:
+            return None  # not found at this commitment; expiry proof decides
         if not self._is_canonical_transaction_result(result, signature):
             logger.warning(f"Malformed transaction envelope for {signature[:16]}...")
             return None
+
+        if self.ledger is not None:
+            try:
+                tracked_height = await asyncio.to_thread(
+                    self.ledger.get_last_valid_block_height, signature
+                )
+                if tracked_height is not None:
+                    await asyncio.to_thread(
+                        self.ledger.record_receipt_evidence,
+                        signature,
+                        commitment,
+                        result,
+                        profile_id=self.evidence_profile_id,
+                    )
+            except EvidencePersistenceError:
+                raise
+            except Exception as exc:
+                # A local lookup/encoding failure is not an absent RPC receipt.
+                message = "could not archive tracked transaction receipt"
+                raise EvidencePersistenceError(message) from exc
 
         return result
 
@@ -1872,6 +2130,8 @@ class SolanaClient:
         swapped_meta = {
             "preTokenBalances": meta.get("postTokenBalances"),
             "postTokenBalances": meta.get("preTokenBalances"),
+            "preBalances": meta.get("postBalances"),
+            "postBalances": meta.get("preBalances"),
         }
         return SolanaClient._extract_positive_token_diff(
             swapped_meta,
@@ -1976,6 +2236,13 @@ class SolanaClient:
                         await asyncio.sleep(retry_delay)
                         continue
 
+                    if (
+                        400 <= response.status < 500
+                        and response.status != HTTP_REQUEST_TIMEOUT
+                    ):
+                        # 429 handled above; other 4xx cannot be fixed by retrying
+                        # and must not read as an outage.
+                        raise JsonRpcError(method, f"HTTP {response.status}")
                     response.raise_for_status()
                     payload = await response.json()
                     if not isinstance(payload, dict):
@@ -1991,9 +2258,9 @@ class SolanaClient:
 
             except JsonRpcError:
                 raise
-            except aiohttp.ContentTypeError:
-                logger.exception(f"Failed to decode RPC response for {method}")
-                return None
+            except aiohttp.ContentTypeError as exc:
+                # A 2xx with a non-JSON body is a response defect, not an outage.
+                raise JsonRpcError(method, "response body is not JSON") from exc
             except (TimeoutError, aiohttp.ClientError):
                 transport_attempts += 1
                 if transport_attempts >= max_retries:

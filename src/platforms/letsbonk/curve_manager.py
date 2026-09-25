@@ -12,7 +12,7 @@ from typing import Any
 
 from solders.pubkey import Pubkey
 
-from core.client import SolanaClient
+from core.client import RpcUnavailableError, SolanaClient
 from core.pubkeys import SystemAddresses
 from core.quote_engine import QuoteError, calculate_transfer_fee_raw
 from interfaces.core import CurveManager, Platform
@@ -202,6 +202,8 @@ class LetsBonkCurveManager(CurveManager):
                 base_transfer_fee=transfer_fees["base"],
                 quote_transfer_fee=transfer_fees["quote"],
             )
+        except RpcUnavailableError:
+            raise
         except Exception as error:
             logger.exception("Failed to get LaunchLab pool state")
             raise ValueError(f"Invalid LaunchLab pool state: {error}") from error

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import threading
@@ -52,6 +53,10 @@ class LedgerConflict(RuntimeError):
     """Raised when an idempotency key is reused for different transaction data."""
 
 
+class EvidencePersistenceError(RuntimeError):
+    """Raised when durable trade evidence cannot be persisted."""
+
+
 @dataclass(frozen=True, slots=True)
 class SubmissionRecord:
     """A submission reservation bound to one exact signed wire transaction."""
@@ -66,6 +71,7 @@ class SubmissionRecord:
     state: str
     wire_bytes: bytes | None
     receipt_destinations: tuple[str, ...] | None
+    evidence_profile_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +89,7 @@ class RecoveryRecord:
     state: str
     wire_bytes: bytes | None
     receipt_destinations: tuple[str, ...] | None
+    evidence_profile_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,7 +122,12 @@ class TransactionLedger:
         self._connection.execute("PRAGMA synchronous=FULL")
         self._connection.execute("PRAGMA foreign_keys=ON")
         self._connection.execute("PRAGMA busy_timeout=5000")
-        self._create_schema()
+        try:
+            self._create_schema()
+        except sqlite3.Error as exc:
+            self._connection.close()
+            message = "could not initialize evidence ledger"
+            raise EvidencePersistenceError(message) from exc
 
     @property
     def connection(self) -> sqlite3.Connection:
@@ -126,6 +138,34 @@ class TransactionLedger:
         with self._lock, self._connection:
             self._connection.executescript(
                 """
+                CREATE TABLE IF NOT EXISTS evidence_profiles (
+                    profile_id TEXT PRIMARY KEY,
+                    kind TEXT NOT NULL CHECK (
+                        kind IN ('live', 'dry_run', 'simulation', 'paper')
+                    ),
+                    settings_json TEXT NOT NULL,
+                    sources_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS evidence_events (
+                    event_id TEXT PRIMARY KEY,
+                    profile_id TEXT REFERENCES evidence_profiles(profile_id),
+                    category TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    observed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS evidence_receipts (
+                    receipt_id TEXT PRIMARY KEY,
+                    signature TEXT NOT NULL,
+                    commitment TEXT NOT NULL CHECK (
+                        commitment IN ('confirmed', 'finalized')
+                    ),
+                    profile_id TEXT REFERENCES evidence_profiles(profile_id),
+                    observed_fee_lamports TEXT,
+                    payload_json TEXT NOT NULL,
+                    observed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
                 CREATE TABLE IF NOT EXISTS intents (
                     intent_id TEXT PRIMARY KEY,
                     signer TEXT NOT NULL,
@@ -145,6 +185,7 @@ class TransactionLedger:
                     ),
                     wire_bytes BLOB,
                     receipt_destinations TEXT,
+                    evidence_profile_id TEXT REFERENCES evidence_profiles(profile_id),
                     submitted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
                 CREATE INDEX IF NOT EXISTS submissions_intent_idx
@@ -212,6 +253,157 @@ class TransactionLedger:
                 self._connection.execute(
                     "ALTER TABLE submissions ADD COLUMN receipt_destinations TEXT"
                 )
+            if "evidence_profile_id" not in submission_columns:
+                self._connection.execute(
+                    "ALTER TABLE submissions ADD COLUMN evidence_profile_id TEXT "
+                    "REFERENCES evidence_profiles(profile_id)"
+                )
+
+    @staticmethod
+    def _canonical_json(value: dict) -> str:
+        """Encode finite JSON without ambiguous coercion of object keys."""
+        if not isinstance(value, dict):
+            message = "evidence must be a JSON object"
+            raise TypeError(message)
+        encoded = json.dumps(
+            value, sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
+        pending = [value]
+        while pending:
+            item = pending.pop()
+            if isinstance(item, dict):
+                if any(not isinstance(key, str) for key in item):
+                    message = "evidence object keys must be strings"
+                    raise TypeError(message)
+                pending.extend(item.values())
+            elif isinstance(item, list):
+                pending.extend(item)
+            elif item is not None and not isinstance(item, str | int | float | bool):
+                message = "evidence must contain only JSON values"
+                raise TypeError(message)
+        return encoded
+
+    @classmethod
+    def _evidence_id(cls, value: dict) -> str:
+        return hashlib.sha256(cls._canonical_json(value).encode("utf-8")).hexdigest()
+
+    def record_evidence_profile(
+        self, kind: str, settings: dict, sources: dict[str, str]
+    ) -> str:
+        """Retain an immutable, content-addressed execution profile."""
+        if kind not in {"live", "dry_run", "simulation", "paper"}:
+            message = "invalid evidence profile kind"
+            raise ValueError(message)
+        settings_json = self._canonical_json(settings)
+        sources_json = self._canonical_json(sources)
+        if any(not isinstance(value, str) for value in sources.values()):
+            message = "evidence sources must map names to strings"
+            raise TypeError(message)
+        profile_id = self._evidence_id(
+            {"kind": kind, "settings": settings, "sources": sources}
+        )
+        try:
+            with self._lock, self._connection:
+                self._connection.execute(
+                    """
+                    INSERT INTO evidence_profiles (
+                        profile_id, kind, settings_json, sources_json
+                    ) VALUES (?, ?, ?, ?)
+                    ON CONFLICT(profile_id) DO NOTHING
+                    """,
+                    (profile_id, kind, settings_json, sources_json),
+                )
+        except sqlite3.Error as exc:
+            message = "could not persist evidence profile"
+            raise EvidencePersistenceError(message) from exc
+        return profile_id
+
+    def _record_trade_evidence_locked(
+        self, profile_id: str | None, category: str, payload: dict
+    ) -> str:
+        """Insert within the caller's transaction, including prepared release."""
+        if not isinstance(category, str) or not category:
+            message = "evidence category must be a non-empty string"
+            raise ValueError(message)
+        payload_json = self._canonical_json(payload)
+        event_id = self._evidence_id(
+            {"profile_id": profile_id, "category": category, "payload": payload}
+        )
+        self._connection.execute(
+            """
+            INSERT INTO evidence_events (event_id, profile_id, category, payload_json)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(event_id) DO NOTHING
+            """,
+            (event_id, profile_id, category, payload_json),
+        )
+        return event_id
+
+    def record_trade_evidence(
+        self, profile_id: str | None, category: str, payload: dict
+    ) -> str:
+        """Retain repeated observations once and changed observations separately."""
+        try:
+            with self._lock, self._connection:
+                return self._record_trade_evidence_locked(profile_id, category, payload)
+        except sqlite3.Error as exc:
+            message = "could not persist trade evidence"
+            raise EvidencePersistenceError(message) from exc
+
+    def record_receipt_evidence(
+        self,
+        signature: str,
+        commitment: str,
+        result: dict,
+        *,
+        profile_id: str | None = None,
+    ) -> str:
+        """Retain public receipt observations, never substituting a fee budget."""
+        if not isinstance(signature, str) or not signature:
+            message = "receipt signature must be a non-empty string"
+            raise ValueError(message)
+        if commitment not in {"confirmed", "finalized"}:
+            message = "receipt commitment must be confirmed or finalized"
+            raise ValueError(message)
+        payload_json = self._canonical_json(result)
+        receipt_id = self._evidence_id(
+            {
+                "signature": signature,
+                "commitment": commitment,
+                "profile_id": profile_id,
+                "result": result,
+            }
+        )
+        meta = result.get("meta")
+        fee = meta.get("fee") if isinstance(meta, dict) else None
+        observed_fee = (
+            str(fee)
+            if isinstance(fee, int) and not isinstance(fee, bool) and 0 <= fee < 2**64
+            else None
+        )
+        try:
+            with self._lock, self._connection:
+                self._connection.execute(
+                    """
+                    INSERT INTO evidence_receipts (
+                        receipt_id, signature, commitment, profile_id,
+                        observed_fee_lamports, payload_json
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(receipt_id) DO NOTHING
+                    """,
+                    (
+                        receipt_id,
+                        signature,
+                        commitment,
+                        profile_id,
+                        observed_fee,
+                        payload_json,
+                    ),
+                )
+        except sqlite3.Error as exc:
+            message = "could not persist receipt evidence"
+            raise EvidencePersistenceError(message) from exc
+        return receipt_id
 
     @staticmethod
     def _validate_raw_amount(name: str, value: int | None) -> None:
@@ -556,6 +748,34 @@ class TransactionLedger:
                 self._connection.rollback()
                 raise
 
+    @classmethod
+    def _submission_record_from_row(
+        cls,
+        row: sqlite3.Row,
+    ) -> SubmissionRecord:
+        wire_bytes = row["wire_bytes"]
+        return SubmissionRecord(
+            signature=str(row["signature"]),
+            intent_id=str(row["intent_id"]),
+            blockhash=str(row["blockhash"]),
+            last_valid_block_height=int(row["last_valid_block_height"]),
+            state=str(row["state"]),
+            signer=str(row["signer"]),
+            quote_amount_raw=(
+                None
+                if row["quote_amount_raw"] is None
+                else int(row["quote_amount_raw"])
+            ),
+            fee_lamports=(
+                None if row["fee_lamports"] is None else int(row["fee_lamports"])
+            ),
+            wire_bytes=None if wire_bytes is None else bytes(wire_bytes),
+            receipt_destinations=cls._decode_receipt_destinations(
+                row["receipt_destinations"]
+            ),
+            evidence_profile_id=row["evidence_profile_id"],
+        )
+
     def get_active_submission_record(self, intent_id: str) -> SubmissionRecord | None:
         """Return the safest reusable submission for an intent."""
         if not intent_id:
@@ -573,7 +793,8 @@ class TransactionLedger:
                     s.last_valid_block_height,
                     s.state,
                     s.wire_bytes,
-                    s.receipt_destinations
+                    s.receipt_destinations,
+                    s.evidence_profile_id
                 FROM submissions AS s
                 JOIN intents AS i ON i.intent_id = s.intent_id
                 LEFT JOIN outcomes AS o ON o.signature = s.signature
@@ -594,34 +815,72 @@ class TransactionLedger:
                 """,
                 (intent_id,),
             ).fetchone()
-        if row is None:
-            return None
-        wire_bytes = row["wire_bytes"]
-        return SubmissionRecord(
-            signature=str(row["signature"]),
-            intent_id=str(row["intent_id"]),
-            blockhash=str(row["blockhash"]),
-            last_valid_block_height=int(row["last_valid_block_height"]),
-            state=str(row["state"]),
-            signer=str(row["signer"]),
-            quote_amount_raw=(
-                None
-                if row["quote_amount_raw"] is None
-                else int(row["quote_amount_raw"])
-            ),
-            fee_lamports=(
-                None if row["fee_lamports"] is None else int(row["fee_lamports"])
-            ),
-            wire_bytes=None if wire_bytes is None else bytes(wire_bytes),
-            receipt_destinations=self._decode_receipt_destinations(
-                row["receipt_destinations"]
-            ),
-        )
+        return None if row is None else self._submission_record_from_row(row)
+
+    def get_latest_submission_record(
+        self,
+        intent_id: str,
+    ) -> SubmissionRecord | None:
+        """Return the latest submission for an intent, including terminal outcomes."""
+        if not intent_id:
+            raise ValueError("intent_id is required")
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT
+                    s.signature,
+                    s.intent_id,
+                    i.signer,
+                    i.quote_amount_raw,
+                    i.fee_lamports,
+                    s.blockhash,
+                    s.last_valid_block_height,
+                    s.state,
+                    s.wire_bytes,
+                    s.receipt_destinations,
+                    s.evidence_profile_id
+                FROM submissions AS s
+                JOIN intents AS i ON i.intent_id = s.intent_id
+                WHERE s.intent_id = ?
+                ORDER BY s.submitted_at DESC, s.rowid DESC
+                LIMIT 1
+                """,
+                (intent_id,),
+            ).fetchone()
+        return None if row is None else self._submission_record_from_row(row)
 
     def get_active_submission(self, intent_id: str) -> str | None:
         """Return a submission that is successful or not yet resolved."""
         record = self.get_active_submission_record(intent_id)
         return None if record is None else record.signature
+
+    def list_nonterminal_submissions(self, signer: str) -> list[dict[str, str]]:
+        """Return every submission for a signer with no terminal outcome yet."""
+        if not signer:
+            raise ValueError("signer is required")
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT s.intent_id, s.signature, s.state,
+                       COALESCE(o.status, 'none') AS outcome
+                FROM submissions AS s
+                JOIN intents AS i ON i.intent_id = s.intent_id
+                LEFT JOIN outcomes AS o ON o.signature = s.signature
+                WHERE i.signer = ?
+                  AND (o.status IS NULL OR o.status = 'unknown')
+                ORDER BY s.submitted_at ASC, s.rowid ASC
+                """,
+                (signer,),
+            ).fetchall()
+        return [
+            {
+                "intent_id": str(row["intent_id"]),
+                "signature": str(row["signature"]),
+                "state": str(row["state"]),
+                "outcome": str(row["outcome"]),
+            }
+            for row in rows
+        ]
 
     def get_receipt_destinations(self, signature: str) -> tuple[str, ...] | None:
         """Return exact native-quote receipt destinations for a submission."""
@@ -656,6 +915,7 @@ class TransactionLedger:
         max_session_quote_raw: int | None = None,
         max_session_fee_lamports: int | None = None,
         intent_message_hash: str | None = None,
+        evidence_profile_id: str | None = None,
     ) -> str:
         """Atomically reserve one reusable exact-wire submission."""
         if not intent_id or not signature or not blockhash:
@@ -777,8 +1037,8 @@ class TransactionLedger:
                     """
                     INSERT INTO submissions (
                         signature, intent_id, blockhash, last_valid_block_height,
-                        state, wire_bytes, receipt_destinations
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        state, wire_bytes, receipt_destinations, evidence_profile_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(signature) DO NOTHING
                     """,
                     (
@@ -789,6 +1049,7 @@ class TransactionLedger:
                         state,
                         normalized_wire,
                         normalized_destinations,
+                        evidence_profile_id,
                     ),
                 )
                 row = self._connection.execute(
@@ -904,6 +1165,12 @@ class TransactionLedger:
                     )
                 self._connection.commit()
                 return signature
+            except sqlite3.Error as exc:
+                try:
+                    self._connection.rollback()
+                finally:
+                    message = "could not persist submission provenance"
+                    raise EvidencePersistenceError(message) from exc
             except Exception:
                 self._connection.rollback()
                 raise
@@ -957,15 +1224,43 @@ class TransactionLedger:
                 self._connection.execute("BEGIN IMMEDIATE")
                 prepared = self._connection.execute(
                     """
-                    SELECT intent_id FROM submissions
-                    WHERE signature = ? AND state = 'prepared'
+                    SELECT s.intent_id, s.wire_bytes, s.evidence_profile_id,
+                           i.quote_amount_raw, i.fee_lamports
+                    FROM submissions AS s
+                    JOIN intents AS i ON i.intent_id = s.intent_id
+                    WHERE s.signature = ? AND s.state = 'prepared'
                       AND NOT EXISTS (
                           SELECT 1 FROM outcomes
-                          WHERE signature = submissions.signature
+                          WHERE signature = s.signature
                       )
                     """,
                     (signature,),
                 ).fetchone()
+                if prepared is not None:
+                    wire = prepared["wire_bytes"]
+                    self._record_trade_evidence_locked(
+                        prepared["evidence_profile_id"],
+                        "submission_released",
+                        {
+                            "signature": signature,
+                            "intent_id": prepared["intent_id"],
+                            "quote_amount_raw": (
+                                None
+                                if prepared["quote_amount_raw"] is None
+                                else int(prepared["quote_amount_raw"])
+                            ),
+                            "fee_budget_lamports": (
+                                None
+                                if prepared["fee_lamports"] is None
+                                else int(prepared["fee_lamports"])
+                            ),
+                            "wire_sha256": (
+                                None
+                                if wire is None
+                                else hashlib.sha256(bytes(wire)).hexdigest()
+                            ),
+                        },
+                    )
                 cursor = self._connection.execute(
                     """
                     DELETE FROM submissions
@@ -994,6 +1289,12 @@ class TransactionLedger:
                     )
                 self._connection.commit()
                 return cursor.rowcount == 1
+            except sqlite3.Error as exc:
+                try:
+                    self._connection.rollback()
+                finally:
+                    message = "could not persist prepared release evidence"
+                    raise EvidencePersistenceError(message) from exc
             except Exception:
                 self._connection.rollback()
                 raise
@@ -1157,7 +1458,8 @@ class TransactionLedger:
                     s.submitted_at,
                     s.state,
                     s.wire_bytes,
-                    s.receipt_destinations
+                    s.receipt_destinations,
+                    s.evidence_profile_id
                 FROM submissions AS s
                 JOIN intents AS i ON i.intent_id = s.intent_id
                 LEFT JOIN outcomes AS o ON o.signature = s.signature
@@ -1190,6 +1492,7 @@ class TransactionLedger:
                 receipt_destinations=self._decode_receipt_destinations(
                     row["receipt_destinations"]
                 ),
+                evidence_profile_id=row["evidence_profile_id"],
             )
             for row in rows
         ]

@@ -16,6 +16,7 @@ from core.client import (
     SolanaClient,
     TransactionStatus,
     TransactionSubmissionUnknown,
+    estimate_transaction_fee_lamports,
 )
 from core.priority_fee.manager import PriorityFeeManager
 from core.pubkeys import (
@@ -28,6 +29,7 @@ from core.pubkeys import (
     quote_units_per_token,
 )
 from core.quote_engine import minimum_output_with_slippage
+from core.transaction_ledger import EvidencePersistenceError
 from core.wallet import Wallet
 from interfaces.core import AddressProvider, CurveManager, Platform, TokenInfo
 from platforms import get_platform_implementations
@@ -567,6 +569,7 @@ class PlatformAwareBuyer(Trader):
         account_balance_baseline_raw: int | None = None
         submitted_signature: str | None = None
         quote_mint: Pubkey | None = None
+        transaction_fee_lamports: int | None = None
         zero_rpc_event_path = False
         native_receipt_destinations: tuple[Pubkey, ...] = ()
         pool_state: dict[str, Any] | None = None
@@ -765,6 +768,13 @@ class PlatformAwareBuyer(Trader):
             priority_fee = await self.priority_fee_manager.calculate_priority_fee(
                 priority_accounts
             )
+            buy_compute_unit_limit = instruction_builder.get_buy_compute_unit_limit(
+                self._get_cu_override("buy", token_info.platform)
+            )
+            transaction_fee_lamports = estimate_transaction_fee_lamports(
+                priority_fee,
+                buy_compute_unit_limit,
+            )
             if not zero_rpc_event_path:
                 account_balance_baseline_raw = await self._read_pretrade_balance(
                     token_info
@@ -786,14 +796,13 @@ class PlatformAwareBuyer(Trader):
                 self.wallet.keypair,
                 max_retries=self.max_retries,
                 priority_fee=priority_fee,
-                compute_unit_limit=instruction_builder.get_buy_compute_unit_limit(
-                    self._get_cu_override("buy", token_info.platform)
-                ),
+                compute_unit_limit=buy_compute_unit_limit,
                 account_data_size_limit=self._get_cu_override(
                     "account_data_size", token_info.platform
                 ),
                 quote_amount_raw=max_quote_amount_raw,
                 quote_mint=quote_mint,
+                fee_lamports=transaction_fee_lamports,
                 intent_id=f"buy:{token_info.platform.value}:{token_info.mint}",
                 receipt_destinations=(
                     tuple(
@@ -809,6 +818,14 @@ class PlatformAwareBuyer(Trader):
 
             if outcome.status is TransactionStatus.SUCCESS:
                 logger.info(f"Buy transaction confirmed: {signature}")
+                if account_balance_baseline_raw is None:
+                    # Zero-RPC path: the pre-buy balance comes from the receipt
+                    # so cleanup can still prove the ATA is bot-owned.
+                    account_balance_baseline_raw = (
+                        await self.client.get_buyer_pre_token_balance(
+                            signature, token_info.mint, self.wallet.pubkey
+                        )
+                    )
                 if is_sol_paired(quote_mint):
                     exact_destinations = await _exact_native_receipt_destinations(
                         self.client,
@@ -868,6 +885,7 @@ class PlatformAwareBuyer(Trader):
                     price=actual_price,
                     amount_raw=tokens_raw,
                     quote_amount_raw=quote_spent,
+                    fee_lamports=transaction_fee_lamports,
                     account_balance_baseline_raw=account_balance_baseline_raw,
                     slot=outcome.slot,
                     status=outcome.status.value,
@@ -881,6 +899,7 @@ class PlatformAwareBuyer(Trader):
                 or f"Buy transaction outcome: {outcome.status.value}",
                 amount_raw=expected_token_amount_raw,
                 quote_amount_raw=max_quote_amount_raw,
+                fee_lamports=transaction_fee_lamports,
                 account_balance_baseline_raw=account_balance_baseline_raw,
                 slot=outcome.slot,
                 status=outcome.status.value,
@@ -901,9 +920,12 @@ class PlatformAwareBuyer(Trader):
                 price=token_price_sol,
                 amount_raw=expected_token_amount_raw,
                 quote_amount_raw=max_quote_amount_raw,
+                fee_lamports=transaction_fee_lamports,
                 account_balance_baseline_raw=account_balance_baseline_raw,
                 status=TransactionStatus.UNKNOWN.value,
             )
+        except EvidencePersistenceError:
+            raise
         except Exception as e:
             logger.exception("Buy operation failed")
             return TradeResult(
@@ -915,6 +937,7 @@ class PlatformAwareBuyer(Trader):
                 price=token_price_sol,
                 amount_raw=expected_token_amount_raw,
                 quote_amount_raw=max_quote_amount_raw,
+                fee_lamports=transaction_fee_lamports,
                 account_balance_baseline_raw=account_balance_baseline_raw,
                 status=(
                     TransactionStatus.UNKNOWN.value
@@ -964,7 +987,7 @@ class PlatformAwareBuyer(Trader):
         require_snapshot = getattr(fee_schedule, "require_snapshot", None)
         if not callable(require_snapshot):
             raise RuntimeError("Pump.fun curve manager has no fee schedule")
-        return {
+        state = {
             "virtual_token_reserves": token_info.virtual_token_reserves,
             "virtual_quote_reserves": token_info.virtual_quote_reserves,
             "real_token_reserves": token_info.real_token_reserves,
@@ -974,6 +997,13 @@ class PlatformAwareBuyer(Trader):
             "quote_mint": token_info.quote_mint,
             "_pump_fee_snapshot": require_snapshot(),
         }
+        # Gate trigger TradeEvent carried the freshest real SOL reserves; the
+        # exact-out quote needs them to price max_sol_cost from the curve
+        # state at accept time, not from the stale CreateEvent.
+        if getattr(token_info, "real_sol_reserves", None) is not None:
+            state["real_sol_reserves"] = token_info.real_sol_reserves
+            state["real_quote_reserves"] = token_info.real_sol_reserves
+        return state
 
     def _can_skip_refresh(self, token_info: TokenInfo) -> bool:
         """Whether the pre-buy curve read can be skipped entirely.
@@ -1150,6 +1180,8 @@ class PlatformAwareBuyer(Trader):
 class PlatformAwareSeller(Trader):
     """Platform-aware token seller that works with any supported platform."""
 
+    TARGET_NOT_MET_STATUS = "target_not_met"
+
     def __init__(
         self,
         client: SolanaClient,
@@ -1184,6 +1216,7 @@ class PlatformAwareSeller(Trader):
         *,
         token_amount_raw: int | None = None,
         intent_id: str | None = None,
+        take_profit_net_quote_raw: int | None = None,
     ) -> TradeResult:
         """Execute sell operation using platform-specific implementations.
 
@@ -1197,6 +1230,8 @@ class PlatformAwareSeller(Trader):
                         price the caller has. A stale price that is above the
                         market sets a floor the pool cannot pay and the sell
                         reverts (pump.fun 6003 TooLittleSolReceived).
+            take_profit_net_quote_raw: Minimum SOL proceeds required after the
+                sell transaction fee. Used only for take-profit exits.
 
         Returns:
             TradeResult with operation outcome
@@ -1219,12 +1254,19 @@ class PlatformAwareSeller(Trader):
             or token_price <= 0
         ):
             raise ValueError("token_price must be finite and positive when supplied")
+        if take_profit_net_quote_raw is not None and (
+            isinstance(take_profit_net_quote_raw, bool)
+            or not isinstance(take_profit_net_quote_raw, int)
+            or take_profit_net_quote_raw <= 0
+        ):
+            raise ValueError("take_profit_net_quote_raw must be a positive integer")
 
         token_balance: int | None = None
         token_balance_decimal: float | None = None
         quoted_average_price: float | None = None
         expected_quote_output_raw: int | None = None
         submitted_signature: str | None = None
+        transaction_fee_lamports: int | None = None
         try:
             implementations = get_platform_implementations(
                 token_info.platform, self.client
@@ -1340,11 +1382,53 @@ class PlatformAwareSeller(Trader):
                 )
             if expected_quote_output_raw <= 0:
                 raise ValueError("Platform sell quote returned no output")
-            min_quote_output = minimum_output_with_slippage(
+            slippage_min_quote_output = minimum_output_with_slippage(
                 expected_quote_output_raw, self.slippage_bps
             )
             expected_quote_output = expected_quote_output_raw / quote_unit
             quoted_average_price = expected_quote_output / token_balance_decimal
+            priority_accounts = instruction_builder.get_required_accounts_for_sell(
+                token_info, self.wallet.pubkey, address_provider
+            )
+            priority_fee = await self.priority_fee_manager.calculate_priority_fee(
+                priority_accounts
+            )
+            sell_compute_unit_limit = instruction_builder.get_sell_compute_unit_limit(
+                self._get_cu_override("sell", token_info.platform)
+            )
+            transaction_fee_lamports = estimate_transaction_fee_lamports(
+                priority_fee,
+                sell_compute_unit_limit,
+            )
+            min_quote_output = slippage_min_quote_output
+            if take_profit_net_quote_raw is not None:
+                if not is_sol_paired(quote_mint):
+                    raise ValueError(
+                        "Net take-profit accounting currently requires a SOL quote"
+                    )
+                required_gross_quote_raw = (
+                    take_profit_net_quote_raw + transaction_fee_lamports
+                )
+                if expected_quote_output_raw < required_gross_quote_raw:
+                    return TradeResult(
+                        success=False,
+                        platform=token_info.platform,
+                        error_message=(
+                            "Executable sell quote does not meet the net "
+                            f"take-profit target: {expected_quote_output_raw} < "
+                            f"{required_gross_quote_raw} raw"
+                        ),
+                        amount=token_balance_decimal,
+                        price=quoted_average_price,
+                        amount_raw=token_balance,
+                        quote_amount_raw=expected_quote_output_raw,
+                        fee_lamports=transaction_fee_lamports,
+                        status=self.TARGET_NOT_MET_STATUS,
+                    )
+                min_quote_output = max(
+                    slippage_min_quote_output,
+                    required_gross_quote_raw,
+                )
 
             logger.info(
                 f"Selling {token_balance_decimal} tokens on {token_info.platform.value}"
@@ -1353,8 +1437,7 @@ class PlatformAwareSeller(Trader):
                 f"Nonlinear quote output: {expected_quote_output:.10f} {quote_label}"
             )
             logger.info(
-                f"Minimum {quote_label} output (with "
-                f"{self.slippage * 100:.1f}% slippage): "
+                f"Minimum {quote_label} output: "
                 f"{min_quote_output / quote_unit:.10f} {quote_label} "
                 f"({min_quote_output} raw units)"
             )
@@ -1366,25 +1449,18 @@ class PlatformAwareSeller(Trader):
                 min_quote_output,
                 address_provider,
             )
-            priority_accounts = instruction_builder.get_required_accounts_for_sell(
-                token_info, self.wallet.pubkey, address_provider
-            )
-            priority_fee = await self.priority_fee_manager.calculate_priority_fee(
-                priority_accounts
-            )
             tx_signature = await self.client.build_and_send_transaction(
                 instructions,
                 self.wallet.keypair,
                 max_retries=self.max_retries,
                 priority_fee=priority_fee,
-                compute_unit_limit=instruction_builder.get_sell_compute_unit_limit(
-                    self._get_cu_override("sell", token_info.platform)
-                ),
+                compute_unit_limit=sell_compute_unit_limit,
                 account_data_size_limit=self._get_cu_override(
                     "account_data_size", token_info.platform
                 ),
                 quote_amount_raw=0,
                 quote_mint=quote_mint,
+                fee_lamports=transaction_fee_lamports,
                 intent_id=intent_id
                 or (
                     f"sell:{token_info.platform.value}:{token_info.mint}:"
@@ -1417,6 +1493,7 @@ class PlatformAwareSeller(Trader):
                         amount=token_balance_decimal,
                         amount_raw=token_balance,
                         slot=outcome.slot,
+                        fee_lamports=transaction_fee_lamports,
                         status=TransactionStatus.UNKNOWN.value,
                     )
                 actual_price = (quote_received_raw / quote_unit) / (
@@ -1430,6 +1507,7 @@ class PlatformAwareSeller(Trader):
                     price=actual_price,
                     amount_raw=token_balance,
                     quote_amount_raw=quote_received_raw,
+                    fee_lamports=transaction_fee_lamports,
                     slot=outcome.slot,
                     status=outcome.status.value,
                 )
@@ -1442,6 +1520,7 @@ class PlatformAwareSeller(Trader):
                 amount=token_balance_decimal,
                 price=quoted_average_price,
                 amount_raw=token_balance,
+                fee_lamports=transaction_fee_lamports,
                 slot=outcome.slot,
                 status=outcome.status.value,
             )
@@ -1460,8 +1539,11 @@ class PlatformAwareSeller(Trader):
                 amount=token_balance_decimal,
                 price=quoted_average_price,
                 amount_raw=token_balance,
+                fee_lamports=transaction_fee_lamports,
                 status=TransactionStatus.UNKNOWN.value,
             )
+        except EvidencePersistenceError:
+            raise
         except Exception as e:
             logger.exception("Sell operation failed")
             return TradeResult(
@@ -1472,6 +1554,7 @@ class PlatformAwareSeller(Trader):
                 amount=token_balance_decimal,
                 price=quoted_average_price,
                 amount_raw=token_balance,
+                fee_lamports=transaction_fee_lamports,
                 status=(
                     TransactionStatus.UNKNOWN.value
                     if submitted_signature is not None

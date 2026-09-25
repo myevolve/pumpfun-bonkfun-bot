@@ -4,6 +4,7 @@ Position management for take profit/stop loss functionality.
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import ROUND_CEILING, Decimal
 from enum import Enum
 from math import isfinite
 from typing import Any
@@ -18,6 +19,7 @@ class ExitReason(Enum):
     STOP_LOSS = "stop_loss"
     MAX_HOLD_TIME = "max_hold_time"
     MANUAL = "manual"
+    TRADE_FLOW = "trade_flow"  # real-time flow rule fired (creator sell, trail...)
 
 
 @dataclass
@@ -36,10 +38,13 @@ class Position:
     position_id: str | None = None
     quantity_raw: int | None = None
     quote_amount_raw: int | None = None
+    buy_fee_lamports: int | None = None
     account_balance_baseline_raw: int | None = None
 
     # Exit conditions
     take_profit_price: float | None = None
+    take_profit_net_quote_raw: int | None = None
+    charged_exit_fee_lamports: int = 0
     stop_loss_price: float | None = None
     max_hold_time: int | None = None  # seconds
 
@@ -49,6 +54,7 @@ class Position:
     exit_price: float | None = None
     exit_time: datetime | None = None
     pending_exit_signature: str | None = None
+    pending_exit_fee_lamports: int | None = None
     pending_exit_reason: ExitReason | None = None
     pending_exit_intent_id: str | None = None
     pending_exit_price: float | None = None
@@ -90,11 +96,15 @@ class Position:
         for field_name, value, allow_zero in (
             ("quantity_raw", self.quantity_raw, False),
             ("quote_amount_raw", self.quote_amount_raw, True),
+            ("buy_fee_lamports", self.buy_fee_lamports, True),
+            ("take_profit_net_quote_raw", self.take_profit_net_quote_raw, False),
+            ("charged_exit_fee_lamports", self.charged_exit_fee_lamports, True),
             (
                 "account_balance_baseline_raw",
                 self.account_balance_baseline_raw,
                 True,
             ),
+            ("pending_exit_fee_lamports", self.pending_exit_fee_lamports, True),
         ):
             if value is not None and (
                 isinstance(value, bool)
@@ -127,6 +137,7 @@ class Position:
             self.pending_exit_signature,
             self.pending_exit_reason,
             self.pending_exit_price,
+            self.pending_exit_fee_lamports,
         )
         if any(value is not None for value in pending_values):
             if self.pending_exit_intent_id is None or self.pending_exit_reason is None:
@@ -159,6 +170,18 @@ class Position:
             return value.replace(tzinfo=UTC)
         return value.astimezone(UTC)
 
+    @staticmethod
+    def _calculate_take_profit_net_quote_raw(
+        quote_amount_raw: int,
+        buy_fee_lamports: int,
+        roi_multiplier: Decimal,
+    ) -> int:
+        return int(
+            (
+                Decimal(quote_amount_raw + buy_fee_lamports) * roi_multiplier
+            ).to_integral_value(rounding=ROUND_CEILING)
+        )
+
     @classmethod
     def create_from_buy_result(
         cls,
@@ -172,6 +195,7 @@ class Position:
         *,
         quantity_raw: int | None = None,
         quote_amount_raw: int | None = None,
+        buy_fee_lamports: int | None = None,
         account_balance_baseline_raw: int | None = None,
         position_id: str | None = None,
     ) -> "Position":
@@ -192,9 +216,30 @@ class Position:
             raise ValueError("stop_loss_percentage must be finite and between 0 and 1")
 
         take_profit_price = None
+        take_profit_net_quote_raw = None
         if take_profit_percentage is not None:
+            if (
+                isinstance(quote_amount_raw, bool)
+                or not isinstance(quote_amount_raw, int)
+                or quote_amount_raw <= 0
+            ):
+                raise ValueError(
+                    "quote_amount_raw must be positive for net take profit"
+                )
+            if (
+                isinstance(buy_fee_lamports, bool)
+                or not isinstance(buy_fee_lamports, int)
+                or buy_fee_lamports < 0
+            ):
+                raise ValueError(
+                    "buy_fee_lamports must be non-negative for net take profit"
+                )
             take_profit_price = entry_price * (1 + take_profit_percentage)
-
+            take_profit_net_quote_raw = cls._calculate_take_profit_net_quote_raw(
+                quote_amount_raw,
+                buy_fee_lamports,
+                Decimal(1) + Decimal(str(take_profit_percentage)),
+            )
         stop_loss_price = None
         if stop_loss_percentage is not None:
             stop_loss_price = entry_price * (1 - stop_loss_percentage)
@@ -208,10 +253,38 @@ class Position:
             position_id=position_id,
             quantity_raw=quantity_raw,
             quote_amount_raw=quote_amount_raw,
+            buy_fee_lamports=buy_fee_lamports,
             account_balance_baseline_raw=account_balance_baseline_raw,
             take_profit_price=take_profit_price,
+            take_profit_net_quote_raw=take_profit_net_quote_raw,
             stop_loss_price=stop_loss_price,
             max_hold_time=max_hold_time,
+        )
+
+    def migrate_legacy_take_profit_target(self, buy_fee_lamports: int) -> None:
+        """Restore a pre-net-ROI take-profit target from durable fee evidence."""
+        if self.take_profit_net_quote_raw is not None:
+            return
+        if self.take_profit_price is None:
+            raise ValueError("legacy position has no take-profit price")
+        if self.quote_amount_raw is None or self.quote_amount_raw <= 0:
+            raise ValueError("legacy position has no confirmed quote spend")
+        if (
+            isinstance(buy_fee_lamports, bool)
+            or not isinstance(buy_fee_lamports, int)
+            or buy_fee_lamports < 0
+        ):
+            raise ValueError("legacy position has no confirmed buy fee")
+        roi_multiplier = Decimal(str(self.take_profit_price)) / Decimal(
+            str(self.entry_price)
+        )
+        if roi_multiplier <= 1:
+            raise ValueError("legacy take-profit price must exceed entry price")
+        self.buy_fee_lamports = buy_fee_lamports
+        self.take_profit_net_quote_raw = self._calculate_take_profit_net_quote_raw(
+            self.quote_amount_raw,
+            buy_fee_lamports,
+            roi_multiplier,
         )
 
     def should_exit(self, current_price: float) -> tuple[bool, ExitReason | None]:
@@ -233,11 +306,8 @@ class Position:
         if not self.is_active:
             return False, None
 
-        # Check take profit
-        if self.take_profit_price and current_price >= self.take_profit_price:
-            return True, ExitReason.TAKE_PROFIT
-
-        # Check stop loss
+        # Safety exits override profit taking so a net-return floor cannot
+        # strand a position after its configured risk limit.
         if self.stop_loss_price and current_price <= self.stop_loss_price:
             return True, ExitReason.STOP_LOSS
 
@@ -245,6 +315,21 @@ class Position:
             elapsed_time = (datetime.now(UTC) - self.entry_time).total_seconds()
             if elapsed_time >= self.max_hold_time:
                 return True, ExitReason.MAX_HOLD_TIME
+
+        # The gross price is only a cheap signal. The seller enforces the
+        # persisted net quote target against a fresh nonlinear quote.
+        if (
+            self.take_profit_price is not None
+            and self.take_profit_net_quote_raw is None
+        ):
+            raise RuntimeError("take-profit position has no durable net quote target")
+
+        if (
+            self.take_profit_price
+            and self.take_profit_net_quote_raw is not None
+            and current_price >= self.take_profit_price
+        ):
+            return True, ExitReason.TAKE_PROFIT
 
         return False, None
 
@@ -269,6 +354,7 @@ class Position:
         self.exit_reason = exit_reason
         self.exit_time = datetime.now(UTC)
         self.pending_exit_signature = None
+        self.pending_exit_fee_lamports = None
         self.pending_exit_reason = None
         self.pending_exit_intent_id = None
         self.pending_exit_price = None
@@ -293,14 +379,27 @@ class Position:
         self.pending_exit_reason = exit_reason
         self.pending_exit_price = trigger_price
 
-    def mark_exit_pending(self, signature: str, exit_reason: ExitReason) -> None:
+    def mark_exit_pending(
+        self,
+        signature: str,
+        exit_reason: ExitReason,
+        *,
+        fee_lamports: int,
+    ) -> None:
         """Record an unresolved sell without closing or abandoning the position."""
         if not signature:
             raise ValueError("pending exit signature must not be empty")
         if self.pending_exit_intent_id is None:
             raise ValueError("pending exit signature requires a persisted intent")
+        if (
+            isinstance(fee_lamports, bool)
+            or not isinstance(fee_lamports, int)
+            or fee_lamports < 0
+        ):
+            raise ValueError("pending exit fee must be a non-negative integer")
         self.pending_exit_signature = signature
         self.pending_exit_reason = exit_reason
+        self.pending_exit_fee_lamports = fee_lamports
 
     def clear_pending_exit(self) -> None:
         """Allow a new sell only after the prior signature is terminal."""
@@ -308,6 +407,17 @@ class Position:
         self.pending_exit_reason = None
         self.pending_exit_intent_id = None
         self.pending_exit_price = None
+        self.pending_exit_fee_lamports = None
+
+    def record_charged_exit_fee(self, fee_lamports: int) -> None:
+        """Add the fee from one confirmed reverted sell."""
+        if (
+            isinstance(fee_lamports, bool)
+            or not isinstance(fee_lamports, int)
+            or fee_lamports < 0
+        ):
+            raise ValueError("charged exit fee must be a non-negative integer")
+        self.charged_exit_fee_lamports += fee_lamports
 
     def next_exit_attempt(self) -> int:
         """Allocate a durable monotonic sell-attempt sequence number."""
@@ -325,8 +435,11 @@ class Position:
             "position_id": self.position_id,
             "quantity_raw": self.quantity_raw,
             "quote_amount_raw": self.quote_amount_raw,
+            "buy_fee_lamports": self.buy_fee_lamports,
             "account_balance_baseline_raw": self.account_balance_baseline_raw,
             "take_profit_price": self.take_profit_price,
+            "take_profit_net_quote_raw": self.take_profit_net_quote_raw,
+            "charged_exit_fee_lamports": self.charged_exit_fee_lamports,
             "stop_loss_price": self.stop_loss_price,
             "max_hold_time": self.max_hold_time,
             "is_active": self.is_active,
@@ -334,6 +447,7 @@ class Position:
             "exit_price": self.exit_price,
             "exit_time": self.exit_time.isoformat() if self.exit_time else None,
             "pending_exit_signature": self.pending_exit_signature,
+            "pending_exit_fee_lamports": self.pending_exit_fee_lamports,
             "pending_exit_reason": (
                 self.pending_exit_reason.value if self.pending_exit_reason else None
             ),
@@ -374,14 +488,18 @@ class Position:
             position_id=raw.get("position_id"),
             quantity_raw=raw.get("quantity_raw"),
             quote_amount_raw=raw.get("quote_amount_raw"),
+            buy_fee_lamports=raw.get("buy_fee_lamports"),
             account_balance_baseline_raw=raw.get("account_balance_baseline_raw"),
             take_profit_price=raw.get("take_profit_price"),
+            take_profit_net_quote_raw=raw.get("take_profit_net_quote_raw"),
+            charged_exit_fee_lamports=raw.get("charged_exit_fee_lamports", 0),
             stop_loss_price=raw.get("stop_loss_price"),
             max_hold_time=raw.get("max_hold_time"),
             is_active=is_active,
             exit_reason=ExitReason(exit_reason) if exit_reason else None,
             exit_price=raw.get("exit_price"),
             exit_time=datetime.fromisoformat(exit_time) if exit_time else None,
+            pending_exit_fee_lamports=raw.get("pending_exit_fee_lamports"),
             pending_exit_signature=raw.get("pending_exit_signature"),
             pending_exit_reason=(
                 ExitReason(pending_reason) if pending_reason else None

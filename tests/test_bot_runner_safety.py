@@ -86,6 +86,21 @@ def test_preflight_cli_is_read_only_and_requires_one_config() -> None:
         )
 
 
+def test_resume_only_cli_requires_one_config_and_rejects_status() -> None:
+    args = bot_runner.parse_args(
+        ["--config", "bots/live.yaml", "--preflight", "--resume-only"]
+    )
+
+    assert args.resume_only is True
+
+    with pytest.raises(SystemExit):
+        bot_runner.parse_args(["--resume-only"])
+    with pytest.raises(SystemExit):
+        bot_runner.parse_args(
+            ["--config", "bots/live.yaml", "--status", "--resume-only"]
+        )
+
+
 def test_emergency_exit_cli_requires_live_authorization_and_one_mint() -> None:
     mint = "11111111111111111111111111111111"
     args = bot_runner.parse_args(
@@ -197,6 +212,25 @@ def test_status_reads_validated_recovery_journal_without_live_authorization(
             max_session_fee_lamports=1_000_000,
             intent_message_hash="a" * 64,
         )
+    cleanup_journal = tmp_path / ".state" / "cleanup" / f"{wallet}.json"
+    cleanup_journal.parent.mkdir(parents=True)
+    cleanup_journal.write_text(
+        json.dumps(
+            {
+                "version": 3,
+                "wallet": str(wallet),
+                "entries": {
+                    "k": {
+                        "status": "unresolved",
+                        "mint": str(mint),
+                        "tx_signature": "cleanup-sig",
+                        "intent_id": "cleanup:1",
+                        "generation": "g1",
+                    }
+                },
+            }
+        )
+    )
     monkeypatch.setattr(bot_runner, "load_bot_config", lambda _: config)
 
     status = bot_runner.read_bot_status("bots/live.yaml")
@@ -211,6 +245,7 @@ def test_status_reads_validated_recovery_journal_without_live_authorization(
             "quantity_raw": 2_000_000,
             "entry_price": 0.25,
             "pending_exit_signature": None,
+            "automatic_exit": False,
         }
     ]
     assert status["unresolved_buy_count"] == 0
@@ -227,6 +262,17 @@ def test_status_reads_validated_recovery_journal_without_live_authorization(
     assert status["transaction_ledger_path"] == str(
         Path(".state") / "transaction-ledgers" / f"{wallet}.sqlite3"
     )
+    assert status["active_submissions"] == [
+        {
+            "intent_id": "buy-1",
+            "signature": "signature-1",
+            "state": "prepared",
+            "outcome": "none",
+        }
+    ]
+    assert status["pending_cleanups"] == [
+        {"mint": str(mint), "status": "unresolved", "tx_signature": "cleanup-sig"}
+    ]
 
     config["name"] = "live-bonk"
     config["platform"] = Platform.LETS_BONK.value
@@ -268,12 +314,18 @@ def test_live_preflight_checks_network_and_never_authorizes_submission(
     config = {
         "name": "live",
         "platform": Platform.PUMP_FUN.value,
-        "trade": {"buy_amount": 0.0005, "buy_slippage": 0.1},
+        "trade": {
+            "buy_amount": 0.0005,
+            "buy_slippage": 0.1,
+            "max_exit_sell_attempts": 2,
+        },
         "filters": {},
+        "cleanup": {"mode": "after_sell", "with_priority_fee": True},
         **live_config(),
     }
     status = {
         "active_position_count": 0,
+        "active_positions": [],
         "unresolved_buy_count": 0,
         "pending_token_count": 0,
         "risk_session": {
@@ -336,12 +388,57 @@ def test_live_preflight_checks_network_and_never_authorizes_submission(
     client.build_and_send_transaction.assert_not_awaited()
     assert trader.close.await_count == 2
 
+    status["active_position_count"] = 1
+    status["active_positions"] = [{"automatic_exit": True}]
+    client.get_native_balance.return_value = 147_500
+    client.get_minimum_balance_for_rent_exemption.reset_mock()
+    recovery_report = asyncio.run(
+        bot_runner.run_live_preflight("bots/live.yaml", resume_only=True)
+    )
+    recovery_session_check = next(
+        check
+        for check in recovery_report["checks"]
+        if check["name"] == "session_quote_budget"
+    )
+    recovery_fee_check = next(
+        check
+        for check in recovery_report["checks"]
+        if check["name"] == "session_fee_budget"
+    )
+    recovery_native_check = next(
+        check
+        for check in recovery_report["checks"]
+        if check["name"] == "native_balance"
+    )
+
+    assert recovery_report["ready"] is True
+    assert recovery_report["resume_only"] is True
+    assert recovery_session_check["ok"] is True
+    assert recovery_fee_check["detail"]["required_recovery_lamports"] == 147_500
+    assert recovery_native_check["detail"]["required_lamports"] == 147_500
+    client.get_minimum_balance_for_rent_exemption.assert_not_awaited()
+
+    status["active_positions"] = [{"automatic_exit": False}]
+    unmonitorable_report = asyncio.run(
+        bot_runner.run_live_preflight("bots/live.yaml", resume_only=True)
+    )
+    monitor_check = next(
+        check
+        for check in unmonitorable_report["checks"]
+        if check["name"] == "resume_only_state"
+    )
+
+    assert unmonitorable_report["ready"] is False
+    assert monitor_check["ok"] is False
+
 
 def test_main_returns_nonzero_when_live_preflight_is_not_ready(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    async def preflight(_config: Path) -> dict[str, object]:
+    async def preflight(
+        _config: Path, *, resume_only: bool = False
+    ) -> dict[str, object]:
         return {"ready": False, "checks": []}
 
     monkeypatch.setattr(bot_runner, "run_live_preflight", preflight)
@@ -435,7 +532,7 @@ def test_start_bot_propagates_fatal_trader_failure(
         def __init__(self, **_kwargs):
             return None
 
-        async def start(self) -> None:
+        async def start(self, *, resume_only: bool = False) -> None:
             raise RuntimeError("listener failed")
 
     monkeypatch.setattr(bot_runner, "load_bot_config", lambda _: config)
@@ -464,6 +561,7 @@ def test_child_signal_cancels_bot_for_cleanup_and_exits_nonzero(
         _config_path: str | Path,
         *,
         authorize_live: bool = False,
+        resume_only: bool = False,
     ) -> None:
         nonlocal cleaned_up
         try:

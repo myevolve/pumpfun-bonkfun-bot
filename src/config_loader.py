@@ -54,6 +54,8 @@ ALLOWED_CONFIG_KEYS: dict[str, set[str] | None] = {
         "filters",
         "retries",
         "cleanup",
+        "flow_exit",
+        "entry_gate",
         "node",
         "timing",
         "execution",
@@ -71,6 +73,7 @@ ALLOWED_CONFIG_KEYS: dict[str, set[str] | None] = {
         "max_hold_time",
         "price_check_interval",
         "max_exit_sell_attempts",
+        "price_read_outage_budget",
         "extreme_fast_mode",
         "extreme_fast_token_amount",
         "curve_refresh_budget",
@@ -100,6 +103,24 @@ ALLOWED_CONFIG_KEYS: dict[str, set[str] | None] = {
         "wait_before_new_token",
     },
     "cleanup": {"mode", "force_close_with_burn", "with_priority_fee"},
+    "flow_exit": {
+        "enabled",
+        "creator_sell",
+        "trailing_stop",
+        "single_sell_pct",
+        "net_outflow_pct",
+        "window",
+    },
+    "entry_gate": {
+        "enabled",
+        "mayhem_only",
+        "min_buyers",
+        "max_real_sol",
+        "min_real_sol",
+        "require_creator_holding",
+        "max_wait_slots",
+        "max_wait_ms",
+    },
     "node": {"max_rps"},
     "timing": {"token_wait_timeout"},
     "execution": {
@@ -128,6 +149,11 @@ BOOLEAN_FIELDS = {
     "cleanup.with_priority_fee",
     "execution.allow_skip_preflight",
     "execution.allow_force_burn",
+    "flow_exit.enabled",
+    "flow_exit.creator_sell",
+    "entry_gate.enabled",
+    "entry_gate.mayhem_only",
+    "entry_gate.require_creator_holding",
 }
 
 STRING_FIELDS = {
@@ -159,6 +185,10 @@ INTEGER_RANGES: dict[str, tuple[int | None, int | None, bool, bool]] = {
     "trade.max_hold_time": (0, None, False, True),
     "retries.wait_after_buy": (0, None, True, True),
     "trade.extreme_fast_token_amount": (1, None, True, True),
+    "flow_exit.window": (1, 100, True, True),
+    "entry_gate.min_buyers": (0, 50, True, True),
+    "entry_gate.max_wait_slots": (1, 100, True, True),
+    "entry_gate.max_wait_ms": (1, 60_000, True, True),
     "trade.max_exit_sell_attempts": (1, 100, True, True),
     "priority_fees.fixed_amount": (0, None, True, True),
     "priority_fees.hard_cap": (0, None, True, True),
@@ -180,6 +210,12 @@ NUMBER_RANGES: dict[str, tuple[float | None, float | None, bool, bool]] = {
     "trade.stop_loss_percentage": (0, 1, False, False),
     "trade.price_check_interval": (0, None, False, True),
     "trade.curve_refresh_budget": (0, None, True, True),
+    "trade.price_read_outage_budget": (0, None, True, True),
+    "flow_exit.trailing_stop": (0, 1, False, False),
+    "flow_exit.single_sell_pct": (0, 1, False, False),
+    "flow_exit.net_outflow_pct": (0, 1, False, False),
+    "entry_gate.max_real_sol": (0, None, False, True),
+    "entry_gate.min_real_sol": (0, None, True, True),
     "priority_fees.extra_percentage": (0, 1, True, True),
     "filters.max_token_age": (0, None, True, True),
     "retries.wait_after_creation": (0, None, True, True),
@@ -536,6 +572,22 @@ def validate_quote_config(config: dict) -> None:
             if not isinstance(mint, str):
                 raise ValueError("filters.allowed_quote_mints entries must be strings")
             get_quote_asset(resolve_quote_mint(mint))
+
+    trade = config.get("trade", {})
+    if (
+        trade.get("exit_strategy") == "tp_sl"
+        and trade.get("take_profit_percentage") is not None
+        and (
+            allowed is None
+            or any(
+                resolve_quote_mint(mint) != resolve_quote_mint("sol")
+                for mint in allowed
+            )
+        )
+    ):
+        raise ValueError(
+            "Net take profit requires filters.allowed_quote_mints to be SOL-only"
+        )
 
 
 def validate_platform_config(config: dict, platform: Platform) -> None:

@@ -140,6 +140,26 @@ def test_tp_sl_requires_at_least_one_exit_condition() -> None:
         validate_config(config)
 
 
+def test_net_take_profit_requires_sol_only_quote_allowlist() -> None:
+    config = minimal_config()
+    config["trade"].update(
+        {
+            "exit_strategy": "tp_sl",
+            "take_profit_percentage": 0.1,
+        }
+    )
+
+    with pytest.raises(ValueError, match="SOL-only"):
+        validate_config(config)
+
+    config["filters"]["allowed_quote_mints"] = ["sol", "usdc"]
+    with pytest.raises(ValueError, match="SOL-only"):
+        validate_config(config)
+
+    config["filters"]["allowed_quote_mints"] = ["sol"]
+    validate_config(config)
+
+
 @pytest.mark.parametrize("attempts", [0, 2])
 def test_submission_attempt_count_must_be_exactly_one(attempts: int) -> None:
     config = minimal_config()

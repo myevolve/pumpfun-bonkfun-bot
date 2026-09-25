@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
     from core.client import SolanaClient
+from core.client import RpcUnavailableError
 from core.pubkeys import USDC_MINT, WSOL_MINT, normalize_quote_mint
 from platforms.pumpfun.address_provider import PumpFunAddresses
 from utils.logger import get_logger
@@ -46,6 +47,10 @@ class _FeeConfigError(ValueError):
 
 class _FeeAttestationError(RuntimeError):
     """Fee snapshot or program-attestation failure."""
+
+
+class _FeeAttestationUnavailable(_FeeAttestationError, RpcUnavailableError):
+    """Attestation could not run because the RPC transport returned nothing."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +79,7 @@ class PumpFeeConfig:
     flat_fees: PumpFees
     regular_tiers: tuple[PumpFeeTier, ...]
     stable_tiers: tuple[PumpFeeTier, ...]
+    exotic_flat_fees: PumpFees
     digest: str
 
 
@@ -208,6 +214,7 @@ def decode_fee_config_account(account: Account) -> PumpFeeConfig:
     flat_fees = _decode_fees(cursor, "flat_fees")
     regular_tiers = _decode_tiers(cursor, "fee_tiers")
     stable_tiers = _decode_tiers(cursor, "stable_fee_tiers")
+    exotic_flat_fees = _decode_fees(cursor, "exotic_flat_fees")
     if any(cursor.take(cursor.remaining, "trailing padding")):
         raise _FeeConfigError("FeeConfig account has unknown nonzero trailing data")
 
@@ -217,6 +224,7 @@ def decode_fee_config_account(account: Account) -> PumpFeeConfig:
         flat_fees=flat_fees,
         regular_tiers=regular_tiers,
         stable_tiers=stable_tiers,
+        exotic_flat_fees=exotic_flat_fees,
         digest=hashlib.sha256(account.data).hexdigest(),
     )
 
@@ -678,7 +686,10 @@ class PumpFeeSchedule:
             }
         )
         if not isinstance(response, dict):
-            raise _FeeAttestationError("Pump fee attestation RPC returned no response")
+            # post_rpc returns None only after exhausting transport retries.
+            raise _FeeAttestationUnavailable(
+                "Pump fee attestation RPC returned no response"
+            )
         result = response.get("result")
         if not isinstance(result, dict):
             raise _FeeAttestationError("Pump fee attestation RPC omitted its result")

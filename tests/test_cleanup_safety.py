@@ -335,6 +335,67 @@ async def test_presend_cleanup_failure_remains_retryable(monkeypatch, tmp_path) 
 
 
 @pytest.mark.asyncio
+async def test_cleanup_survives_lagging_mint_lookup_and_journals_presend_failure(
+    monkeypatch, tmp_path
+) -> None:
+    """Live 2026-09-03: 45 ms after a confirmed sell a lagging node said the
+    mint did not exist; cleanup returned FAILED without journaling and left
+    2,074,080 lamports of rent stranded and invisible to --status."""
+    monkeypatch.setattr("cleanup.manager.asyncio.sleep", _no_sleep)
+    wallet = _FakeWallet()
+    mint = Pubkey.new_unique()
+    journal_path = tmp_path / "cleanup.json"
+    AccountCleanupManager.record_bot_owned_balance(
+        wallet.pubkey,
+        mint,
+        SystemAddresses.TOKEN_PROGRAM,
+        baseline_raw=0,
+        acquired_raw=1,
+    )
+
+    class _LaggingClient(_CleanupClient):
+        async def get_account_info(self, address: Pubkey):
+            if address == mint:
+                raise ValueError(f"Account {address} not found")
+            return SimpleNamespace(owner=SystemAddresses.TOKEN_PROGRAM)
+
+    client = _LaggingClient(
+        balance=0,
+        outcomes=[TransactionOutcome(TransactionStatus.SUCCESS, "cleanup-signature")],
+    )
+    result = await AccountCleanupManager(
+        client, wallet, _FakeFees(), journal_path=journal_path
+    ).cleanup_ata(mint, SystemAddresses.TOKEN_PROGRAM)
+
+    # The supplied program is trusted; the close still goes out and confirms.
+    assert result.status is CleanupStatus.CONFIRMED
+    assert client.submissions == 1
+
+    # Without a supplied program the failure is still journaled, not lost.
+    other = Pubkey.new_unique()
+    AccountCleanupManager.record_bot_owned_balance(
+        wallet.pubkey,
+        other,
+        SystemAddresses.TOKEN_PROGRAM,
+        baseline_raw=0,
+        acquired_raw=1,
+    )
+
+    class _BrokenClient(_CleanupClient):
+        async def get_token_account_balance(self, address: Pubkey) -> int:
+            raise RuntimeError("balance endpoint down")
+
+    failed = await AccountCleanupManager(
+        _BrokenClient(balance=0), wallet, _FakeFees(), journal_path=journal_path
+    ).cleanup_ata(other, SystemAddresses.TOKEN_PROGRAM)
+    assert failed.status is CleanupStatus.FAILED
+    entries = json.loads(journal_path.read_text(encoding="utf-8"))["entries"]
+    assert any(
+        e["mint"] == str(other) and e["status"] == "failed" for e in entries.values()
+    )
+
+
+@pytest.mark.asyncio
 async def test_startup_worker_consumes_staged_cleanup(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr("cleanup.manager.asyncio.sleep", _no_sleep)
     wallet = _FakeWallet()
@@ -458,6 +519,54 @@ async def test_unresolved_cleanup_survives_restart_and_terminal_failure_persists
     assert third_result.tx_signature == "cleanup-signature"
     assert third_client.confirmed_signatures == []
     assert third_client.submissions == 0
+
+
+@pytest.mark.asyncio
+async def test_expired_cleanup_wire_is_rebuilt_in_the_same_pass(
+    monkeypatch, tmp_path
+) -> None:
+    """Live 2026-09-03: a close whose blockhash expired unlanded was recorded
+    as a terminal failure, stranding rent that a fresh wire recovers."""
+    monkeypatch.setattr("cleanup.manager.asyncio.sleep", _no_sleep)
+    wallet = _FakeWallet()
+    mint = Pubkey.new_unique()
+    journal_path = tmp_path / "cleanup.json"
+    AccountCleanupManager.record_bot_owned_balance(
+        wallet.pubkey,
+        mint,
+        SystemAddresses.TOKEN_PROGRAM,
+        baseline_raw=0,
+        acquired_raw=1,
+    )
+    first = _CleanupClient(
+        balance=0,
+        outcomes=[
+            TransactionOutcome(TransactionStatus.UNKNOWN, "stale-sig", error="timeout")
+        ],
+        signatures=["stale-sig"],
+    )
+    unresolved = await AccountCleanupManager(
+        first, wallet, _FakeFees(), journal_path=journal_path
+    ).cleanup_ata(mint, SystemAddresses.TOKEN_PROGRAM)
+    assert unresolved.status is CleanupStatus.UNRESOLVED
+
+    AccountCleanupManager._pending_signatures.clear()
+    second = _CleanupClient(
+        balance=0,
+        outcomes=[
+            TransactionOutcome(TransactionStatus.EXPIRED, "stale-sig", error="expired"),
+            TransactionOutcome(TransactionStatus.SUCCESS, "fresh-sig"),
+        ],
+        signatures=["fresh-sig"],
+    )
+    result = await AccountCleanupManager(
+        second, wallet, _FakeFees(), journal_path=journal_path
+    ).cleanup_ata(mint, SystemAddresses.TOKEN_PROGRAM)
+
+    assert result.status is CleanupStatus.CONFIRMED
+    assert result.tx_signature == "fresh-sig"
+    assert second.submissions == 1
+    assert json.loads(journal_path.read_text(encoding="utf-8"))["entries"] == {}
 
 
 def test_legacy_cleanup_journal_preserves_intent_during_migration(tmp_path) -> None:

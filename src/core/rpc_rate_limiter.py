@@ -93,11 +93,9 @@ class TokenBucketRateLimiter:
 
         self._waiting += 1
         try:
-            waiter = self._wait_for_token()
-            if self._acquire_timeout is None:
-                await waiter
-            else:
-                await asyncio.wait_for(waiter, timeout=self._acquire_timeout)
+            # Stay in this task: Python 3.11 wait_for can lose concurrent cancellation.
+            async with asyncio.timeout(self._acquire_timeout):
+                await self._wait_for_token()
         finally:
             self._waiting -= 1
 

@@ -1,5 +1,10 @@
+# Assertions and numeric/private boundaries are the executable ledger contract.
+# ruff: noqa: S101, SLF001, PLR2004
+
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -9,6 +14,7 @@ import pytest
 
 from core.execution_policy import TradeLimitExceeded
 from core.transaction_ledger import (
+    EvidencePersistenceError,
     LedgerConflict,
     TransactionLedger,
     default_transaction_ledger_path,
@@ -27,6 +33,7 @@ def _record_submission(
     state: str = "submitted",
     wire_bytes: bytes | None = None,
     receipt_destinations: tuple[str, ...] | None = None,
+    evidence_profile_id: str | None = None,
 ) -> str:
     ledger.record_intent(intent, "wallet", 10, 5, "a" * 64)
     return ledger.record_submission(
@@ -37,6 +44,7 @@ def _record_submission(
         state=state,
         wire_bytes=wire_bytes,
         receipt_destinations=receipt_destinations,
+        evidence_profile_id=evidence_profile_id,
     )
 
 
@@ -259,6 +267,20 @@ def test_terminal_signature_cannot_be_reserved_again(
             _record_submission(ledger)
 
 
+def test_latest_submission_record_includes_terminal_outcome(tmp_path: Path) -> None:
+    with TransactionLedger(tmp_path / "ledger.sqlite") as ledger:
+        _record_submission(ledger)
+        ledger.record_outcome(
+            TransactionOutcome(TransactionStatus.REVERTED, "sig-1", "reverted")
+        )
+
+        assert ledger.get_active_submission_record("intent") is None
+        latest = ledger.get_latest_submission_record("intent")
+        assert latest is not None
+        assert latest.signature == "sig-1"
+        assert latest.fee_lamports == 5
+
+
 def test_mark_submitted_rejects_missing_or_outcome_bound_submission(
     tmp_path: Path,
 ) -> None:
@@ -430,6 +452,20 @@ def test_legacy_schema_is_migrated_without_losing_submission(
         assert active.signature == "legacy-sig"
         assert active.state == "submitted"
         assert active.wire_bytes is None
+        assert active.evidence_profile_id is None
+        current_profile = ledger.record_evidence_profile("live", {}, {})
+        ledger.record_submission(
+            "legacy-intent",
+            "legacy-sig",
+            "legacy-blockhash",
+            99,
+            evidence_profile_id=current_profile,
+        )
+        assert (
+            ledger.get_latest_submission_record("legacy-intent").evidence_profile_id
+            is None
+        )
+        assert ledger.list_recoverable()[0].evidence_profile_id is None
         assert [record.signature for record in ledger.list_recoverable()] == [
             "legacy-sig"
         ]
@@ -457,6 +493,7 @@ def _reserve_risk_submission(
     session_id: str = "2026-05-01-live",
     max_session_quote_raw: int = 100,
     max_session_fee_lamports: int = 25,
+    evidence_profile_id: str | None = None,
 ) -> None:
     ledger.record_intent(
         intent,
@@ -477,6 +514,7 @@ def _reserve_risk_submission(
         max_session_quote_raw=max_session_quote_raw,
         max_session_fee_lamports=max_session_fee_lamports,
         intent_message_hash="a" * 64,
+        evidence_profile_id=evidence_profile_id,
     )
 
 
@@ -564,12 +602,14 @@ def test_releasing_never_submitted_wire_releases_session_budget(
     tmp_path: Path,
 ) -> None:
     with TransactionLedger(tmp_path / "ledger.sqlite") as ledger:
+        profile = ledger.record_evidence_profile("live", {"strategy": "first"}, {})
         _reserve_risk_submission(
             ledger,
             intent="buy-1",
             signature="sig-1",
             quote_amount_raw=100,
             fee_lamports=25,
+            evidence_profile_id=profile,
         )
 
         assert ledger.release_prepared_submission("sig-1") is True
@@ -577,6 +617,31 @@ def test_releasing_never_submitted_wire_releases_session_budget(
         assert totals.quote_amount_raw_by_mint == {}
         assert totals.fee_lamports == 0
         assert totals.submission_count == 0
+        assert (
+            ledger.connection.execute(
+                "SELECT 1 FROM intents WHERE intent_id = 'buy-1'"
+            ).fetchone()
+            is None
+        )
+        released = ledger.connection.execute(
+            "SELECT profile_id, payload_json FROM evidence_events "
+            "WHERE category = 'submission_released'"
+        ).fetchone()
+        assert released["profile_id"] == profile
+        assert json.loads(released["payload_json"]) == {
+            "signature": "sig-1",
+            "intent_id": "buy-1",
+            "quote_amount_raw": 100,
+            "fee_budget_lamports": 25,
+            "wire_sha256": hashlib.sha256(b"wire-sig-1").hexdigest(),
+        }
+        assert ledger.release_prepared_submission("sig-1") is False
+        assert (
+            ledger.connection.execute(
+                "SELECT COUNT(*) FROM evidence_events"
+            ).fetchone()[0]
+            == 1
+        )
 
 
 def test_releasing_operation_wire_preserves_its_generation(tmp_path: Path) -> None:
@@ -777,3 +842,265 @@ def test_wallet_ledger_path_is_shared_when_no_legacy_ledgers_exist(
     assert resolve_transaction_ledger_path(wallet) == (
         Path(".state") / "transaction-ledgers" / f"{wallet}.sqlite3"
     )
+
+
+def test_evidence_profiles_are_classified_and_content_addressed(tmp_path: Path) -> None:
+    path = tmp_path / "ledger.sqlite"
+    settings = {"strategy": "momentum", "limits": {"fee": 25, "quote": 100}}
+    sources = {"trader.py": "a" * 64, "buyer.py": "b" * 64}
+    with TransactionLedger(path) as ledger:
+        profiles = {
+            kind: ledger.record_evidence_profile(kind, settings, sources)
+            for kind in ("live", "dry_run", "simulation", "paper")
+        }
+        assert len(set(profiles.values())) == 4
+        assert (
+            ledger.record_evidence_profile(
+                "live",
+                {"limits": {"quote": 100, "fee": 25}, "strategy": "momentum"},
+                {"buyer.py": "b" * 64, "trader.py": "a" * 64},
+            )
+            == profiles["live"]
+        )
+        changed_settings = ledger.record_evidence_profile(
+            "live", {**settings, "strategy": "other"}, sources
+        )
+        changed_sources = ledger.record_evidence_profile(
+            "live", settings, {**sources, "trader.py": "c" * 64}
+        )
+        assert len({profiles["live"], changed_settings, changed_sources}) == 3
+        with pytest.raises(ValueError):
+            ledger.record_evidence_profile("backtest", settings, sources)
+        with pytest.raises(ValueError):
+            ledger.record_evidence_profile("live", {"value": float("nan")}, sources)
+        with pytest.raises(TypeError):
+            ledger.record_evidence_profile(
+                "live", {"nested": {1: "ambiguous"}}, sources
+            )
+
+    with TransactionLedger(path) as reopened:
+        rows = reopened.connection.execute("SELECT * FROM evidence_profiles").fetchall()
+        assert len(rows) == 6
+        for kind, profile_id in profiles.items():
+            row = next(row for row in rows if row["profile_id"] == profile_id)
+            assert row["kind"] == kind
+            assert json.loads(row["settings_json"]) == settings
+            assert json.loads(row["sources_json"]) == sources
+
+
+def test_receipt_observations_are_immutable_and_deduplicate(tmp_path: Path) -> None:
+    path = tmp_path / "ledger.sqlite"
+    first = {
+        "slot": 10,
+        "meta": {"err": None, "fee": 5000},
+        "transaction": {"signatures": ["sig"]},
+    }
+    changed = {**first, "slot": 11}
+    with TransactionLedger(path) as ledger:
+        observer = ledger.record_evidence_profile("live", {"strategy": "current"}, {})
+        first_id = ledger.record_receipt_evidence("sig", "confirmed", first)
+        original = dict(
+            ledger.connection.execute(
+                "SELECT * FROM evidence_receipts WHERE receipt_id = ?", (first_id,)
+            ).fetchone()
+        )
+        assert (
+            ledger.record_receipt_evidence(
+                "sig",
+                "confirmed",
+                {
+                    "transaction": first["transaction"],
+                    "meta": first["meta"],
+                    "slot": 10,
+                },
+            )
+            == first_id
+        )
+        changed_id = ledger.record_receipt_evidence("sig", "confirmed", changed)
+        finalized_id = ledger.record_receipt_evidence("sig", "finalized", changed)
+        attributed_id = ledger.record_receipt_evidence(
+            "sig", "confirmed", first, profile_id=observer
+        )
+        assert len({first_id, changed_id, finalized_id, attributed_id}) == 4
+
+    with TransactionLedger(path) as reopened:
+        rows = {
+            row["receipt_id"]: dict(row)
+            for row in reopened.connection.execute("SELECT * FROM evidence_receipts")
+        }
+        assert rows[first_id] == original
+        assert json.loads(rows[changed_id]["payload_json"]) == changed
+        assert rows[finalized_id]["commitment"] == "finalized"
+        assert rows[attributed_id]["profile_id"] == observer
+        assert rows[first_id]["profile_id"] is None
+        assert all(row["observed_fee_lamports"] == "5000" for row in rows.values())
+
+
+@pytest.mark.parametrize(
+    ("meta", "expected_fee"),
+    [
+        (None, None),
+        ({}, None),
+        ({"fee": True}, None),
+        ({"fee": "5000"}, None),
+        ({"fee": 1.5}, None),
+        ({"fee": -1}, None),
+        ({"fee": 2**64}, None),
+        ({"fee": 0}, "0"),
+        ({"fee": 2**64 - 1}, str(2**64 - 1)),
+        ({"err": {"InstructionError": [0, "Custom"]}}, None),
+        ({"err": {"InstructionError": [0, "Custom"]}, "fee": 5000}, "5000"),
+    ],
+)
+def test_receipt_fee_is_observed_or_explicitly_unknown(
+    tmp_path: Path, meta: dict | None, expected_fee: str | None
+) -> None:
+    with TransactionLedger(tmp_path / "ledger.sqlite") as ledger:
+        _record_submission(ledger, signature="sig")
+        receipt = {"slot": 1, "meta": meta}
+        receipt_id = ledger.record_receipt_evidence("sig", "confirmed", receipt)
+        row = ledger.connection.execute(
+            "SELECT observed_fee_lamports, payload_json FROM evidence_receipts "
+            "WHERE receipt_id = ?",
+            (receipt_id,),
+        ).fetchone()
+        assert row["observed_fee_lamports"] == expected_fee
+        assert json.loads(row["payload_json"]) == receipt
+        assert ledger.get_latest_submission_record("intent").fee_lamports == 5
+
+
+@pytest.mark.parametrize("original_known", [False, True])
+def test_submission_profile_survives_restart_and_reuse(
+    tmp_path: Path, *, original_known: bool
+) -> None:
+    path = tmp_path / "ledger.sqlite"
+    with TransactionLedger(path) as ledger:
+        original = (
+            ledger.record_evidence_profile("live", {"strategy": "original"}, {})
+            if original_known
+            else None
+        )
+        _record_submission(
+            ledger,
+            state="prepared",
+            wire_bytes=b"original",
+            evidence_profile_id=original,
+        )
+    with TransactionLedger(path) as reopened:
+        current = reopened.record_evidence_profile("live", {"strategy": "current"}, {})
+        assert (
+            _record_submission(
+                reopened,
+                signature="sig-2",
+                state="prepared",
+                wire_bytes=b"other",
+                evidence_profile_id=current,
+            )
+            == "sig-1"
+        )
+        assert (
+            _record_submission(
+                reopened,
+                state="submitted",
+                wire_bytes=b"original",
+                evidence_profile_id=current,
+            )
+            == "sig-1"
+        )
+        assert (
+            reopened.get_active_submission_record("intent").evidence_profile_id
+            == original
+        )
+        assert (
+            reopened.get_latest_submission_record("intent").evidence_profile_id
+            == original
+        )
+        assert reopened.list_recoverable()[0].evidence_profile_id == original
+
+
+def test_trade_evidence_retains_changed_observations(tmp_path: Path) -> None:
+    with TransactionLedger(tmp_path / "ledger.sqlite") as ledger:
+        first = ledger.record_trade_evidence(None, "decision", {"action": "skip"})
+        assert (
+            ledger.record_trade_evidence(None, "decision", {"action": "skip"}) == first
+        )
+        changed = ledger.record_trade_evidence(None, "decision", {"action": "buy"})
+        assert changed != first
+        rows = ledger.connection.execute(
+            "SELECT profile_id, payload_json FROM evidence_events ORDER BY rowid"
+        ).fetchall()
+        assert [
+            (row["profile_id"], json.loads(row["payload_json"])) for row in rows
+        ] == [(None, {"action": "skip"}), (None, {"action": "buy"})]
+
+
+@pytest.mark.parametrize(
+    "operation", ["profile", "trade", "receipt", "submission", "release"]
+)
+def test_evidence_database_errors_fail_closed(tmp_path: Path, operation: str) -> None:
+    with TransactionLedger(tmp_path / "ledger.sqlite") as ledger:
+        _reserve_risk_submission(
+            ledger,
+            intent="intent",
+            signature="sig-1",
+            quote_amount_raw=100,
+            fee_lamports=25,
+        )
+        ledger.record_intent("new-intent", "wallet", 10, 5, "a" * 64)
+        ledger.connection.execute("PRAGMA query_only=ON")
+        with pytest.raises(EvidencePersistenceError) as failure:
+            if operation == "profile":
+                ledger.record_evidence_profile("live", {}, {})
+            elif operation == "trade":
+                ledger.record_trade_evidence(None, "decision", {})
+            elif operation == "receipt":
+                ledger.record_receipt_evidence(
+                    "sig-1", "confirmed", {"meta": {"fee": 5000}}
+                )
+            elif operation == "submission":
+                ledger.record_submission("new-intent", "sig-2", "blockhash", 100)
+            else:
+                ledger.release_prepared_submission("sig-1")
+        assert isinstance(failure.value.__cause__, sqlite3.Error)
+        assert ledger.get_active_submission("intent") == "sig-1"
+        assert ledger.get_active_submission("new-intent") is None
+        assert (
+            ledger.get_session_risk_totals("2026-05-01-live", "wallet").fee_lamports
+            == 25
+        )
+        assert (
+            ledger.connection.execute(
+                "SELECT COUNT(*) FROM evidence_events"
+            ).fetchone()[0]
+            == 0
+        )
+        assert not ledger.connection.in_transaction
+
+
+def test_release_rolls_back_evidence_if_deletion_fails(tmp_path: Path) -> None:
+    with TransactionLedger(tmp_path / "ledger.sqlite") as ledger:
+        _record_submission(ledger, state="prepared", wire_bytes=b"wire")
+        ledger.connection.execute(
+            """
+            CREATE TRIGGER deny_release BEFORE DELETE ON submissions
+            BEGIN SELECT RAISE(ABORT, 'release blocked'); END
+            """
+        )
+        with pytest.raises(EvidencePersistenceError) as failure:
+            ledger.release_prepared_submission("sig-1")
+        assert isinstance(failure.value.__cause__, sqlite3.Error)
+        assert ledger.get_active_submission("intent") == "sig-1"
+        assert (
+            ledger.connection.execute(
+                "SELECT COUNT(*) FROM evidence_events"
+            ).fetchone()[0]
+            == 0
+        )
+
+
+def test_unknown_evidence_profile_rejects_new_submission(tmp_path: Path) -> None:
+    with TransactionLedger(tmp_path / "ledger.sqlite") as ledger:
+        with pytest.raises(EvidencePersistenceError) as failure:
+            _record_submission(ledger, evidence_profile_id="unregistered")
+        assert isinstance(failure.value.__cause__, sqlite3.IntegrityError)
+        assert ledger.get_active_submission("intent") is None

@@ -14,6 +14,7 @@ from solders.pubkey import Pubkey
 from solders.signature import Signature
 from solders.transaction import Transaction
 
+from core.client import JsonRpcError, RpcUnavailableError
 from core.pubkeys import USDC_MINT, WSOL_MINT
 from platforms.pumpfun.address_provider import PumpFunAddresses
 from platforms.pumpfun.fee_schedule import (
@@ -52,6 +53,7 @@ def _fee_account(
     ),
     stable: tuple[TierValues, ...] = ((0, (0, 50, 10)),),
     flat: FeeValues = (25, 90, 20),
+    exotic: FeeValues = (0, 95, 30),
     owner: Pubkey = PumpFunAddresses.FEE_PROGRAM,
     discriminator: bytes = FEE_CONFIG_DISCRIMINATOR,
     tail: bytes = bytes(128),
@@ -62,6 +64,7 @@ def _fee_account(
     data += _encode_fees(flat)
     data += _encode_tiers(regular)
     data += _encode_tiers(stable)
+    data += _encode_fees(exotic)
     data += tail
     return Account(1, bytes(data), owner, False, 0)
 
@@ -126,7 +129,7 @@ def test_decode_fee_config_account_rejects_truncated_tier_vector() -> None:
     account = _fee_account(tail=b"")
     truncated = Account(
         account.lamports,
-        account.data[:-1],
+        account.data[:-25],
         account.owner,
         account.executable,
         account.rent_epoch,
@@ -289,7 +292,7 @@ class _FakeFeeClient:
         self.account = account
         self.account_calls = 0
         self.post_calls: list[dict[str, Any]] = []
-        self.results: deque[PumpFees | BaseException | dict[str, Any]] = deque()
+        self.results: deque[PumpFees | BaseException | dict[str, Any] | None] = deque()
         self.block_after_first_account = False
         self.second_account_started = asyncio.Event()
         self.second_account_cancelled = asyncio.Event()
@@ -316,7 +319,7 @@ class _FakeFeeClient:
         result = self.results.popleft()
         if isinstance(result, BaseException):
             raise result
-        if isinstance(result, dict):
+        if result is None or isinstance(result, dict):
             return result
         encoded = base64.b64encode(
             struct.pack(
@@ -446,6 +449,59 @@ async def test_changed_snapshot_cannot_promote_on_attestation_mismatch() -> None
         await schedule.accept_account(changed)
     with pytest.raises(RuntimeError, match="no validated"):
         schedule.require_snapshot()
+    await schedule.close()
+
+
+@pytest.mark.asyncio
+async def test_missing_attestation_response_is_typed_transient() -> None:
+    """post_rpc returns None only after transport exhaustion: retryable."""
+    account = _fee_account()
+    changed = _fee_account(regular=((0, (0, 70, 10)),))
+    client = _FakeFeeClient(account)
+    client.queue_attestation(account)
+    clock = _FakeClock()
+    schedule = _fee_schedule(client, clock)
+    await schedule.start()
+    client.results.append(None)
+
+    with pytest.raises(RpcUnavailableError, match="no response"):
+        await schedule.accept_account(changed)
+    with pytest.raises(RuntimeError, match="no validated"):
+        schedule.require_snapshot()
+    await schedule.close()
+
+
+@pytest.mark.asyncio
+async def test_non_json_attestation_response_is_not_transient() -> None:
+    account = _fee_account()
+    changed = _fee_account(regular=((0, (0, 70, 10)),))
+    client = _FakeFeeClient(account)
+    client.queue_attestation(account)
+    clock = _FakeClock()
+    schedule = _fee_schedule(client, clock)
+    await schedule.start()
+    client.results.append(JsonRpcError("simulateTransaction", "not JSON"))
+
+    with pytest.raises(JsonRpcError) as raised:
+        await schedule.accept_account(changed)
+    assert not isinstance(raised.value, RpcUnavailableError)
+    await schedule.close()
+
+
+@pytest.mark.asyncio
+async def test_attestation_mismatch_is_not_transient() -> None:
+    account = _fee_account()
+    changed = _fee_account(regular=((0, (0, 70, 10)),))
+    client = _FakeFeeClient(account)
+    client.queue_attestation(account)
+    clock = _FakeClock()
+    schedule = _fee_schedule(client, clock)
+    await schedule.start()
+    client.results.append(PumpFees(0, 95, 30))
+
+    with pytest.raises(RuntimeError) as raised:
+        await schedule.accept_account(changed)
+    assert not isinstance(raised.value, RpcUnavailableError)
     await schedule.close()
 
 

@@ -14,6 +14,7 @@ from solders.pubkey import Pubkey
 from spl.token.instructions import BurnParams, CloseAccountParams, burn, close_account
 
 from core.client import (
+    RpcUnavailableError,
     SolanaClient,
     TransactionStatus,
     TransactionSubmissionUnknown,
@@ -549,8 +550,25 @@ class AccountCleanupManager:
     async def _resolve_token_program(
         self, mint: Pubkey, supplied: Pubkey | None
     ) -> Pubkey:
-        """Discover and verify the mint's actual owning token program."""
-        mint_info = await self.client.get_account_info(mint)
+        """Discover and verify the mint's actual owning token program.
+
+        Right after a trade a load-balanced RPC node can lag the one that
+        confirmed it and report the mint as missing. The supplied program is
+        the one the bot just traded through, so a transient lookup failure
+        falls back to it instead of stranding the account.
+        """
+        try:
+            mint_info = await self.client.get_account_info(mint)
+        except (ValueError, RpcUnavailableError) as exc:
+            if supplied is None:
+                raise
+            logger.warning(
+                "Mint %s lookup failed (%s); trusting supplied token program %s",
+                mint,
+                exc,
+                supplied,
+            )
+            return supplied
         owner = getattr(mint_info, "owner", None)
         if owner is None and isinstance(mint_info, dict):
             owner = mint_info.get("owner")
@@ -706,6 +724,16 @@ class AccountCleanupManager:
                 ),
                 tx_signature=signature,
             )
+
+        if outcome.status is TransactionStatus.EXPIRED:
+            # Provably never landed: equivalent to not submitted. Drop the stale
+            # signature and let this pass build a fresh close under the same
+            # intent (the journal entry is rewritten at submission).
+            logger.info(
+                "Cleanup wire %s for %s expired unlanded; rebuilding", signature, mint
+            )
+            self._pending_signatures.pop(key, None)
+            return None
 
         failed = CleanupResult(
             CleanupStatus.FAILED,
@@ -1026,7 +1054,7 @@ class AccountCleanupManager:
             )
         except Exception as exc:
             logger.warning(f"Cleanup failed for mint {mint}: {exc!s}")
-            return CleanupResult(
+            result = CleanupResult(
                 (
                     CleanupStatus.UNRESOLVED
                     if signature is not None
@@ -1038,3 +1066,24 @@ class AccountCleanupManager:
                 tx_signature=signature,
                 error=str(exc),
             )
+            if token_program_id is not None:
+                # Journal it: an unjournaled failure is rent silently stranded,
+                # invisible to --status and never retried.
+                key = (str(self.wallet.pubkey), str(mint), str(token_program_id))
+                journal_entry = self._journal_entries.get(self._journal_key(key))
+                ownership = self._ownership_records.get(key)
+                generation = (
+                    str(journal_entry["generation"])
+                    if journal_entry is not None
+                    else (ownership.generation if ownership is not None else None)
+                )
+                if generation is not None:
+                    intent_id = (
+                        str(journal_entry["intent_id"])
+                        if journal_entry is not None
+                        else f"cleanup:{self.wallet.pubkey}:{mint}:{ata}:{generation}"
+                    )
+                    self._persist_result(
+                        key, result, intent_id=intent_id, generation=generation
+                    )
+            return result

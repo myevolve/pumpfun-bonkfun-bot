@@ -14,6 +14,7 @@ import base58
 DISCRIMINATOR_SIZE = 8
 PUBLIC_KEY_SIZE = 32
 STRING_LENGTH_PREFIX_SIZE = 4
+VECTOR_LENGTH_PREFIX_SIZE = 4
 ENUM_DISCRIMINATOR_SIZE = 1
 OPTION_PREFIX_SIZE = 1
 
@@ -29,10 +30,12 @@ class IDLParser:
         "u16": ("<H", 2),
         "u32": ("<I", 4),
         "u64": ("<Q", 8),
+        "u128": (None, 16),
         "i8": ("<b", 1),
         "i16": ("<h", 2),
         "i32": ("<i", 4),
         "i64": ("<q", 8),
+        "i128": (None, 16),
         "bool": ("<?", 1),
         "pubkey": (None, PUBLIC_KEY_SIZE),
         "string": (
@@ -189,7 +192,7 @@ class IDLParser:
             event_name: Optional event name to decode as. If None, will try to match discriminator.
 
         Returns:
-            Decoded event data as a dictionary, or None if decoding fails.
+            Decoded event data (only the valid prefix on a field error), or None if unrecognized.
         """
         if len(event_data) < DISCRIMINATOR_SIZE:
             return None
@@ -263,8 +266,8 @@ class IDLParser:
                 except Exception as e:
                     if self.verbose:
                         print(f"Error decoding field {field['name']}: {e}")
-                    # Don't return None here, continue with other fields
-                    continue
+                    # Later fields cannot be located after a failed decode.
+                    break
 
             return {"event_name": event_name_actual, "fields": event_fields}
 
@@ -414,6 +417,8 @@ class IDLParser:
                 element_type, array_length = type_def["array"]
                 element_size = self._calculate_type_min_size(element_type)
                 return element_size * array_length
+            if "vec" in type_def:
+                return VECTOR_LENGTH_PREFIX_SIZE
             if "option" in type_def:
                 # The None form is just the tag byte.
                 return OPTION_PREFIX_SIZE
@@ -497,6 +502,24 @@ class IDLParser:
                 return self._decode_array(data, offset, type_def["array"])
             if "option" in type_def:
                 return self._decode_option(data, offset, type_def["option"])
+            if "vec" in type_def:
+                length = struct.unpack_from("<I", data, offset)[0]
+                offset += VECTOR_LENGTH_PREFIX_SIZE
+                # Require byte progress per element, bounding work by the payload.
+                if length > len(data) - offset:
+                    message = "Vector length exceeds remaining data"
+                    raise ValueError(message)
+                values = []
+                for _ in range(length):
+                    value, next_offset = self._decode_type(
+                        data, offset, type_def["vec"]
+                    )
+                    if not offset < next_offset <= len(data):
+                        message = "Vector element did not consume valid data"
+                        raise ValueError(message)
+                    values.append(value)
+                    offset = next_offset
+                return values, offset
 
         raise ValueError(f"Invalid or unknown type definition for decoding: {type_def}")
 
@@ -530,9 +553,17 @@ class IDLParser:
         if type_name not in self._PRIMITIVE_TYPE_INFO:
             raise ValueError(f"Unknown primitive type: {type_name}")
 
+        fmt, size = self._PRIMITIVE_TYPE_INFO[type_name]
+        if offset < 0 or size > len(data) - offset:
+            message = f"Truncated {type_name}"
+            raise ValueError(message)
+
         if type_name == "string":
             length = struct.unpack_from("<I", data, offset)[0]
             offset += STRING_LENGTH_PREFIX_SIZE
+            if length > len(data) - offset:
+                message = "Truncated string"
+                raise ValueError(message)
             value = data[offset : offset + length].decode("utf-8")
             return value, offset + length
 
@@ -541,8 +572,13 @@ class IDLParser:
             value = base58.b58encode(data[offset:end]).decode("utf-8")
             return value, end
 
-        # Handle all numeric and bool types from the map
-        fmt, size = self._PRIMITIVE_TYPE_INFO[type_name]
+        if type_name in ("u128", "i128"):
+            end = offset + size
+            return int.from_bytes(
+                data[offset:end], "little", signed=type_name == "i128"
+            ), end
+
+        # Handle remaining numeric and bool types from the map
         value = struct.unpack_from(fmt, data, offset)[0]
         return value, offset + size
 

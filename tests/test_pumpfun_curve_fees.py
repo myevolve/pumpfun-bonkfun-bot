@@ -32,6 +32,7 @@ def _fee_account() -> Account:
     data += (0).to_bytes(16, "little") + _encode_fees((0, 80, 20))
     data += struct.pack("<I", 1)
     data += (0).to_bytes(16, "little") + _encode_fees((0, 50, 10))
+    data += _encode_fees((0, 95, 30))
     data += bytes(128)
     return Account(1, bytes(data), PumpFunAddresses.FEE_PROGRAM, False, 0)
 

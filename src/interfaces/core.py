@@ -60,6 +60,7 @@ class TokenInfo:
     virtual_token_reserves: int | None = None
     virtual_quote_reserves: int | None = None
     real_token_reserves: int | None = None
+    real_sol_reserves: int | None = None  # freshest from gate trigger TradeEvent
     token_total_supply: int | None = None
 
     # True when creator, mayhem/cashback flags, quote metadata, and the raw

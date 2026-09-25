@@ -11,7 +11,10 @@ except ImportError:  # pragma: no cover - Windows requires an explicit lock back
     fcntl = None
 import json
 import sys
+from collections.abc import AsyncIterator
+from dataclasses import asdict
 from datetime import UTC, datetime
+from hashlib import sha256
 from math import isfinite
 from pathlib import Path
 from time import monotonic
@@ -26,9 +29,11 @@ from cleanup.modes import (
     stage_cleanup_after_sell,
 )
 from core.client import (
+    RpcUnavailableError,
     SolanaClient,
     TransactionStatus,
     TransactionSubmissionUnknown,
+    estimate_transaction_fee_lamports,
 )
 from core.execution_policy import ExecutionMode, ExecutionPolicy
 from core.priority_fee.manager import PriorityFeeManager
@@ -42,12 +47,24 @@ from core.pubkeys import (
     resolve_quote_mint,
 )
 from core.transaction_ledger import (
+    EvidencePersistenceError,
     TransactionLedger,
     resolve_transaction_ledger_path,
 )
 from core.wallet import Wallet
 from interfaces.core import Platform, TokenInfo
 from monitoring.listener_factory import ListenerFactory
+from monitoring.trade_flow import (
+    EntryGate,
+    FlowMonitor,
+    FlowRules,
+    FlowSignal,
+    GateDecision,
+    GateRules,
+    GeyserTradeStream,
+    TradeEvent,
+    TradeFlowHub,
+)
 from platforms import get_platform_implementations
 from trading.base import TradeResult
 from trading.platform_aware import PlatformAwareBuyer, PlatformAwareSeller
@@ -75,6 +92,9 @@ logger = get_logger(__name__)
 # Exit sells are attempted in bounded bursts. Positions remain journaled and
 # monitored after a burst, rather than being abandoned.
 DEFAULT_MAX_EXIT_SELL_ATTEMPTS = 3
+# Read-only price checks ride out RPC outages for this many seconds before the
+# monitor fails closed. 0 fails on the first read error.
+DEFAULT_PRICE_READ_OUTAGE_BUDGET = 300.0
 
 
 def _resolve_quote_config(
@@ -112,6 +132,7 @@ def _validate_exit_config(
     max_hold_time: int | None,
     price_check_interval: int,
     max_exit_sell_attempts: int,
+    price_read_outage_budget: float,
 ) -> str:
     """Validate exit configuration before any network resources are created."""
     if not isinstance(exit_strategy, str):
@@ -131,6 +152,13 @@ def _validate_exit_config(
         or max_exit_sell_attempts <= 0
     ):
         raise ValueError("max_exit_sell_attempts must be a positive integer")
+    if (
+        isinstance(price_read_outage_budget, bool)
+        or not isinstance(price_read_outage_budget, int | float)
+        or not isfinite(price_read_outage_budget)
+        or price_read_outage_budget < 0
+    ):
+        raise ValueError("price_read_outage_budget must be a non-negative number")
     if take_profit_percentage is not None:
         if (
             isinstance(take_profit_percentage, bool)
@@ -202,6 +230,7 @@ class UniversalTrader:
         max_hold_time: int | None = None,
         price_check_interval: int = 10,
         max_exit_sell_attempts: int = DEFAULT_MAX_EXIT_SELL_ATTEMPTS,
+        price_read_outage_budget: float = DEFAULT_PRICE_READ_OUTAGE_BUDGET,
         # Priority fee configuration
         enable_dynamic_priority_fee: bool = False,
         enable_fixed_priority_fee: bool = True,
@@ -219,6 +248,10 @@ class UniversalTrader:
         cleanup_mode: str = "disabled",
         cleanup_force_close_with_burn: bool = False,
         cleanup_with_priority_fee: bool = False,
+        # Real-time exit rules evaluated on the coin's trade stream (pump.fun)
+        flow_rules: FlowRules | None = None,
+        # Entry gate evaluated on the first slots of trades (pump.fun + geyser)
+        gate_rules: GateRules | None = None,
         # Trading filters
         match_string: str | None = None,
         bro_address: str | None = None,
@@ -240,6 +273,7 @@ class UniversalTrader:
             max_hold_time,
             price_check_interval,
             max_exit_sell_attempts,
+            price_read_outage_budget,
         )
         if (
             isinstance(token_queue_size, bool)
@@ -254,6 +288,19 @@ class UniversalTrader:
         ):
             raise ValueError(
                 "wait_time_after_buy must be a positive integer for time_based exit"
+            )
+        resolved_quote_amounts, resolved_allowed_quote_mints = _resolve_quote_config(
+            buy_amount,
+            quote_amounts,
+            allowed_quote_mints,
+        )
+        if (
+            self.exit_strategy == "tp_sl"
+            and take_profit_percentage is not None
+            and resolved_allowed_quote_mints != {WSOL_MINT}
+        ):
+            raise ValueError(
+                "Net take profit requires a SOL-only allowed_quote_mints list"
             )
         self.execution_policy = execution_policy or ExecutionPolicy()
         self.wallet = Wallet(private_key)
@@ -293,9 +340,8 @@ class UniversalTrader:
 
         # Store compute unit and quote-asset configuration
         self.compute_units = compute_units or {}
-        self.quote_amounts, self.allowed_quote_mints = _resolve_quote_config(
-            buy_amount, quote_amounts, allowed_quote_mints
-        )
+        self.quote_amounts = resolved_quote_amounts
+        self.allowed_quote_mints = resolved_allowed_quote_mints
 
         # Create platform-aware traders
         self.buyer, self.seller = (
@@ -334,6 +380,23 @@ class UniversalTrader:
             pumpportal_url=pumpportal_url,
             platforms=[self.platform],  # Only listen for our platform
         )
+        self.geyser_endpoint = geyser_endpoint
+        self.geyser_api_token = geyser_api_token
+        self.geyser_auth_type = geyser_auth_type
+        # One program-wide stream feeds the entry gate and the exit rules.
+        self.trade_hub: TradeFlowHub | None = None
+        if self.platform is Platform.PUMP_FUN and hasattr(
+            self.token_listener, "trade_hub"
+        ):
+            self.trade_hub = TradeFlowHub(
+                self.platform_implementations.event_parser._idl_parser  # noqa: SLF001
+            )
+            self.token_listener.trade_hub = self.trade_hub
+        self._gate_queues: dict[str, asyncio.Queue[TradeEvent]] = {}
+        self._listener_task: asyncio.Task | None = None
+        self._buy_attempts = 0
+        self._oneshot_found: TokenInfo | None = None
+        self._oneshot_event = asyncio.Event()
 
         # Trading parameters
         self.buy_amount = buy_amount
@@ -349,6 +412,7 @@ class UniversalTrader:
         self.max_hold_time = max_hold_time
         self.price_check_interval = price_check_interval
         self.max_exit_sell_attempts = max_exit_sell_attempts
+        self.price_read_outage_budget = float(price_read_outage_budget)
 
         # Timing parameters
         self.wait_time_after_creation = wait_time_after_creation
@@ -367,6 +431,11 @@ class UniversalTrader:
         self.bro_address = bro_address
         self.marry_mode = marry_mode
         self.yolo_mode = yolo_mode
+        self.flow_rules = flow_rules
+        self.gate_rules = gate_rules
+        self._flow_signals: dict[str, FlowSignal] = {}
+        self._flow_wakeups: dict[str, asyncio.Event] = {}
+        self._flow_latched: set[str] = set()
 
         # State tracking
         self.traded_mints: set[Pubkey] = set()
@@ -422,6 +491,20 @@ class UniversalTrader:
                     raise RuntimeError(  # noqa: TRY003
                         f"Another live trader owns recovery journal {self._journal_path}"
                     ) from exc
+                self._initialize_evidence_profile(
+                    {
+                        "listener_type": listener_type,
+                        "curve_refresh_budget": curve_refresh_budget,
+                        "trust_create_event": trust_create_event,
+                        "enable_dynamic_priority_fee": enable_dynamic_priority_fee,
+                        "enable_fixed_priority_fee": enable_fixed_priority_fee,
+                        "fixed_priority_fee": fixed_priority_fee,
+                        "extra_priority_fee": extra_priority_fee,
+                        "hard_cap_prior_fee": hard_cap_prior_fee,
+                        "max_rps": max_rps,
+                        "token_queue_size": token_queue_size,
+                    }
+                )
             self._load_recovery_journal()
             self._hydrate_submission_recovery()
         except BaseException:
@@ -432,6 +515,119 @@ class UniversalTrader:
                     exc_info=(type(error), error, error.__traceback__),
                 )
             raise
+
+    def _initialize_evidence_profile(self, runtime_settings: dict[str, object]) -> None:
+        """Fingerprint allowlisted settings and source files once, before trading."""
+        if self.transaction_ledger is None:
+            message = "Live evidence requires a ledger"
+            raise EvidencePersistenceError(message)
+        settings = {
+            name: getattr(self, name)
+            for name in (
+                "buy_amount",
+                "buy_slippage",
+                "sell_slippage",
+                "max_retries",
+                "extreme_fast_mode",
+                "extreme_fast_token_amount",
+                "exit_strategy",
+                "take_profit_percentage",
+                "stop_loss_percentage",
+                "max_hold_time",
+                "price_check_interval",
+                "max_exit_sell_attempts",
+                "price_read_outage_budget",
+                "wait_time_after_creation",
+                "wait_time_after_buy",
+                "wait_time_before_new_token",
+                "max_token_age",
+                "token_wait_timeout",
+                "cleanup_mode",
+                "cleanup_force_close_with_burn",
+                "cleanup_with_priority_fee",
+                "match_string",
+                "bro_address",
+                "marry_mode",
+                "yolo_mode",
+                "compute_units",
+            )
+        }
+        settings.update(runtime_settings)
+        settings.update(
+            {
+                "platform": self.platform.value,
+                "wallet": str(self.wallet.pubkey),
+                "execution": asdict(self.execution_policy),
+                "quote_amounts": {
+                    str(mint): amount for mint, amount in self.quote_amounts.items()
+                },
+                "allowed_quote_mints": (
+                    sorted(map(str, self.allowed_quote_mints))
+                    if self.allowed_quote_mints is not None
+                    else None
+                ),
+                "entry_gate": asdict(self.gate_rules) if self.gate_rules else None,
+                "flow_exit": asdict(self.flow_rules) if self.flow_rules else None,
+                "python_version": list(sys.version_info[:3]),
+            }
+        )
+        source_root = Path(__file__).resolve().parents[1]
+        root = source_root.parent
+        paths = [
+            *source_root.rglob("*.py"),
+            *(root / "idl").glob("*.json"),
+            root / "pyproject.toml",
+            root / "uv.lock",
+        ]
+        sources = {
+            str(path.relative_to(root)): sha256(path.read_bytes()).hexdigest()
+            for path in sorted(paths)
+            if path.is_file() and not path.is_symlink()
+        }
+        self.solana_client.evidence_profile_id = (
+            self.transaction_ledger.record_evidence_profile(
+                self.execution_policy.mode.value, settings, sources
+            )
+        )
+
+    def _record_trade_evidence(
+        self,
+        category: str,
+        token_info: TokenInfo,
+        *,
+        result: TradeResult | None = None,
+        position: Position | None = None,
+        **details: object,
+    ) -> None:
+        """Persist observations before discarding recoverable work; never infer fills."""
+        if self.execution_policy.mode is not ExecutionMode.LIVE:
+            # Dry-run authorization checks are not simulated fills.
+            return
+        if (
+            self.transaction_ledger is None
+            or self.solana_client.evidence_profile_id is None
+        ):
+            message = "Live evidence profile is unavailable"
+            raise EvidencePersistenceError(message)
+        payload = {"token": self._token_to_dict(token_info), **details}
+        if result is not None:
+            outcome = result.to_dict()
+            outcome["fee_budget_lamports"] = outcome.pop("fee_lamports")
+            # Provider exceptions can contain credential-bearing URLs. Structured
+            # status and public chain errors are retained; text stays in the logger.
+            outcome["has_error"] = outcome.pop("error_message") is not None
+            if not result.success:
+                for name in ("price", "amount_raw", "quote_amount_raw"):
+                    outcome[name] = None
+            payload["result"] = outcome
+        if position is not None:
+            snapshot = position.to_dict()
+            for name in ("buy_fee", "charged_exit_fee", "pending_exit_fee"):
+                snapshot[f"{name}_budget_lamports"] = snapshot.pop(f"{name}_lamports")
+            payload["position"] = snapshot
+        self.transaction_ledger.record_trade_evidence(
+            self.solana_client.evidence_profile_id, category, payload
+        )
 
     def _release_persistence_resources(
         self,
@@ -697,16 +893,27 @@ class UniversalTrader:
             traded_mints = set(self.traded_mints)
             traded_token_programs = dict(self.traded_token_programs)
             cleanup_records: list[tuple[TokenInfo, Position]] = []
+            migrated_positions = False
 
             for token_key, record in position_records.items():
                 if not isinstance(record, dict):
                     raise ValueError("position journal record must be an object")
                 token_info = self.token_from_dict(record["token"])
-                position = Position.from_dict(record["position"])
+                position_payload = record["position"]
+                position = Position.from_dict(position_payload)
                 if str(position.mint) != token_key or position.mint != token_info.mint:
                     raise ValueError("position journal mint mismatch")
                 if token_info.platform is not self.platform:
                     raise ValueError("position journal platform mismatch")
+                if self._migrate_legacy_position(
+                    token_info,
+                    position,
+                    recover_exit_fee_history=(
+                        "charged_exit_fee_lamports" not in position_payload
+                    ),
+                ):
+                    record["position"] = position.to_dict()
+                    migrated_positions = True
                 if position.is_active:
                     active_positions[token_key] = (token_info, position)
                     reserved_mints.add(token_key)
@@ -748,6 +955,13 @@ class UniversalTrader:
                     raise ValueError("pending recovery token platform mismatch")
                 pending_recovery_tokens.append(pending_token)
 
+            if migrated_positions:
+                payload["updated_at"] = datetime.now(UTC).isoformat()
+                atomic_write_text(
+                    self._journal_path,
+                    json.dumps(payload, indent=2, sort_keys=True),
+                )
+
             for token_info, position in cleanup_records:
                 AccountCleanupManager.record_bot_owned_balance(
                     self.wallet.pubkey,
@@ -773,6 +987,134 @@ class UniversalTrader:
     def _buy_intent_id(token_info: TokenInfo) -> str:
         """Return the stable ledger intent used by the buyer."""
         return f"buy:{token_info.platform.value}:{token_info.mint}"
+
+    @staticmethod
+    def _recover_legacy_charged_exit_fees(
+        ledger: TransactionLedger,
+        position: Position,
+    ) -> int:
+        """Sum fees from prior reverted exit submissions."""
+        if position.exit_attempt_sequence == 0:
+            return 0
+        if position.position_id is None:
+            raise ValueError("cannot recover exit fees without a position id")
+
+        charged_fees = 0
+        for sequence in range(1, position.exit_attempt_sequence + 1):
+            intent_ids = (
+                f"sell:{position.position_id}:{sequence}",
+                f"emergency-sell:{position.position_id}:{sequence}",
+            )
+            records = [
+                (intent_id, record)
+                for intent_id in intent_ids
+                if (record := ledger.get_latest_submission_record(intent_id))
+                is not None
+            ]
+            if len(records) > 1:
+                raise ValueError(
+                    f"multiple exit submissions found for attempt {sequence}"
+                )
+            if not records:
+                continue
+            intent_id, record = records[0]
+            if position.pending_exit_intent_id == intent_id:
+                continue
+            outcome = ledger.get_outcome(record.signature)
+            if outcome is None or outcome.status is TransactionStatus.UNKNOWN:
+                raise ValueError(
+                    f"prior exit attempt {sequence} has no terminal outcome"
+                )
+            if outcome.status is TransactionStatus.SUCCESS:
+                raise ValueError(
+                    f"active position has successful prior exit attempt {sequence}"
+                )
+            if outcome.status is TransactionStatus.REVERTED:
+                if record.fee_lamports is None:
+                    raise ValueError(
+                        f"reverted exit attempt {sequence} has no durable fee"
+                    )
+                charged_fees += record.fee_lamports
+            elif outcome.status is not TransactionStatus.EXPIRED:
+                raise ValueError(
+                    f"prior exit attempt {sequence} has unsupported outcome"
+                )
+        return charged_fees
+
+    def _migrate_legacy_position(
+        self,
+        token_info: TokenInfo,
+        position: Position,
+        *,
+        recover_exit_fee_history: bool,
+    ) -> bool:
+        """Migrate fee-sensitive fields using exact durable ledger evidence."""
+        changed = False
+        ledger = getattr(self, "transaction_ledger", None)
+        if (
+            position.is_active
+            and position.take_profit_price is not None
+            and position.take_profit_net_quote_raw is None
+        ):
+            if ledger is None:
+                raise ValueError(
+                    "cannot recover net take-profit target without a transaction ledger"
+                )
+            buy_record = ledger.get_active_submission_record(
+                self._buy_intent_id(token_info)
+            )
+            if (
+                buy_record is None
+                or buy_record.signature != position.position_id
+                or buy_record.fee_lamports is None
+            ):
+                raise ValueError(
+                    "cannot recover net take-profit target without exact buy fee evidence"
+                )
+            position.migrate_legacy_take_profit_target(buy_record.fee_lamports)
+            changed = True
+
+        if (
+            recover_exit_fee_history
+            and position.is_active
+            and position.take_profit_price is not None
+        ):
+            if ledger is None:
+                raise ValueError(
+                    "cannot recover charged exit fees without a transaction ledger"
+                )
+            position.record_charged_exit_fee(
+                self._recover_legacy_charged_exit_fees(ledger, position)
+            )
+            changed = True
+
+        if (
+            position.pending_exit_signature is not None
+            and position.pending_exit_fee_lamports is None
+        ):
+            if ledger is None or position.pending_exit_intent_id is None:
+                raise ValueError(
+                    "cannot recover pending sell fee without a transaction ledger"
+                )
+            sell_record = ledger.get_latest_submission_record(
+                position.pending_exit_intent_id
+            )
+            if (
+                sell_record is None
+                or sell_record.signature != position.pending_exit_signature
+                or sell_record.fee_lamports is None
+                or position.pending_exit_reason is None
+            ):
+                raise ValueError(
+                    "cannot recover pending sell fee from exact ledger submission"
+                )
+            position.mark_exit_pending(
+                sell_record.signature,
+                position.pending_exit_reason,
+                fee_lamports=sell_record.fee_lamports,
+            )
+            changed = True
+        return changed
 
     def _hydrate_submission_recovery(self) -> None:
         """Join journaled work to exact ledger signatures before age/price gates."""
@@ -804,12 +1146,44 @@ class UniversalTrader:
                 continue
             record = self.transaction_ledger.get_active_submission_record(intent_id)
             if record is None:
+                terminal_record = self.transaction_ledger.get_latest_submission_record(
+                    intent_id
+                )
+                if terminal_record is not None:
+                    outcome = self.transaction_ledger.get_outcome(
+                        terminal_record.signature
+                    )
+                    if outcome is None or outcome.status not in {
+                        TransactionStatus.REVERTED,
+                        TransactionStatus.EXPIRED,
+                    }:
+                        raise RuntimeError(
+                            f"Position {token_key} has an inconsistent exit outcome"
+                        )
+                    if outcome.status is TransactionStatus.REVERTED:
+                        if terminal_record.fee_lamports is None:
+                            raise RuntimeError(
+                                f"Position {token_key} has a reverted exit "
+                                "without a durable fee"
+                            )
+                        position.record_charged_exit_fee(terminal_record.fee_lamports)
+                position.clear_pending_exit()
+                self._active_positions[token_key] = (token_info, position)
+                changed = True
                 continue
             if position.pending_exit_reason is None:
                 raise RuntimeError(
                     f"Position {token_key} has a pending exit intent without a reason"
                 )
-            position.mark_exit_pending(record.signature, position.pending_exit_reason)
+            if record.fee_lamports is None:
+                raise RuntimeError(
+                    f"Position {token_key} has a pending exit without a durable fee"
+                )
+            position.mark_exit_pending(
+                record.signature,
+                position.pending_exit_reason,
+                fee_lamports=record.fee_lamports,
+            )
             self._active_positions[token_key] = (token_info, position)
             changed = True
 
@@ -934,15 +1308,20 @@ class UniversalTrader:
         self.processed_tokens.add(token_key)
         self._write_recovery_journal()
 
+    @staticmethod
+    def has_automatic_exit(position: Position) -> bool:
+        """Return whether an active position has a monitorable exit trigger."""
+        return position.is_active and (
+            position.take_profit_price is not None
+            or position.stop_loss_price is not None
+            or position.max_hold_time is not None
+        )
+
     def _schedule_position_monitor(
         self, token_info: TokenInfo, position: Position
     ) -> asyncio.Task | None:
         """Start one monitor task for an active automatic-exit position."""
-        if not position.is_active or (
-            position.take_profit_price is None
-            and position.stop_loss_price is None
-            and position.max_hold_time is None
-        ):
+        if not self.has_automatic_exit(position):
             return None
         task = asyncio.create_task(
             self._monitor_position_until_exit(token_info, position)
@@ -1024,6 +1403,71 @@ class UniversalTrader:
                 except asyncio.CancelledError:
                     pass
 
+    async def _get_pending_sell_receipt(
+        self, token_info: TokenInfo, position: Position
+    ) -> tuple[int, float] | None:
+        """Price a confirmed sell only from its actual quote proceeds."""
+        quote_mint = normalize_quote_mint(token_info.quote_mint)
+        quote_raw = await self.solana_client.get_sell_transaction_details(
+            position.pending_exit_signature, quote_mint, self.wallet.pubkey
+        )
+        if (
+            isinstance(quote_raw, bool)
+            or not isinstance(quote_raw, int)
+            or quote_raw <= 0
+        ):
+            return None
+        try:
+            exit_price = (
+                quote_raw / quote_units_per_token(quote_mint)
+            ) / position.quantity
+        except (OverflowError, ValueError):
+            return None
+        if not isfinite(exit_price) or exit_price <= 0:
+            return None
+        return quote_raw, exit_price
+
+    def _defer_unpriced_sell_result(
+        self, token_info: TokenInfo, position: Position, result: TradeResult
+    ) -> bool:
+        """Keep a malformed successful receipt pending instead of realizing a quote."""
+        if not result.success or (
+            not isinstance(result.price, bool)
+            and isinstance(result.price, int | float)
+            and isfinite(result.price)
+            and result.price > 0
+        ):
+            self._record_trade_evidence(
+                "trade_result",
+                token_info,
+                result=result,
+                position=position,
+                action="sell",
+            )
+            return False
+        if not result.tx_signature:
+            message = "Unpriced successful sell has no recovery signature"
+            raise RuntimeError(message)
+        # A missing fee can be recovered from the existing submission ledger.
+        position.pending_exit_signature = result.tx_signature
+        position.pending_exit_fee_lamports = None
+        if result.fee_lamports is not None:
+            position.mark_exit_pending(
+                result.tx_signature,
+                position.pending_exit_reason,
+                fee_lamports=result.fee_lamports,
+            )
+        self._persist_position(token_info, position)
+        result.success = False
+        result.status = TransactionStatus.UNKNOWN.value
+        result.price = None
+        result.quote_amount_raw = None
+        result.error_message = "Confirmed sell receipt accounting is unavailable"
+        self._record_trade_evidence(
+            "trade_result", token_info, result=result, position=position, action="sell"
+        )
+        return True
+
     async def _finalize_emergency_exit(
         self,
         token_info: TokenInfo,
@@ -1032,8 +1476,20 @@ class UniversalTrader:
         exit_price: float,
         tx_signature: str | None,
         sold_raw: int | None,
+        quote_amount_raw: int | None,
     ) -> None:
         """Close one journaled position after confirmed emergency sale."""
+        self._record_trade_evidence(
+            "position_closed",
+            token_info,
+            position=position,
+            action="sell",
+            signature=tx_signature,
+            exit_reason=ExitReason.MANUAL.value,
+            price=exit_price,
+            amount_raw=sold_raw,
+            quote_amount_raw=quote_amount_raw,
+        )
         cleanup_raw = (
             sold_raw
             if (
@@ -1102,6 +1558,15 @@ class UniversalTrader:
                 outcome = await self.solana_client.confirm_transaction_outcome(
                     position.pending_exit_signature
                 )
+                self._record_trade_evidence(
+                    "chain_outcome",
+                    token_info,
+                    position=position,
+                    action="sell",
+                    signature=position.pending_exit_signature,
+                    status=outcome.status.value,
+                    slot=outcome.slot,
+                )
                 if outcome.status is TransactionStatus.UNKNOWN:
                     return TradeResult(
                         success=False,
@@ -1110,12 +1575,26 @@ class UniversalTrader:
                         error_message=outcome.error,
                         amount=position.quantity,
                         amount_raw=position.quantity_raw,
-                        price=position.pending_exit_price,
+                        fee_lamports=position.pending_exit_fee_lamports,
                         slot=outcome.slot,
                         status=TransactionStatus.UNKNOWN.value,
                     )
                 if outcome.status is TransactionStatus.SUCCESS:
-                    exit_price = position.pending_exit_price or position.entry_price
+                    receipt = await self._get_pending_sell_receipt(token_info, position)
+                    if receipt is None:
+                        return TradeResult(
+                            success=False,
+                            platform=token_info.platform,
+                            tx_signature=position.pending_exit_signature,
+                            error_message="Confirmed sell receipt accounting is unavailable",
+                            amount=position.quantity,
+                            amount_raw=position.quantity_raw,
+                            fee_lamports=position.pending_exit_fee_lamports,
+                            slot=outcome.slot,
+                            status=TransactionStatus.UNKNOWN.value,
+                        )
+                    quote_raw, exit_price = receipt
+                    fee_lamports = position.pending_exit_fee_lamports
                     signature = position.pending_exit_signature
                     await self._finalize_emergency_exit(
                         token_info,
@@ -1123,6 +1602,7 @@ class UniversalTrader:
                         exit_price=exit_price,
                         tx_signature=signature,
                         sold_raw=position.quantity_raw,
+                        quote_amount_raw=quote_raw,
                     )
                     return TradeResult(
                         success=True,
@@ -1131,9 +1611,17 @@ class UniversalTrader:
                         amount=position.quantity,
                         amount_raw=position.quantity_raw,
                         price=exit_price,
+                        quote_amount_raw=quote_raw,
+                        fee_lamports=fee_lamports,
                         slot=outcome.slot,
                         status=TransactionStatus.SUCCESS.value,
                     )
+                if outcome.status is TransactionStatus.REVERTED:
+                    if position.pending_exit_fee_lamports is None:
+                        raise RuntimeError(
+                            "Reverted pending emergency sell has no durable fee"
+                        )
+                    position.record_charged_exit_fee(position.pending_exit_fee_lamports)
                 position.clear_pending_exit()
                 self._persist_position(token_info, position)
 
@@ -1166,6 +1654,15 @@ class UniversalTrader:
                 float(current_price),
             )
             self._persist_position(token_info, position)
+            self._record_trade_evidence(
+                "decision",
+                token_info,
+                position=position,
+                action="sell",
+                intent_id=intent_id,
+                reason=ExitReason.MANUAL.value,
+                trigger_price=current_price,
+            )
             result = await self.seller.execute(
                 token_info,
                 token_amount=position.quantity,
@@ -1173,30 +1670,47 @@ class UniversalTrader:
                 token_amount_raw=position.quantity_raw,
                 intent_id=intent_id,
             )
+            if self._defer_unpriced_sell_result(token_info, position, result):
+                return result
             if result.success:
                 await self._finalize_emergency_exit(
                     token_info,
                     position,
-                    exit_price=result.price or float(current_price),
+                    exit_price=result.price,
                     tx_signature=result.tx_signature,
                     sold_raw=result.amount_raw,
+                    quote_amount_raw=result.quote_amount_raw,
                 )
                 return result
+            if result.unresolved:
+                result.price = None
+                result.quote_amount_raw = None
             if result.unresolved and result.tx_signature:
+                if result.fee_lamports is None:
+                    raise RuntimeError(
+                        "Unresolved emergency sell has no durable transaction fee"
+                    )
                 position.mark_exit_pending(
                     result.tx_signature,
                     ExitReason.MANUAL,
+                    fee_lamports=result.fee_lamports,
                 )
                 self._persist_position(token_info, position)
                 return result
+            if result.status == TransactionStatus.REVERTED.value:
+                if result.fee_lamports is None:
+                    raise RuntimeError(
+                        "Reverted emergency sell has no durable transaction fee"
+                    )
+                position.record_charged_exit_fee(result.fee_lamports)
             position.clear_pending_exit()
             self._persist_position(token_info, position)
             return result
         finally:
             await self._cleanup_resources()
 
-    async def start(self) -> None:
-        """Start trading and propagate fatal failures after orderly cleanup."""
+    async def start(self, *, resume_only: bool = False) -> None:
+        """Start trading or monitor recovered positions after orderly recovery."""
         logger.info(f"Starting Universal Trader for {self.platform.value}")
         logger.info(f"Exit strategy: {self.exit_strategy}")
         processor_task: asyncio.Task | None = None
@@ -1208,6 +1722,29 @@ class UniversalTrader:
         primary_traceback = None
 
         try:
+            if resume_only:
+                if self.yolo_mode:
+                    raise RuntimeError("Resume-only mode does not support yolo mode")
+                if self._pending_recovery_tokens or self._unresolved_buys:
+                    raise RuntimeError(
+                        "Resume-only mode requires no pending or unresolved buys"
+                    )
+                if not self._active_positions:
+                    raise RuntimeError(
+                        "Resume-only mode requires at least one active position"
+                    )
+                if any(
+                    not self.has_automatic_exit(position)
+                    for _, position in self._active_positions.values()
+                ):
+                    raise RuntimeError(
+                        "Resume-only mode requires an automatic exit "
+                        "for every active position"
+                    )
+                logger.info(
+                    "Resume-only mode: monitoring %d journaled position(s)",
+                    len(self._active_positions),
+                )
             if self.platform is Platform.PUMP_FUN:
                 curve_manager = getattr(
                     getattr(self, "platform_implementations", None),
@@ -1225,7 +1762,8 @@ class UniversalTrader:
                     )
                 await prepare_fee_schedule()
             await self._resume_ledger_bound_submissions()
-            await self._resume_staged_cleanups()
+            if not resume_only:
+                await self._resume_staged_cleanups()
             processor_task = asyncio.create_task(self._process_token_queue())
             reconciliation_task = asyncio.create_task(self._reconcile_unresolved_buys())
             self._position_tasks.add(reconciliation_task)
@@ -1263,46 +1801,96 @@ class UniversalTrader:
             except Exception as exc:
                 logger.warning(f"RPC warm-up failed: {exc!s}")
 
+            async def await_position_monitors() -> None:
+                nonlocal monitor_group_task
+                automatic_monitors = tuple(self._position_monitor_tasks)
+                if not automatic_monitors:
+                    return
+                monitor_group_task = asyncio.gather(*automatic_monitors)
+                done, _ = await asyncio.wait(
+                    {monitor_group_task, monitor_failure_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if monitor_group_task in done:
+                    await monitor_group_task
+                else:
+                    raise await monitor_failure_task
+
+            def hold_positions_after_listener_failure(exc: BaseException) -> None:
+                # A dead listener only stops new buys. Held positions keep their
+                # monitors so tp/sl exits still fire; the failure is re-raised
+                # once every monitor has finished.
+                if not self._position_monitor_tasks:
+                    raise exc
+                logger.error(
+                    "Token listener failed; holding %d position(s) until exit",
+                    len(self._position_monitor_tasks),
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
+
+            listener_error: BaseException | None = None
             if not self.yolo_mode:
                 await self._await_queue_drain(
                     processor_task,
                     monitor_failure_task,
                 )
-                token_wait_task = asyncio.create_task(self._wait_for_token())
-                done, _ = await asyncio.wait(
-                    {token_wait_task, monitor_failure_task},
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                if monitor_failure_task in done:
-                    monitor_error = await monitor_failure_task
-                    raise monitor_error
-                token_info = await token_wait_task
-                if token_info is not None:
-                    handled = False
-                    try:
-                        handled = await self._handle_token(token_info)
-                    finally:
-                        self._finish_token_reservation(token_info, handled)
-                    if str(token_info.mint) in self._unresolved_buys:
-                        await self._await_unresolved_buy_resolution(
-                            str(token_info.mint),
-                            monitor_failure_task,
+                if not resume_only:
+                    # One-shot means one buy, not one detection: an entry gate
+                    # skips most coins, so keep taking coins until a buy is
+                    # attempted or the wait budget is spent.
+                    wait_deadline = monotonic() + self.token_wait_timeout
+                    attempts_before = getattr(self, "_buy_attempts", 0)
+                    while True:
+                        if monotonic() >= wait_deadline:
+                            logger.info(
+                                "Token wait budget of %ss spent without a buy",
+                                self.token_wait_timeout,
+                            )
+                            break
+                        token_wait_task = asyncio.create_task(self._wait_for_token())
+                        done, _ = await asyncio.wait(
+                            {token_wait_task, monitor_failure_task},
+                            return_when=asyncio.FIRST_COMPLETED,
                         )
-                if monitor_failure_task.done():
-                    monitor_error = await monitor_failure_task
-                    raise monitor_error
-                automatic_monitors = tuple(self._position_monitor_tasks)
-                if automatic_monitors:
-                    monitor_group_task = asyncio.gather(*automatic_monitors)
-                    done, _ = await asyncio.wait(
-                        {monitor_group_task, monitor_failure_task},
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
-                    if monitor_group_task in done:
-                        await monitor_group_task
-                    else:
+                        if monitor_failure_task in done:
+                            monitor_error = await monitor_failure_task
+                            raise monitor_error
+                        token_info = None
+                        try:
+                            token_info = await token_wait_task
+                        except Exception as exc:
+                            listener_error = exc
+                            break
+                        if token_info is None:
+                            break
+                        handled = False
+                        try:
+                            handled = await self._handle_token(token_info)
+                        finally:
+                            self._finish_token_reservation(token_info, handled)
+                        if str(token_info.mint) in self._unresolved_buys:
+                            await self._await_unresolved_buy_resolution(
+                                str(token_info.mint),
+                                monitor_failure_task,
+                            )
+                        token_key = str(token_info.mint)
+                        skipped = (
+                            handled
+                            and getattr(self, "_buy_attempts", 0) == attempts_before
+                            and token_key not in self._active_positions
+                            and token_key not in self._unresolved_buys
+                            and not self._position_monitor_tasks
+                        )
+                        if not skipped:
+                            break
+                    if monitor_failure_task.done():
                         monitor_error = await monitor_failure_task
                         raise monitor_error
+                    if listener_error is not None:
+                        hold_positions_after_listener_failure(listener_error)
+                await await_position_monitors()
+                if listener_error is not None:
+                    raise listener_error
             else:
                 listener_task = asyncio.create_task(
                     self.token_listener.listen_for_tokens(
@@ -1321,7 +1909,11 @@ class UniversalTrader:
                 if processor_task in done:
                     await processor_task
                     raise RuntimeError("Token queue processor stopped unexpectedly")
-                await listener_task
+                try:
+                    await listener_task
+                    raise RuntimeError("Token listener stopped unexpectedly")
+                except Exception as exc:
+                    listener_error = exc
                 await self._await_queue_drain(
                     processor_task,
                     monitor_failure_task,
@@ -1329,7 +1921,9 @@ class UniversalTrader:
                 if monitor_failure_task.done():
                     monitor_error = await monitor_failure_task
                     raise monitor_error
-                raise RuntimeError("Token listener stopped unexpectedly")
+                hold_positions_after_listener_failure(listener_error)
+                await await_position_monitors()
+                raise listener_error
         except BaseException as exc:
             primary_error = exc
             primary_traceback = exc.__traceback__
@@ -1416,45 +2010,63 @@ class UniversalTrader:
                     stage,
                     exc_info=(type(error), error, error.__traceback__),
                 )
+            if self._active_positions:
+                logger.warning(
+                    "%d active position(s) remain journaled and unmonitored: %s",
+                    len(self._active_positions),
+                    ", ".join(self._active_positions),
+                )
             logger.info("Universal Trader has shut down")
 
         if primary_error is not None:
             raise primary_error.with_traceback(primary_traceback)
 
-    async def _wait_for_token(self) -> TokenInfo | None:
-        """Wait for and atomically reserve a single token mint."""
-        token_found = asyncio.Event()
-        found_token: TokenInfo | None = None
+    async def _wait_for_token(
+        self, *, timeout: float | None = None
+    ) -> TokenInfo | None:
+        """Wait for and atomically reserve a single token mint.
+
+        With a trade hub the listener stream is kept alive across calls (the
+        gate and the hold need it), so a second call reuses it instead of
+        opening another Geyser subscription.
+        """
+        self._oneshot_found = None
+        self._oneshot_event = asyncio.Event()
 
         async def token_callback(token: TokenInfo) -> None:
-            nonlocal found_token
             token_key = str(token.mint)
             async with self._queue_lock:
                 if (
-                    found_token is not None
+                    self._oneshot_found is not None
                     or token_key in self.processed_tokens
                     or token_key in self._reserved_mints
                 ):
                     return
                 self._reserved_mints.add(token_key)
                 self.token_timestamps[token_key] = monotonic()
-                found_token = token
-                token_found.set()
+                self._subscribe_trades(token_key)
+                self._oneshot_found = token
+                self._oneshot_event.set()
 
-        listener_task = asyncio.create_task(
-            self.token_listener.listen_for_tokens(
-                token_callback,
-                self.match_string,
-                self.bro_address,
+        kept_task = getattr(self, "_listener_task", None)
+        if kept_task is not None and not kept_task.done():
+            listener_task = kept_task
+        else:
+            listener_task = asyncio.create_task(
+                self.token_listener.listen_for_tokens(
+                    token_callback,
+                    self.match_string,
+                    self.bro_address,
+                )
             )
-        )
-        token_found_task = asyncio.create_task(token_found.wait())
+        token_found_task = asyncio.create_task(self._oneshot_event.wait())
         try:
             done, _ = await asyncio.wait(
                 {token_found_task, listener_task},
-                timeout=self.token_wait_timeout,
+                timeout=self.token_wait_timeout if timeout is None else timeout,
                 return_when=asyncio.FIRST_COMPLETED,
             )
+            found_token = self._oneshot_found
             if listener_task in done:
                 await listener_task
                 if found_token is None:
@@ -1462,16 +2074,29 @@ class UniversalTrader:
                         "Token listener stopped before detecting a token"
                     )
             if token_found_task in done or found_token is not None:
+                if (
+                    getattr(self, "trade_hub", None) is not None
+                    and not listener_task.done()
+                ):
+                    # The hub needs this stream through the gate and the hold;
+                    # later creations are ignored by the callback above.
+                    self._listener_task = listener_task
+                    self._position_tasks.add(listener_task)
+                    listener_task.add_done_callback(self._position_tasks.discard)
                 return found_token
             logger.info(
                 f"Timed out after waiting {self.token_wait_timeout}s for a token"
             )
             return None
         finally:
+            kept = getattr(self, "_listener_task", None)
+            keep = {kept} if kept is not None else set()
             for task in (token_found_task, listener_task):
-                if not task.done():
+                if task not in keep and not task.done():
                     task.cancel()
             for task in (token_found_task, listener_task):
+                if task in keep:
+                    continue
                 try:
                     await task
                 except asyncio.CancelledError:
@@ -1601,6 +2226,8 @@ class UniversalTrader:
             if token_key in self.processed_tokens or token_key in self._reserved_mints:
                 return False
             self._reserved_mints.add(token_key)
+            if not recovered:
+                self._subscribe_trades(token_key)
             queued_at = monotonic()
             if recovered:
                 creation_timestamp = self._validate_creation_timestamp(
@@ -1625,6 +2252,19 @@ class UniversalTrader:
         )
         return True
 
+    def _subscribe_trades(self, token_key: str) -> None:
+        """Start collecting a reserved mint's trades before any are missed."""
+        hub = getattr(self, "trade_hub", None)
+        if hub is None or token_key in self._gate_queues:
+            return
+        self._gate_queues[token_key] = hub.subscribe(token_key)
+
+    def _unsubscribe_trades(self, token_key: str) -> None:
+        queue = getattr(self, "_gate_queues", {}).pop(token_key, None)
+        hub = getattr(self, "trade_hub", None)
+        if queue is not None and hub is not None:
+            hub.unsubscribe(token_key, queue)
+
     def _finish_token_reservation(self, token_info: TokenInfo, handled: bool) -> None:
         """Release a mint only when it is safe for another callback to claim."""
         token_key = str(token_info.mint)
@@ -1646,6 +2286,8 @@ class UniversalTrader:
         )
         if not has_durable_state and not has_pending_recovery:
             self._reserved_mints.discard(token_key)
+        if token_key not in self._active_positions:
+            self._unsubscribe_trades(token_key)
         self.token_timestamps.pop(token_key, None)
         if handled or pending_changed:
             self._write_recovery_journal()
@@ -1668,6 +2310,9 @@ class UniversalTrader:
                     logger.info(
                         f"Skipping stale token {token_info.symbol} "
                         f"({token_age:.1f}s > {self.max_token_age}s)"
+                    )
+                    self._record_trade_evidence(
+                        "decision", token_info, action="skip", reason="stale_token"
                     )
                     handled = True
                 else:
@@ -1704,6 +2349,9 @@ class UniversalTrader:
                 logger.warning(
                     f"Token platform mismatch: expected {self.platform.value}, got {token_info.platform.value}"
                 )
+                self._record_trade_evidence(
+                    "decision", token_info, action="skip", reason="platform_mismatch"
+                )
                 return True
 
             # An unverified Pump listener value is only a hint. PumpPortal omits
@@ -1725,11 +2373,23 @@ class UniversalTrader:
                         f"Skipping {token_info.symbol} - quote mint "
                         f"{token_quote_mint} not in allowed_quote_mints"
                     )
+                    self._record_trade_evidence(
+                        "decision",
+                        token_info,
+                        action="skip",
+                        reason="quote_not_allowed",
+                    )
                     return True
                 if token_quote_mint not in self.quote_amounts:
                     logger.info(
                         f"Skipping {token_info.symbol} - no buy amount configured "
                         f"for quote mint {token_quote_mint}"
+                    )
+                    self._record_trade_evidence(
+                        "decision",
+                        token_info,
+                        action="skip",
+                        reason="quote_amount_missing",
                     )
                     return True
             if not self.extreme_fast_mode:
@@ -1739,6 +2399,20 @@ class UniversalTrader:
                     "for the pool/curve to stabilize..."
                 )
                 await asyncio.sleep(self.wait_time_after_creation)
+
+            decision = await self._await_entry_gate(token_info)
+            self._record_trade_evidence(
+                "decision",
+                token_info,
+                action="buy" if decision is None or decision.accept else "skip",
+                intent_id=self._buy_intent_id(token_info),
+                reason=decision.reason
+                if decision is not None
+                else "entry_gate_disabled",
+                gate=asdict(decision) if decision is not None else None,
+            )
+            if decision is not None and not decision.accept:
+                return True
 
             if token_quote_mint is None:
                 logger.info(
@@ -1758,6 +2432,7 @@ class UniversalTrader:
             ):
                 self._pending_recovery_tokens.append(token_info)
                 self._write_recovery_journal()
+            self._buy_attempts = getattr(self, "_buy_attempts", 0) + 1
             buy_result: TradeResult = await self.buyer.execute(token_info)
             if buy_result.success:
                 await self._handle_successful_buy(token_info, buy_result)
@@ -1782,6 +2457,70 @@ class UniversalTrader:
             logger.exception(f"Error handling token {token_info.symbol}")
             raise
 
+    async def _await_entry_gate(self, token_info: TokenInfo) -> GateDecision | None:
+        """Hold the buy until the gate accepts, or skip. None when the gate is off.
+
+        Uses the trades already streaming into this mint's hub queue since the
+        reservation, so nothing from the creation slot onward is missed. On
+        accept, the last event's reserves replace the CreateEvent's so the
+        zero-RPC buy prices against the current curve, not the one at t=0.
+        """
+        rules = getattr(self, "gate_rules", None)
+        if rules is None or token_info.platform is not Platform.PUMP_FUN:
+            return None
+        if rules.mayhem_only and not token_info.is_mayhem_mode:
+            logger.info("Gate skip %s: not_mayhem", token_info.symbol)
+            return GateDecision(False, "not_mayhem", 0, None, 0)
+        token_key = str(token_info.mint)
+        queue = self._gate_queues.get(token_key)
+        if queue is None or token_info.slot is None:
+            logger.warning("Gate skip %s: no_trade_stream", token_info.symbol)
+            return GateDecision(False, "no_trade_stream", 0, None, 0)
+        gate = EntryGate(
+            mint=token_key,
+            creator=str(token_info.creator) if token_info.creator else "",
+            creation_slot=token_info.slot,
+            rules=rules,
+        )
+        started = monotonic()
+        deadline = started + rules.max_wait_ms / 1000
+        decision: GateDecision | None = None
+        if rules.min_buyers == 0:
+            decision = GateDecision(True, "no_wait", 0, None, 0)
+        while decision is None:
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                decision = gate.timed_out()
+                break
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=remaining)
+            except TimeoutError:
+                decision = gate.timed_out()
+                break
+            decision = gate.observe(event)
+        waited_ms = (monotonic() - started) * 1000
+        last = decision.last_event
+        if decision.accept and last is not None and token_info.state_from_event:
+            token_info.virtual_quote_reserves = last.virtual_sol_reserves
+            token_info.virtual_token_reserves = last.virtual_token_reserves
+            # The trigger buyer's TradeEvent carries the freshest real
+            # reserves on the curve; the CreateEvent values are stale by the
+            # entire gate wait. Quote bounds computed from stale reserves are
+            # what produced the live 6002 revert (see bound-displacement math).
+            token_info.real_token_reserves = last.real_token_reserves
+            token_info.real_sol_reserves = last.real_sol_reserves
+        logger.info(
+            "Gate %s %s: %s after %.0f ms, %d slot(s), buyers=%d real=%s",
+            "accept" if decision.accept else "skip",
+            token_info.symbol,
+            decision.reason,
+            waited_ms,
+            decision.slots_waited,
+            decision.buyers,
+            f"{decision.real_sol:.3f}" if decision.real_sol is not None else "?",
+        )
+        return decision
+
     async def _handle_successful_buy(
         self,
         token_info: TokenInfo,
@@ -1790,6 +2529,12 @@ class UniversalTrader:
         replace_unresolved: bool = False,
     ) -> None:
         """Journal a confirmed holding before starting any exit monitor."""
+        if token_info.slot is not None and buy_result.slot is not None:
+            logger.info(
+                "Buy for %s landed at creation+%d slot(s)",
+                token_info.symbol,
+                buy_result.slot - token_info.slot,
+            )
         if (
             buy_result.amount is None
             or buy_result.amount <= 0
@@ -1797,6 +2542,13 @@ class UniversalTrader:
             or buy_result.price <= 0
         ):
             raise ValueError("Successful buy result is missing receipt accounting")
+        self._record_trade_evidence(
+            "trade_result",
+            token_info,
+            result=buy_result,
+            action="buy",
+            intent_id=self._buy_intent_id(token_info),
+        )
         self._log_trade(
             "buy",
             token_info,
@@ -1824,6 +2576,7 @@ class UniversalTrader:
             max_hold_time=max_hold_time,
             quantity_raw=buy_result.amount_raw,
             quote_amount_raw=buy_result.quote_amount_raw,
+            buy_fee_lamports=buy_result.fee_lamports,
             account_balance_baseline_raw=(buy_result.account_balance_baseline_raw),
             position_id=buy_result.tx_signature
             or f"{token_info.platform.value}:{token_info.mint}",
@@ -1850,6 +2603,13 @@ class UniversalTrader:
     ) -> bool:
         """Keep unknown buys unresolved; clean up only terminal failures."""
         logger.error(f"Failed to buy {token_info.symbol}: {buy_result.error_message}")
+        self._record_trade_evidence(
+            "trade_result",
+            token_info,
+            result=buy_result,
+            action="buy",
+            intent_id=self._buy_intent_id(token_info),
+        )
         if (
             buy_result.unresolved
             or buy_result.status == TransactionStatus.SUCCESS.value
@@ -1886,12 +2646,23 @@ class UniversalTrader:
         """Resolve prior signatures without submitting a duplicate buy."""
         while not self._shutdown_event.is_set():
             for token_key, record in tuple(self._unresolved_buys.items()):
+                checks = record.get("reconcile_checks", 0) + 1
+                record["reconcile_checks"] = checks
                 try:
                     signature = record["signature"]
                     outcome = await self.solana_client.confirm_transaction_outcome(
                         signature
                     )
+                    self._record_trade_evidence(
+                        "chain_outcome",
+                        record["token"],
+                        action="buy",
+                        signature=signature,
+                        status=outcome.status.value,
+                        slot=outcome.slot,
+                    )
                     if outcome.status is TransactionStatus.UNKNOWN:
+                        self._log_still_unresolved(token_key, checks, "unknown")
                         continue
                     if outcome.status is not TransactionStatus.SUCCESS:
                         self._unresolved_buys.pop(token_key, None)
@@ -1944,6 +2715,9 @@ class UniversalTrader:
                         or not isinstance(quote_spent_raw, int)
                         or quote_spent_raw <= 0
                     ):
+                        self._log_still_unresolved(
+                            token_key, checks, "confirmed but receipt unreadable"
+                        )
                         continue
                     base_decimals = token_info.base_decimals
                     if base_decimals is None:
@@ -1962,6 +2736,23 @@ class UniversalTrader:
                     token_amount = tokens_raw / 10**base_decimals
                     quote_unit = quote_units_per_token(quote_mint)
                     average_price = (quote_spent_raw / quote_unit) / token_amount
+                    if self.transaction_ledger is None:
+                        raise RuntimeError(
+                            "Cannot recover buy fee without a transaction ledger"
+                        )
+                    submission_record = (
+                        self.transaction_ledger.get_active_submission_record(
+                            self._buy_intent_id(token_info)
+                        )
+                    )
+                    if (
+                        submission_record is None
+                        or submission_record.signature != signature
+                        or submission_record.fee_lamports is None
+                    ):
+                        raise RuntimeError(
+                            "Cannot recover confirmed buy fee from transaction ledger"
+                        )
                     await self._handle_successful_buy(
                         token_info,
                         TradeResult(
@@ -1972,6 +2763,7 @@ class UniversalTrader:
                             price=average_price,
                             amount_raw=tokens_raw,
                             quote_amount_raw=quote_spent_raw,
+                            fee_lamports=submission_record.fee_lamports,
                             account_balance_baseline_raw=record.get("baseline_raw"),
                             slot=outcome.slot,
                             status=outcome.status.value,
@@ -1980,9 +2772,17 @@ class UniversalTrader:
                     )
                     self.processed_tokens.add(token_key)
                     self._unresolved_buy_state_changed.set()
+                except RpcUnavailableError:
+                    self._log_still_unresolved(token_key, checks, "rpc unavailable")
                 except Exception:
+                    # A confirmed buy that cannot be reconciled is held tokens
+                    # with no Position and no exit monitor: fail loudly. The
+                    # record stays journaled and blocks resume-only until the
+                    # operator resolves it.
                     logger.exception(
-                        f"Failed to reconcile unresolved buy for {token_key}"
+                        "Failed to reconcile unresolved buy for %s (check %d)",
+                        token_key,
+                        checks,
                     )
                     raise
             try:
@@ -1993,6 +2793,14 @@ class UniversalTrader:
             except TimeoutError:
                 pass
 
+    @staticmethod
+    def _log_still_unresolved(token_key: str, checks: int, state: str) -> None:
+        """Log an unresolved buy at checks 1, 2, 4, 8, ... so it is never silent."""
+        if checks & (checks - 1) == 0:
+            logger.warning(
+                "Unresolved buy %s still %s after %d check(s)", token_key, state, checks
+            )
+
     async def _sleep_until_shutdown(self, seconds: float) -> bool:
         """Sleep interruptibly, returning true when shutdown was requested."""
         try:
@@ -2001,13 +2809,160 @@ class UniversalTrader:
         except TimeoutError:
             return False
 
+    def _cleanup_fee_reserve_lamports(self) -> int:
+        """Return the per-position fee reserve for configured success cleanup."""
+        if self.cleanup_mode not in {"after_sell", "post_session"}:
+            return 0
+        priority_fee = (
+            self.priority_fee_manager.hard_cap if self.cleanup_with_priority_fee else 0
+        )
+        return estimate_transaction_fee_lamports(priority_fee, None)
+
+    def _flow_enabled_for(self, token_info: TokenInfo) -> bool:
+        """Real-time flow exits need rules, a SOL-paired pump.fun coin, and Geyser.
+
+        TradeEvent's trusted fields are the SOL-denominated ones; a USDC-paired
+        coin would be priced in the wrong unit, so it stays on polling.
+        """
+        rules = getattr(self, "flow_rules", None)
+        return (
+            rules is not None
+            and rules.enabled
+            and token_info.platform is Platform.PUMP_FUN
+            and is_sol_paired(normalize_quote_mint(token_info.quote_mint))
+            and bool(getattr(self, "geyser_endpoint", None))
+            and bool(getattr(self, "geyser_api_token", None))
+        )
+
+    async def _consume_trade_flow(
+        self, token_info: TokenInfo, position: Position
+    ) -> None:
+        """Feed the coin's trade stream to the flow rules; wake the monitor on a hit.
+
+        Any stream failure degrades to polling: this task logs and returns,
+        the poll loop never depends on it.
+        """
+        token_key = str(token_info.mint)
+        monitor = FlowMonitor(
+            mint=token_key,
+            creator=str(token_info.creator) if token_info.creator else "",
+            rules=self.flow_rules,
+            entry_price=position.entry_price,
+        )
+        if not token_info.creator:
+            logger.warning(
+                "Trade flow for %s has no creator; creator_sell rule inactive",
+                token_info.symbol,
+            )
+        hub_queue = self._gate_queues.get(token_key)
+
+        async def hub_events() -> AsyncIterator[TradeEvent]:
+            while True:
+                yield await hub_queue.get()
+
+        if hub_queue is not None:
+            events = hub_events()
+        else:
+            stream = GeyserTradeStream(
+                endpoint=self.geyser_endpoint,
+                api_token=self.geyser_api_token,
+                auth_type=self.geyser_auth_type,
+                idl_parser=self.platform_implementations.event_parser._idl_parser,  # noqa: SLF001
+            )
+            events = stream.stream(
+                mint=token_key, bonding_curve=str(self._get_pool_address(token_info))
+            )
+        try:
+            async for event in events:
+                if not position.is_active:
+                    return
+                signal = monitor.observe(event)
+                if (
+                    signal is None
+                    or token_key in self._flow_signals
+                    or token_key in self._flow_latched
+                ):
+                    continue
+                logger.warning(
+                    "Flow exit for %s: %s (%s) at slot %d",
+                    token_info.symbol,
+                    signal.rule,
+                    signal.detail,
+                    signal.slot,
+                )
+                self._flow_signals[token_key] = signal
+                self._flow_wakeups[token_key].set()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Trade flow for %s unavailable (%s: %s); polling only",
+                token_info.symbol,
+                type(exc).__name__,
+                exc,
+            )
+
+    async def _wait_for_tick(self, token_key: str) -> bool:
+        """Sleep one interval, but wake at once on shutdown or a flow signal."""
+        wakeup = self._flow_wakeups.get(token_key)
+        if wakeup is None:
+            return await self._sleep_until_shutdown(self.price_check_interval)
+        shutdown = asyncio.create_task(self._shutdown_event.wait())
+        woken = asyncio.create_task(wakeup.wait())
+        try:
+            done, _ = await asyncio.wait(
+                {shutdown, woken},
+                timeout=self.price_check_interval,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            for task in (shutdown, woken):
+                if not task.done():
+                    task.cancel()
+        wakeup.clear()
+        return self._shutdown_event.is_set()
+
     async def _monitor_position_until_exit(
         self, token_info: TokenInfo, position: Position
     ) -> None:
         """Monitor until confirmed exit; unknown sells are reconciled in place."""
+        token_key = str(token_info.mint)
+        flow_task: asyncio.Task | None = None
+        for attr, factory in (
+            ("_flow_signals", dict),
+            ("_flow_wakeups", dict),
+            ("_flow_latched", set),
+        ):
+            if not hasattr(self, attr):
+                setattr(self, attr, factory())
+        if self._flow_enabled_for(token_info):
+            self._flow_wakeups[token_key] = asyncio.Event()
+            flow_task = asyncio.create_task(
+                self._consume_trade_flow(token_info, position)
+            )
+        try:
+            await self._monitor_position_loop(token_info, position)
+        finally:
+            if flow_task is not None and not flow_task.done():
+                flow_task.cancel()
+                try:
+                    await flow_task
+                except asyncio.CancelledError:
+                    pass
+            self._flow_wakeups.pop(token_key, None)
+            self._flow_signals.pop(token_key, None)
+            self._flow_latched.discard(token_key)
+            if hasattr(self, "_gate_queues"):
+                self._unsubscribe_trades(token_key)
+
+    async def _monitor_position_loop(  # noqa: C901, PLR0912, PLR0915
+        self, token_info: TokenInfo, position: Position
+    ) -> None:
+        token_key = str(token_info.mint)
         pool_address = self._get_pool_address(token_info)
         curve_manager = self.platform_implementations.curve_manager
         exit_sell_attempts = 0
+        price_outage_started: float | None = None
 
         while position.is_active and not self._shutdown_event.is_set():
             try:
@@ -2015,12 +2970,27 @@ class UniversalTrader:
                     outcome = await self.solana_client.confirm_transaction_outcome(
                         position.pending_exit_signature
                     )
+                    self._record_trade_evidence(
+                        "chain_outcome",
+                        token_info,
+                        position=position,
+                        action="sell",
+                        signature=position.pending_exit_signature,
+                        status=outcome.status.value,
+                        slot=outcome.slot,
+                    )
                     if outcome.status is TransactionStatus.UNKNOWN:
                         await self._sleep_until_shutdown(self.price_check_interval)
                         continue
                     if outcome.status is TransactionStatus.SUCCESS:
                         exit_reason = position.pending_exit_reason or ExitReason.MANUAL
-                        exit_price = position.pending_exit_price or position.entry_price
+                        receipt = await self._get_pending_sell_receipt(
+                            token_info, position
+                        )
+                        if receipt is None:
+                            await self._sleep_until_shutdown(self.price_check_interval)
+                            continue
+                        quote_raw, exit_price = receipt
                         pending_signature = position.pending_exit_signature
                         sold_raw = (
                             position.quantity_raw
@@ -2029,6 +2999,17 @@ class UniversalTrader:
                                 and token_info.token_program_id is not None
                             )
                             else None
+                        )
+                        self._record_trade_evidence(
+                            "position_closed",
+                            token_info,
+                            position=position,
+                            action="sell",
+                            signature=pending_signature,
+                            exit_reason=exit_reason.value,
+                            price=exit_price,
+                            amount_raw=position.quantity_raw,
+                            quote_amount_raw=quote_raw,
                         )
                         staged_cleanup = (
                             stage_cleanup_after_sell(
@@ -2069,23 +3050,86 @@ class UniversalTrader:
                             staged_manager=staged_cleanup,
                         )
                         break
+                    if outcome.status is TransactionStatus.REVERTED:
+                        if position.pending_exit_fee_lamports is None:
+                            raise RuntimeError(
+                                "Reverted pending sell has no durable fee"
+                            )
+                        position.record_charged_exit_fee(
+                            position.pending_exit_fee_lamports
+                        )
                     position.clear_pending_exit()
                     self._persist_position(token_info, position)
 
+                flow_signal = self._flow_signals.pop(token_key, None)
+                if flow_signal is not None:
+                    # A fired rule latches until the position closes: a failed
+                    # sell on a dead coin gets no further events to re-fire it.
+                    self._flow_latched.add(token_key)
+                flow_exit = token_key in self._flow_latched
                 calculate_token_price = getattr(
                     curve_manager, "calculate_token_price", None
                 )
-                if callable(calculate_token_price):
-                    current_price = await calculate_token_price(token_info)
-                    pool_address = self._get_pool_address(token_info)
-                else:
-                    current_price = await curve_manager.calculate_price(pool_address)
+                try:
+                    if flow_signal is not None:
+                        # The event's post-trade reserves are fresher than any
+                        # RPC read and cost zero round trips.
+                        current_price = flow_signal.price
+                    elif callable(calculate_token_price):
+                        current_price = await calculate_token_price(token_info)
+                        pool_address = self._get_pool_address(token_info)
+                    else:
+                        current_price = await curve_manager.calculate_price(
+                            pool_address
+                        )
+                except RpcUnavailableError:
+                    # Read-only transport outage: no wire was built, so ride it
+                    # out until the budget expires, then fail closed as before.
+                    # Data/attestation errors still propagate immediately.
+                    now = monotonic()
+                    if price_outage_started is None:
+                        price_outage_started = now
+                    elapsed = now - price_outage_started
+                    if elapsed >= self.price_read_outage_budget:
+                        logger.error(
+                            "Price read outage for %s exceeded %.0fs budget",
+                            token_info.symbol,
+                            self.price_read_outage_budget,
+                        )
+                        raise
+                    logger.warning(
+                        "Price read failed for %s (%.0fs into outage); retrying",
+                        token_info.symbol,
+                        elapsed,
+                        exc_info=True,
+                    )
+                    if await self._sleep_until_shutdown(self.price_check_interval):
+                        break
+                    continue
                 if current_price <= 0:
                     raise ValueError("Platform returned an invalid current price")
+                if price_outage_started is not None:
+                    logger.info(
+                        "Price read recovered for %s after %.0fs",
+                        token_info.symbol,
+                        monotonic() - price_outage_started,
+                    )
+                    price_outage_started = None
 
                 should_exit, exit_reason = position.should_exit(current_price)
+                if flow_exit and not (
+                    should_exit and exit_reason is ExitReason.STOP_LOSS
+                ):
+                    # A flow rule is an unconditional exit like stop-loss: it
+                    # must not be gated by the take-profit net-ROI target.
+                    should_exit, exit_reason = True, ExitReason.TRADE_FLOW
                 if should_exit and exit_reason:
                     exit_sell_attempts += 1
+                    if (
+                        position.pending_exit_intent_id is not None
+                        and position.pending_exit_reason is not exit_reason
+                    ):
+                        position.clear_pending_exit()
                     if position.pending_exit_intent_id is None:
                         attempt_sequence = position.next_exit_attempt()
                         sell_intent_id = (
@@ -2100,6 +3144,30 @@ class UniversalTrader:
                     else:
                         sell_intent_id = position.pending_exit_intent_id
                         exit_reason = position.pending_exit_reason or exit_reason
+                    take_profit_net_quote_raw = None
+                    if exit_reason is ExitReason.TAKE_PROFIT:
+                        if position.take_profit_net_quote_raw is None:
+                            raise RuntimeError(
+                                "Take-profit position has no durable net quote target"
+                            )
+                        take_profit_net_quote_raw = (
+                            position.take_profit_net_quote_raw
+                            + position.charged_exit_fee_lamports
+                            + self._cleanup_fee_reserve_lamports()
+                        )
+                    self._record_trade_evidence(
+                        "decision",
+                        token_info,
+                        position=position,
+                        action="sell",
+                        intent_id=sell_intent_id,
+                        reason=exit_reason.value,
+                        trigger_price=current_price,
+                        take_profit_net_quote_raw=take_profit_net_quote_raw,
+                        flow_signal=asdict(flow_signal)
+                        if flow_signal is not None
+                        else None,
+                    )
                     sell_task = asyncio.create_task(
                         self.seller.execute(
                             token_info,
@@ -2107,6 +3175,7 @@ class UniversalTrader:
                             token_price=current_price,
                             token_amount_raw=position.quantity_raw,
                             intent_id=sell_intent_id,
+                            take_profit_net_quote_raw=take_profit_net_quote_raw,
                         )
                     )
                     sell_cancellation: asyncio.CancelledError | None = None
@@ -2120,8 +3189,15 @@ class UniversalTrader:
                             if sell_task.done():
                                 sell_result = await sell_task
                                 break
+                    if self._defer_unpriced_sell_result(
+                        token_info, position, sell_result
+                    ):
+                        if sell_cancellation is not None:
+                            raise sell_cancellation
+                        await self._sleep_until_shutdown(self.price_check_interval)
+                        continue
                     if sell_result.success:
-                        exit_price = sell_result.price or current_price
+                        exit_price = sell_result.price
                         sold_raw = (
                             sell_result.amount_raw
                             if (
@@ -2129,6 +3205,17 @@ class UniversalTrader:
                                 and token_info.token_program_id is not None
                             )
                             else None
+                        )
+                        self._record_trade_evidence(
+                            "position_closed",
+                            token_info,
+                            position=position,
+                            action="sell",
+                            signature=sell_result.tx_signature,
+                            exit_reason=exit_reason.value,
+                            price=exit_price,
+                            amount_raw=sell_result.amount_raw,
+                            quote_amount_raw=sell_result.quote_amount_raw,
                         )
                         staged_cleanup = (
                             stage_cleanup_after_sell(
@@ -2171,9 +3258,25 @@ class UniversalTrader:
                         if sell_cancellation is not None:
                             raise sell_cancellation
                         break
-                    if sell_result.unresolved and sell_result.tx_signature:
+                    if sell_result.status == PlatformAwareSeller.TARGET_NOT_MET_STATUS:
+                        position.clear_pending_exit()
+                        self._persist_position(token_info, position)
+                        exit_sell_attempts = 0
+                        logger.info(
+                            f"Net take-profit target not yet met for "
+                            f"{token_info.symbol}: {sell_result.error_message}"
+                        )
+                        if sell_cancellation is not None:
+                            raise sell_cancellation
+                    elif sell_result.unresolved and sell_result.tx_signature:
+                        if sell_result.fee_lamports is None:
+                            raise RuntimeError(
+                                "Unresolved sell has no durable transaction fee"
+                            )
                         position.mark_exit_pending(
-                            sell_result.tx_signature, exit_reason
+                            sell_result.tx_signature,
+                            exit_reason,
+                            fee_lamports=sell_result.fee_lamports,
                         )
                         self._persist_position(token_info, position)
                         logger.warning(
@@ -2181,6 +3284,12 @@ class UniversalTrader:
                             "monitor will reconcile the same signature"
                         )
                     else:
+                        if sell_result.status == TransactionStatus.REVERTED.value:
+                            if sell_result.fee_lamports is None:
+                                raise RuntimeError(
+                                    "Reverted sell has no durable transaction fee"
+                                )
+                            position.record_charged_exit_fee(sell_result.fee_lamports)
                         position.clear_pending_exit()
                         self._persist_position(token_info, position)
                         logger.error(
@@ -2206,7 +3315,7 @@ class UniversalTrader:
                 else:
                     exit_sell_attempts = 0
 
-                if await self._sleep_until_shutdown(self.price_check_interval):
+                if await self._wait_for_tick(token_key):
                     break
             except Exception:
                 logger.exception(f"Fatal error monitoring position {token_info.symbol}")

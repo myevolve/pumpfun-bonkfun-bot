@@ -11,6 +11,7 @@ from geyser.generated import geyser_pb2, geyser_pb2_grpc
 from interfaces.core import Platform, TokenInfo
 from monitoring.base_listener import BaseTokenListener
 from monitoring.event_normalization import NormalizationError, normalize_geyser_update
+from monitoring.migration_events import MigrationHub
 from monitoring.parser_dispatch import parse_normalized_event
 from platforms import platform_factory
 from utils.logger import get_logger
@@ -27,6 +28,7 @@ class UniversalGeyserListener(BaseTokenListener):
         geyser_api_token: str,
         geyser_auth_type: str,
         platforms: list[Platform] | None = None,
+        migration_hub: MigrationHub | None = None,
     ):
         """Initialize universal Geyser listener."""
         super().__init__()
@@ -45,6 +47,12 @@ class UniversalGeyserListener(BaseTokenListener):
             self.platforms = platform_factory.get_supported_platforms()
         else:
             self.platforms = platforms
+        # Optional fan-out of decoded TradeEvents; set by the trader so the
+        # entry gate and exit rules ride this stream instead of opening another.
+        self.trade_hub = None
+        # Optional migration-event sink; forwarded into the TradeFlowHub the
+        # trader injects, so graduation events ride this same stream.
+        self.migration_hub = migration_hub
 
         # Get event parsers for all platforms
         self.platform_parsers = {}
@@ -193,7 +201,13 @@ class UniversalGeyserListener(BaseTokenListener):
             event = normalize_geyser_update(update, commitment="processed")
             if event is None:
                 return []
-            return parse_normalized_event(event, self.platform_parsers)
+            tokens = parse_normalized_event(event, self.platform_parsers)
+            hub = self.trade_hub
+            if hub is not None and hub.active and event.slot is not None:
+                hub.publish_logs(
+                    list(event.logs), slot=event.slot, signature=event.signature
+                )
+            return tokens
         except NormalizationError as exc:
             logger.warning("Rejected Geyser update: %s", exc)
         except Exception:
