@@ -500,15 +500,23 @@ class LetsBonkCurveManager(CurveManager):
             raise ValueError("Token-2022 mint is not initialized")
         if len(mint_data) == cls._MINT_BASE_LENGTH:
             return None
-        if mint_data[cls._MINT_BASE_LENGTH] != cls._MINT_ACCOUNT_TYPE:
-            raise ValueError("Token-2022 account data is not a mint")
-
+        # Token-2022 spec puts AccountType at offset 82, but live LaunchLab
+        # mints (verified via the RPC's own jsonParsed decoder) carry
+        # Uninitialized (0) there and start the TLV later, with zero
+        # padding before the first record. The owner check above plus the
+        # TLV parse below are the real validation; the byte at 82 carries
+        # no additional information on these mints.
         offset = cls._MINT_BASE_LENGTH + 1
         transfer_fee_data: bytes | None = None
         while offset < len(mint_data):
             remaining = mint_data[offset:]
             if not any(remaining):
                 break
+            if remaining[0] == 0:
+                # Zero padding before the first record: skip one byte at a
+                # time until a real record header appears.
+                offset += 1
+                continue
             if len(remaining) < 4:
                 raise ValueError("Token-2022 mint extension header is truncated")
             extension_type, extension_length = struct.unpack_from(

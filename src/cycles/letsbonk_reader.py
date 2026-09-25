@@ -17,6 +17,7 @@ signal.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import sys
 from pathlib import Path
@@ -110,10 +111,23 @@ class LetsBonkGraduationReader:
         adds letsbonk-specific fields the evaluator needs.
         """
         pool_address = Pubkey.from_string(derive_launchlab_pool(mint))
-        try:
-            state = await self._manager.get_pool_state(pool_address)
-        except Exception:  # noqa: BLE001 - decode failure means "not a letsbonk curve"
-            return None
+        # Fresh T22 mints are visible to the geyser stream before the
+        # load-balanced RPC reads them, even at processed (AGENTS.md
+        # listener pitfall). Bounded retry, mirroring the bot's
+        # trade.curve_refresh_budget semantics.
+        state: dict[str, Any] | None = None
+        read_attempts = 12
+        for attempt in range(read_attempts):
+            try:
+                state = await self._manager.get_pool_state(
+                    pool_address, commitment="processed"
+                )
+                break
+            except Exception:  # noqa: BLE001 - retry, then "not a curve"
+                if attempt == read_attempts - 1:
+                    return None
+                await asyncio.sleep(1.0)
+        assert state is not None  # noqa: S101 - loop guarantees break-or-return
         status_raw = state.get("status")
         try:
             status = LaunchLabPoolStatus(int(status_raw))
@@ -139,7 +153,9 @@ class LetsBonkGraduationReader:
         """Raydium program a migrated coin trades on (AMM or CPMM), or None."""
         pool_address = Pubkey.from_string(derive_launchlab_pool(mint))
         try:
-            state = await self._manager.get_pool_state(pool_address)
+            state = await self._manager.get_pool_state(
+                pool_address, commitment="processed"
+            )
         except Exception:  # noqa: BLE001 - decode failure means "not a letsbonk curve"
             return None
         migrate_type = state.get("curve_param", {}).get("migrate_type")
@@ -150,7 +166,9 @@ class LetsBonkGraduationReader:
         """Current LaunchLab pool status, or None when unreadable."""
         pool_address = Pubkey.from_string(derive_launchlab_pool(mint))
         try:
-            state = await self._manager.get_pool_state(pool_address)
+            state = await self._manager.get_pool_state(
+                pool_address, commitment="processed"
+            )
         except Exception:  # noqa: BLE001 - decode failure means "not a letsbonk curve"
             return None
         try:
