@@ -78,6 +78,7 @@ _FEE_SNAPSHOT = PumpFeeSnapshot(
         flat_fees=_FEES,
         regular_tiers=(PumpFeeTier(0, _FEES),),
         stable_tiers=(PumpFeeTier(0, _FEES),),
+        exotic_flat_fees=_FEES,
         digest="offline-attested-fees",
     ),
     observed_at=0.0,
@@ -437,14 +438,16 @@ def check_geyser_parser_prefers_event_logs() -> bool:
 
 def check_geyser_listener_delegates_to_parser() -> bool:
     """Geyser normalization retains correlated event state for zero-RPC."""
-    from monitoring.base_listener import BaseTokenListener  # noqa: PLC0415
     from monitoring.universal_geyser_listener import (  # noqa: PLC0415
         UniversalGeyserListener,
     )
 
-    listener = object.__new__(UniversalGeyserListener)
-    BaseTokenListener.__init__(listener)
-    listener.platform_parsers = {Platform.PUMP_FUN: _event_parser()}
+    listener = UniversalGeyserListener(
+        geyser_endpoint="unused.invalid",
+        geyser_api_token="",
+        geyser_auth_type="x-token",
+        platforms=[Platform.PUMP_FUN],
+    )
     fixture = _fixture()
     raw_transaction = base64.b64decode(fixture["transaction"][0])
     transaction = VersionedTransaction.from_bytes(raw_transaction)

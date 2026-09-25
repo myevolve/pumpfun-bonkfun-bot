@@ -8,7 +8,9 @@ before submission and simulates it instead. This exercises the listener ->
 event parser -> curve manager -> address provider -> instruction builder
 chain as a unit.
 
-No funds move: `build_and_send_transaction` is monkeypatched to simulate.
+No funds move: submission is replaced with unsigned simulation. No wallet key
+or dotenv file is read. Public RPC/log subscriptions work without credentials;
+SOLANA_NODE_RPC_ENDPOINT and SOLANA_NODE_WSS_ENDPOINT may override them.
 
 Usage:
     uv run learning-examples/simulate_bot_buy_path.py
@@ -19,28 +21,32 @@ import asyncio
 import os
 import sys
 from base64 import b64encode
+from contextlib import suppress
+from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from dotenv import load_dotenv  # noqa: E402
 from solders.compute_budget import (  # noqa: E402
     set_compute_unit_limit,
     set_compute_unit_price,
 )
+from solders.instruction import Instruction  # noqa: E402
 from solders.message import Message  # noqa: E402
+from solders.null_signer import NullSigner  # noqa: E402
+from solders.signature import Signature  # noqa: E402
 from solders.transaction import Transaction  # noqa: E402
+from spl.token.instructions import get_associated_token_address  # noqa: E402
 
-from core.client import SolanaClient  # noqa: E402
+from core.client import SolanaClient, set_loaded_accounts_data_size_limit  # noqa: E402
 from core.priority_fee.manager import PriorityFeeManager  # noqa: E402
-from core.wallet import Wallet  # noqa: E402
 from interfaces.core import Platform, TokenInfo  # noqa: E402
 from monitoring.listener_factory import ListenerFactory  # noqa: E402
 from platforms import get_platform_implementations  # noqa: E402
+from platforms.pumpfun.address_provider import PumpFunAddresses  # noqa: E402
 from trading.platform_aware import PlatformAwareBuyer  # noqa: E402
-
-load_dotenv(PROJECT_ROOT / ".env")
 
 BUY_AMOUNT_SOL = 0.0001
 EXTREME_FAST_TOKEN_AMOUNT = 20
@@ -50,19 +56,12 @@ CURVE_STABILIZE_SECONDS = 15
 
 
 async def wait_for_token(timeout_seconds: float = 90.0) -> TokenInfo | None:
-    """Wait for the bot's geyser listener to report a new coin.
-
-    Args:
-        timeout_seconds: How long to wait
-
-    Returns:
-        The first TokenInfo seen, or None on timeout
-    """
+    """Wait for a fresh coin using the bot's public logs listener."""
     listener = ListenerFactory.create_listener(
-        listener_type="geyser",
-        geyser_endpoint=os.environ["GEYSER_ENDPOINT"],
-        geyser_api_token=os.environ["GEYSER_API_TOKEN"],
-        geyser_auth_type=os.environ.get("GEYSER_AUTH_TYPE", "x-token"),
+        listener_type="logs",
+        wss_endpoint=os.environ.get(
+            "SOLANA_NODE_WSS_ENDPOINT", "wss://api.mainnet-beta.solana.com"
+        ),
         platforms=[Platform.PUMP_FUN],
     )
 
@@ -79,6 +78,8 @@ async def wait_for_token(timeout_seconds: float = 90.0) -> TokenInfo | None:
             await asyncio.sleep(0.5)
     finally:
         task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
 
     return seen[0] if seen else None
 
@@ -95,26 +96,32 @@ def install_simulation_hook(client: SolanaClient) -> dict:
     outcome: dict = {}
 
     async def simulate_instead(
-        instructions,
-        signer_keypair,
-        skip_preflight=True,
-        max_retries=3,
-        priority_fee=None,
-        compute_unit_limit=None,
-        account_data_size_limit=None,
+        instructions: list[Instruction],
+        signer_keypair: NullSigner,
+        priority_fee: int | None = None,
+        compute_unit_limit: int | None = None,
+        account_data_size_limit: int | None = None,
         **_submission_context: object,
-    ):
+    ) -> str:
+        outcome.clear()
         preamble = []
-        if compute_unit_limit:
+        if account_data_size_limit is not None:
+            preamble.append(
+                set_loaded_accounts_data_size_limit(account_data_size_limit)
+            )
+        if compute_unit_limit is not None:
             preamble.append(set_compute_unit_limit(compute_unit_limit))
-        if priority_fee:
+        if priority_fee is not None:
             preamble.append(set_compute_unit_price(priority_fee))
 
         blockhash = await client.get_latest_blockhash()
         message = Message.new_with_blockhash(
             [*preamble, *instructions], signer_keypair.pubkey(), blockhash
         )
-        transaction = Transaction([signer_keypair], message, blockhash)
+        transaction = Transaction.populate(
+            message,
+            [Signature.default()] * message.header.num_required_signatures,
+        )
 
         response = await client.post_rpc(
             {
@@ -132,7 +139,17 @@ def install_simulation_hook(client: SolanaClient) -> dict:
                 ],
             }
         )
-        value = (response or {}).get("result", {}).get("value", {})
+        result = response.get("result") if isinstance(response, dict) else None
+        value = result.get("value") if isinstance(result, dict) else None
+        if not isinstance(value, dict) or "err" not in value:
+            message = "Simulation RPC returned no execution result"
+            raise ValueError(message)
+        units = value.get("unitsConsumed")
+        if value["err"] is None and (
+            isinstance(units, bool) or not isinstance(units, int) or units <= 0
+        ):
+            message = "Simulation RPC omitted compute consumption"
+            raise ValueError(message)
         outcome.update(
             {
                 "err": value.get("err"),
@@ -147,7 +164,7 @@ def install_simulation_hook(client: SolanaClient) -> dict:
         # Returning a sentinel signature: confirm_transaction is stubbed below.
         return "SIMULATED"
 
-    async def never_confirm(_signature, **_kwargs):
+    async def never_confirm(_signature: object, **_kwargs: object) -> bool:
         return False
 
     client.build_and_send_transaction = simulate_instead
@@ -163,7 +180,7 @@ async def main() -> int:
     """
     extreme_fast = "--no-extreme-fast" not in sys.argv
 
-    print("Waiting for a fresh pump.fun coin via the bot's geyser listener...")
+    print("Waiting for a fresh pump.fun coin via the bot's public logs listener...")
     token_info = await wait_for_token()
     if token_info is None:
         print("No coin detected before timeout.")
@@ -176,8 +193,17 @@ async def main() -> int:
     print(f"state_from_event={token_info.state_from_event} (True = zero-RPC buy path)")
     print(f"extreme_fast_mode={extreme_fast}\n")
 
-    client = SolanaClient(os.environ["SOLANA_NODE_RPC_ENDPOINT"])
-    wallet = Wallet(os.environ["SOLANA_PRIVATE_KEY"])
+    client = SolanaClient(
+        os.environ.get(
+            "SOLANA_NODE_RPC_ENDPOINT", "https://api.mainnet-beta.solana.com"
+        )
+    )
+    payer = PumpFunAddresses.NORMAL_FEE_RECIPIENTS[0]
+    wallet = SimpleNamespace(
+        pubkey=payer,
+        keypair=NullSigner(payer),
+        get_associated_token_address=partial(get_associated_token_address, payer),
+    )
     priority_fee_manager = PriorityFeeManager(
         client=client,
         enable_dynamic_fee=False,
@@ -230,7 +256,7 @@ async def main() -> int:
     print(f"  unitsConsumed: {outcome['units']}")
     print(f"  err:           {outcome['err']}")
 
-    if outcome["err"]:
+    if outcome["err"] is not None:
         for line in outcome["logs"]:
             if "Error" in line or "failed" in line or "Instruction:" in line:
                 print(f"    {line}")

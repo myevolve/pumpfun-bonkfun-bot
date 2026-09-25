@@ -47,6 +47,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from solders.pubkey import Pubkey  # noqa: E402
 
+from core.execution_policy import ExecutionPolicy  # noqa: E402
 from core.pubkeys import WSOL_MINT, quote_units_per_token  # noqa: E402
 from interfaces.core import Platform, TokenInfo  # noqa: E402
 from trading.base import TradeResult  # noqa: E402
@@ -95,8 +96,9 @@ class StubSeller:
         token_price: float,
         token_amount_raw: int | None = None,
         intent_id: str | None = None,
+        take_profit_net_quote_raw: int | None = None,
     ) -> TradeResult:
-        del intent_id
+        del intent_id, take_profit_net_quote_raw
         self.prices_seen.append(token_price)
         if len(self.prices_seen) <= self.fail_first:
             return TradeResult(
@@ -121,6 +123,8 @@ def _make_trader(
 ) -> UniversalTrader:
     """Build a trader carrying only what the monitor loop touches."""
     trader = object.__new__(UniversalTrader)
+    trader.execution_policy = ExecutionPolicy()
+    trader.transaction_ledger = None
     trader.price_check_interval = 0  # no real waiting between iterations
     trader.max_exit_sell_attempts = max_exit_sell_attempts
     trader._shutdown_event = asyncio.Event()
@@ -167,6 +171,9 @@ def _make_position() -> Position:
         symbol="V189",
         entry_price=ENTRY_PRICE,
         quantity=QUANTITY,
+        quantity_raw=1_000_000_000_000,
+        quote_amount_raw=1_000_000_000,
+        buy_fee_lamports=0,
         take_profit_percentage=TAKE_PROFIT_PCT,
         stop_loss_percentage=STOP_LOSS_PCT,
         max_hold_time=None,

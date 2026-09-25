@@ -82,14 +82,19 @@ def _encode_tiers(tiers: tuple[TierValues, ...]) -> bytes:
     return bytes(encoded)
 
 
-def _fee_account() -> Account:
+def _fee_account(
+    *,
+    exotic: FeeValues = (0, 95, 30),
+    tail: bytes = bytes(128),
+) -> Account:
     data = bytearray(FEE_CONFIG_DISCRIMINATOR)
     data += bytes((253,))
     data += bytes(Pubkey.from_string("11111111111111111111111111111112"))
     data += _encode_fees((25, 90, 20))
     data += _encode_tiers(REGULAR_TIERS)
     data += _encode_tiers(STABLE_TIERS)
-    data += bytes(128)
+    data += _encode_fees(exotic)
+    data += tail
     return Account(
         lamports=1,
         data=bytes(data),
@@ -242,8 +247,42 @@ def _check_quote_vectors(snapshot: PumpFeeSnapshot) -> None:
         raise AssertionError(f"default-creator vector mismatch: {no_creator}")
 
 
+def _check_exotic_fee_layout() -> None:
+    # Mainnet's appended Fees at slot 446657837 were (0, 95, 30), not padding.
+    account = _fee_account(tail=b"")
+    if decode_fee_config_account(account).exotic_flat_fees != PumpFees(0, 95, 30):
+        raise AssertionError("nonzero exotic flat fees did not decode")
+
+    malformed = [
+        account.data[:-24],  # Missing required Fees entirely.
+        account.data[:-16],  # Missing protocol and creator fields.
+        account.data[:-8],  # Missing creator field.
+        account.data[:-1],  # Partial creator u64.
+        _fee_account(exotic=(10_001, 95, 30)).data,
+        _fee_account(exotic=(0, 10_001, 30)).data,
+        _fee_account(exotic=(0, 95, 10_001)).data,
+        _fee_account(exotic=(0, 6_000, 5_000)).data,
+        _fee_account(tail=bytes(127) + b"\x01").data,
+    ]
+    for data in malformed:
+        try:
+            decode_fee_config_account(
+                Account(
+                    1,
+                    data,
+                    PumpFunAddresses.FEE_PROGRAM,
+                    executable=False,
+                    rent_epoch=0,
+                )
+            )
+        except ValueError:
+            continue
+        raise AssertionError("malformed exotic fees or unknown suffix accepted")
+
+
 async def _verify_offline() -> None:
     account = _fee_account()
+    _check_exotic_fee_layout()
     config = decode_fee_config_account(account)
     if tuple(
         (tier.market_cap_threshold_raw, tier.fees) for tier in config.regular_tiers
@@ -256,6 +295,16 @@ async def _verify_offline() -> None:
 
     snapshot = PumpFeeSnapshot(config, observed_at=0.0, attested_at=0.0)
     _check_quote_vectors(snapshot)
+    for quote in (quote_buy_exact_in, quote_buy_exact_out, quote_sell_exact_in):
+        try:
+            quote(
+                _state(100_000, Pubkey.from_string("11111111111111111111111111111112")),
+                10_000,
+                snapshot,
+            )
+        except ValueError:
+            continue
+        raise AssertionError("exotic quote mint must remain unsupported")
 
     client = _AttestationClient(account)
     schedule = PumpFeeSchedule(

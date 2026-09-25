@@ -127,39 +127,47 @@ async def check_confirm_wrapper_rejects_revert() -> None:
     raise AssertionError("confirm_and_assert accepted a reverted transaction")
 
 
+def _calls_confirm_without_status_check(source: str) -> bool:
+    """Detect actual confirmation calls, not definitions or quoted helper names."""
+    import ast  # noqa: PLC0415
+
+    calls = {
+        getattr(node.func, "attr", None) or getattr(node.func, "id", None)
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call)
+    }
+    return "confirm_transaction" in calls and calls.isdisjoint(
+        {"assert_transaction_succeeded", "confirm_and_assert"}
+    )
+
+
 async def check_examples_call_a_status_check() -> None:
     """Every example that confirms a trade must also verify it succeeded.
 
     Guards against a new example (or an edit to an existing one) reintroducing a
     bare `confirm_transaction` that prints success unconditionally.
     """
+    assert not _calls_confirm_without_status_check(  # noqa: S101
+        "class Stub:\n    async def confirm_transaction(self): pass\n"
+    )
+    assert _calls_confirm_without_status_check(  # noqa: S101
+        "await client.confirm_transaction(signature)\n"
+        "# assert_transaction_succeeded(client, signature)\n"
+    )
+    assert not _calls_confirm_without_status_check(  # noqa: S101
+        "await client.confirm_transaction(signature)\n"
+        "await assert_transaction_succeeded(client, signature)\n"
+    )
     examples_dir = PROJECT_ROOT / "learning-examples"
-    # Files that confirm transactions without calling the helper, each for a
-    # reason. Adding an entry here is a deliberate act; forgetting the check in a
-    # new example is not.
-    exempt = {
-        # defines the helper
-        "tx_status.py",
-        # this file
-        Path(__file__).name,
-        # stubs confirm_transaction out; never sends a transaction
-        "simulate_bot_buy_path.py",
-        # offline checks with a stub client; never sends a transaction
-        "verify_pumpportal_buy_path.py",
-        "verify_extreme_fast_zero_rpc.py",
-        # uses the bot's SolanaClient wrapper, which folds meta.err into its
-        # return value; the boolean is read at the call site
-        "cleanup_accounts.py",
-    }
+    # This exact example uses SolanaClient, which folds meta.err into its
+    # return value; the boolean is read at the call site.
     offenders = []
     for path in sorted(examples_dir.rglob("*.py")):
-        if path.name in exempt or "__pycache__" in path.parts:
+        if path == examples_dir / "cleanup_accounts.py" or "__pycache__" in path.parts:
             continue
         source = path.read_text()
-        if "confirm_transaction" not in source:
-            continue
-        if not (
-            "assert_transaction_succeeded" in source or "confirm_and_assert" in source
+        if "confirm_transaction" in source and _calls_confirm_without_status_check(
+            source
         ):
             offenders.append(str(path.relative_to(PROJECT_ROOT)))
     assert not offenders, "examples confirm without checking meta.err: " + ", ".join(
