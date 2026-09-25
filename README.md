@@ -339,6 +339,19 @@ wiring gap. The divergence window is ~2 slots after pool creation and the
 measured economics say it is net-negative at retail latency. Use this scanner
 to observe, not to assume an edge.
 
+Letsbonk (Raydium LaunchLab) rides the same scanner: the event session
+subscribes the LaunchLab program, tracks token creations, and watches each
+coin's `PoolState.status` (LaunchLab has no graduation event — the signal is
+the FUNDING → WAITING_FOR_MIGRATION → MIGRATED flip). On a flip it discovers
+the migrated coin's Raydium AMM/CPMM pools and evaluates pool-vs-pool
+divergence, log-only. LaunchLab mints come in two byte layouts (82-byte
+base-only, and 438–522-byte extension mints with metadataPointer +
+transferFeeConfig + tokenMetadata whose AccountType byte sits at 165, not 82);
+the manager's transfer-fee extraction was fixed against that byte map and
+proven on live pools (fee-adjusted buy/sell quotes through the platform path,
+round-trip spread −8 to −11% — the documented letsbonk fee regime). Evidence
+under `state/paper-trading/letsbonk-*.json`.
+
 ### Non-SOL quote assets
 
 pump.fun v2 has verified metadata only for SOL/WSOL and USDC. Amounts are in
