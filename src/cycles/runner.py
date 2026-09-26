@@ -1046,17 +1046,37 @@ async def run_event_session(
     # Letsbonk tracking: LaunchLab has no graduation event; the signal is
     # the PoolState.status flip (FUNDING -> WAITING_FOR_MIGRATION ->
     # MIGRATED). Token creations feed a bounded watch set; a poller checks
-    # each mint's status and evaluates divergence on the flip.
-    letsbonk_watch: dict[str, int] = {}  # mint -> last seen status (-1 unknown)
+    # each mint's status and evaluates divergence on the flip. The set
+    # persists to disk so graduations minutes/hours later are caught by a
+    # LATER session, not just the one that saw the creation.
+    letsbonk_watch_path = Path(".state/letsbonk-watch.json")
+    letsbonk_watch: dict[str, int] = {}
+    if letsbonk_watch_path.exists():
+        try:
+            letsbonk_watch = {
+                str(m): int(s)
+                for m, s in json.loads(letsbonk_watch_path.read_text()).items()
+            }
+        except Exception as exc:  # noqa: BLE001 - corrupted file starts fresh
+            logger.warning(f"letsbonk watch set unreadable, starting fresh: {exc}")
+            letsbonk_watch = {}
     letsbonk_reader = LetsBonkGraduationReader(client)
+
+    def _save_letsbonk_watch() -> None:
+        try:
+            letsbonk_watch_path.parent.mkdir(parents=True, exist_ok=True)
+            letsbonk_watch_path.write_text(json.dumps(letsbonk_watch))
+        except Exception as exc:  # noqa: BLE001 - persistence is best-effort
+            logger.debug(f"letsbonk watch save failed: {exc}")
 
     async def _no_token_callback(token_info: object) -> None:
         """Collect letsbonk creations; pump.fun creations are pump events' job."""
         platform = getattr(token_info, "platform", None)
-        if platform is not None and platform.value == "letsbonk":
+        if platform is not None and platform.value == "lets_bonk":
             mint = str(getattr(token_info, "mint", ""))
             if mint and mint not in letsbonk_watch and len(letsbonk_watch) < 500:
                 letsbonk_watch[mint] = -1
+        return None
 
     summary: dict = {
         "completed": False,
@@ -1065,6 +1085,7 @@ async def run_event_session(
         "best_margin_lamports": None,
         "wallet": wallet,
         "session_start": time.time(),
+        "letsbonk_watch_size": None,  # filled at shutdown
     }
 
     async def on_migration_event(event: MigrationEvent) -> None:
@@ -1322,6 +1343,7 @@ async def run_event_session(
                                 logger.debug(
                                     f"letsbonk eval failed {lb_mint[:12]}: {exc}"
                                 )
+                        _save_letsbonk_watch()
                     await asyncio.sleep(min(5.0, remaining))
             except Exception as exc:
                 logger.exception("Event session error")
@@ -1337,6 +1359,7 @@ async def run_event_session(
             except asyncio.CancelledError:
                 pass
         await client.close()
+        summary["letsbonk_watch_size"] = len(letsbonk_watch)
         summary["session_end"] = time.time()
         summary["elapsed_s"] = round(
             summary["session_end"] - summary["session_start"], 1
