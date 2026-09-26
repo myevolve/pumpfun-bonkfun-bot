@@ -339,18 +339,27 @@ wiring gap. The divergence window is ~2 slots after pool creation and the
 measured economics say it is net-negative at retail latency. Use this scanner
 to observe, not to assume an edge.
 
-Letsbonk (Raydium LaunchLab) rides the same scanner: the event session
-subscribes the LaunchLab program, tracks token creations, and watches each
-coin's `PoolState.status` (LaunchLab has no graduation event — the signal is
-the FUNDING → WAITING_FOR_MIGRATION → MIGRATED flip). On a flip it discovers
+Letsbonk (Raydium LaunchLab) rides the same scanner. LaunchLab has no
+graduation event — the signal is the PoolState.status flip (FUNDING →
+WAITING_FOR_MIGRATION → MIGRATED). The event session subscribes the LaunchLab
+program, tracks token creations into a watch set persisted at
+`.state/letsbonk-watch.json` (bounded 500 mints; loaded on start, saved each
+poll pass), polls each coin's status, and on a FUNDING → ≥1 flip discovers
 the migrated coin's Raydium AMM/CPMM pools and evaluates pool-vs-pool
-divergence, log-only. LaunchLab mints come in two byte layouts (82-byte
-base-only, and 438–522-byte extension mints with metadataPointer +
-transferFeeConfig + tokenMetadata whose AccountType byte sits at 165, not 82);
-the manager's transfer-fee extraction was fixed against that byte map and
-proven on live pools (fee-adjusted buy/sell quotes through the platform path,
-round-trip spread −8 to −11% — the documented letsbonk fee regime). Evidence
-under `state/paper-trading/letsbonk-*.json`.
+divergence, log-only. The polling scanner samples the same watch set (10
+curves per pass, `letsbonk_samples`/`letsbonk_migrations` counters in the
+summary) with per-mint failure isolation.
+
+LaunchLab mints come in two byte layouts (82-byte base-only, and 438–522-byte
+extension mints with metadataPointer + transferFeeConfig + tokenMetadata whose
+AccountType byte sits at 165, not 82, with TLV records in creation order); the
+manager's transfer-fee extraction was rewritten to scan for the
+[tag=1][len=108] header and fails closed on truncation — proven on live pools
+(fee-adjusted buy/sell quotes through the platform path, round-trip spread
+−8 to −11%, the documented letsbonk fee regime). LaunchLab pools are also
+multi-quote now (WSOL, USDC, and other quote mints observed in the seeds);
+the WSOL reader skips other quotes until the scanner carries the pool address
+from the creation parse. Evidence under `state/paper-trading/letsbonk-*.json`.
 
 ### Non-SOL quote assets
 
