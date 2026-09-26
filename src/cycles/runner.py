@@ -742,19 +742,80 @@ async def run_session(
                             ).items()
                         }
                         lb_reader = LetsBonkGraduationReader(client)
-                        sampled = 0
-                        for lb_mint in list(letsbonk_watch)[:10]:
+                    except Exception as exc:  # noqa: BLE001 - observation only
+                        logger.info(f"letsbonk watch load failed: {exc}")
+                        letsbonk_watch = {}
+                    for lb_mint in list(letsbonk_watch)[:10]:
+                        try:
                             lb_cs = await lb_reader.read_curve_state(lb_mint)
-                            sampled += 1
+                            summary["letsbonk_samples"] = (
+                                summary.get("letsbonk_samples", 0) + 1
+                            )
                             if lb_cs is not None:
                                 summary["letsbonk_curves_observed"] = (
                                     summary.get("letsbonk_curves_observed", 0) + 1
                                 )
-                        summary["letsbonk_samples"] = (
-                            summary.get("letsbonk_samples", 0) + sampled
-                        )
-                    except Exception as exc:  # noqa: BLE001 - observation only
-                        logger.info(f"letsbonk polling pass failed: {exc}")
+                                continue  # still FUNDING; nothing to eval
+                            # Not FUNDING: migrated (flip) or dried.
+                            lb_status = await lb_reader.status(lb_mint)
+                            lb_val = int(lb_status) if lb_status is not None else -1
+                            last = letsbonk_watch.get(lb_mint, -1)
+                            letsbonk_watch[lb_mint] = lb_val
+                            if not (last == 0 and lb_val >= 1):
+                                continue
+                            summary["letsbonk_migrations"] = (
+                                summary.get("letsbonk_migrations", 0) + 1
+                            )
+                            print(
+                                f"LETSBONK MIGRATION {lb_mint[:14]} "
+                                f"(FUNDING -> {lb_val})",
+                                flush=True,
+                            )
+                            records = await discover_pools_for_mint(session, lb_mint)
+                            venue_pools: list[Pool] = []
+                            for record in records:
+                                pool_addr = record["id"]
+                                bank = await _fetch_accounts(session, rpc, [pool_addr])
+                                if pool_addr not in bank:
+                                    continue
+                                decoded = decode_pool(pool_addr, bank[pool_addr])
+                                bank.update(
+                                    await _fetch_accounts(
+                                        session,
+                                        rpc,
+                                        decoded.dependencies(),
+                                    )
+                                )
+                                venue_pools.append(hydrate_pool(decoded, bank))
+                            for i in range(len(venue_pools)):
+                                for j in range(i + 1, len(venue_pools)):
+                                    pair_cand, pair_margin = evaluate_pool_pair_cycle(
+                                        venue_pools[i],
+                                        venue_pools[j],
+                                        lb_mint,
+                                        amount_lamports,
+                                    )
+                                    if pair_cand is None:
+                                        continue
+                                    if (
+                                        summary["best_margin_lamports"] is None
+                                        or pair_margin > summary["best_margin_lamports"]
+                                    ):
+                                        summary["best_margin_lamports"] = pair_margin
+                                    print(
+                                        f"LETSBONK POOL-VS-POOL "
+                                        f"{lb_mint[:14]}: "
+                                        f"margin={pair_margin} [log-only]",
+                                        flush=True,
+                                    )
+                                    if pair_margin >= min_profit_lamports:
+                                        summary["candidates_found"] += 1
+                        except Exception as exc:  # noqa: BLE001
+                            print(
+                                f"LETSBONK SAMPLE FAILED {lb_mint[:14]}: "
+                                f"{type(exc).__name__}: {exc}",
+                                flush=True,
+                            )
                 for coin in graduated:
                     mint = coin["mint"]
                     summary["coins_scanned"] += 1
