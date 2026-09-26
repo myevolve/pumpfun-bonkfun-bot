@@ -726,6 +726,35 @@ async def run_session(
                 graduated = await discover_graduated_coins(session, count=10)
                 summary["http_requests"] = summary.get("http_requests", 0) + 1
 
+                # Letsbonk pass: watch-set persistence is shared with the
+                # event mode; each polling pass samples up to 10 tracked
+                # LaunchLab curves for FUNDING status and records the
+                # observed state. Curve-side observation only (no venue
+                # evaluation yet - letsbonk migrations are rare and the
+                # Raydium discovery path is exercised by the event mode).
+                letsbonk_watch_path = Path(".state/letsbonk-watch.json")
+                if letsbonk_watch_path.exists():
+                    try:
+                        letsbonk_watch: dict[str, int] = {
+                            str(m): int(s)
+                            for m, s in json.loads(
+                                letsbonk_watch_path.read_text()
+                            ).items()
+                        }
+                        lb_reader = LetsBonkGraduationReader(client)
+                        sampled = 0
+                        for lb_mint in list(letsbonk_watch)[:10]:
+                            lb_cs = await lb_reader.read_curve_state(lb_mint)
+                            sampled += 1
+                            if lb_cs is not None:
+                                summary["letsbonk_curves_observed"] = (
+                                    summary.get("letsbonk_curves_observed", 0) + 1
+                                )
+                        summary["letsbonk_samples"] = (
+                            summary.get("letsbonk_samples", 0) + sampled
+                        )
+                    except Exception as exc:  # noqa: BLE001 - observation only
+                        logger.info(f"letsbonk polling pass failed: {exc}")
                 for coin in graduated:
                     mint = coin["mint"]
                     summary["coins_scanned"] += 1
@@ -930,33 +959,6 @@ async def run_session(
 
                     raise StopAsyncIteration
 
-                # Letsbonk pass: watch-set persistence is shared with the
-                # event mode; each polling pass samples up to 10 tracked
-                # LaunchLab curves for FUNDING status and records the
-                # observed state. Curve-side observation only (no venue
-                # evaluation yet - letsbonk migrations are rare and the
-                # Raydium discovery path is exercised by the event mode).
-                letsbonk_watch_path = Path(".state/letsbonk-watch.json")
-                if letsbonk_watch_path.exists():
-                    try:
-                        letsbonk_watch: dict[str, int] = {
-                            str(m): int(s)
-                            for m, s in json.loads(
-                                letsbonk_watch_path.read_text()
-                            ).items()
-                        }
-                        lb_reader = LetsBonkGraduationReader(client)
-                        sampled = 0
-                        for lb_mint in list(letsbonk_watch)[:10]:
-                            lb_cs = await letsbonk_reader.read_curve_state(lb_mint)
-                            sampled += 1
-                            if lb_cs is not None:
-                                summary["letsbonk_curves_observed"] = (
-                                    summary.get("letsbonk_curves_observed", 0) + 1
-                                )
-                        letsbonk_watch_path.write_text(json.dumps(letsbonk_watch))
-                    except Exception as exc:
-                        logger.debug(f"letsbonk polling pass failed: {exc}")
         except StopAsyncIteration:
             # The one-shot stop is the intended normal exit after a
             # submitted candidate, not a failure.
@@ -977,7 +979,6 @@ async def run_session(
     await client.close()
     summary["session_end"] = time.time()
     summary["elapsed_s"] = round(summary["session_end"] - summary["session_start"], 1)
-
     return summary
 
 
