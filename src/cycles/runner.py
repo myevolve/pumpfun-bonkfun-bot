@@ -1291,6 +1291,15 @@ async def run_event_session(
                             # venue for the same mint, exactly like the
                             # pump.fun pool-vs-pool path. Log-only.
                             try:
+                                # Curve-side observation: the LaunchLab
+                                # curve's last FUNDING snapshot is gone once
+                                # status leaves 0, but the reader still
+                                # decodes the pool's reserves directly -
+                                # evaluate curve-vs-pool divergence through
+                                # the same evaluate used by pump.fun.
+                                lb_curve = await letsbonk_reader.read_curve_state(
+                                    lb_mint
+                                )
                                 records = await discover_pools_for_mint(
                                     session, lb_mint
                                 )
@@ -1339,6 +1348,11 @@ async def run_event_session(
                                         )
                                         if pair_margin >= min_profit_lamports:
                                             summary["candidates_found"] += 1
+                                if lb_curve is not None:
+                                    summary["letsbonk_curve_observations"] = (
+                                        summary.get("letsbonk_curve_observations", 0)
+                                        + 1
+                                    )
                             except Exception as exc:
                                 logger.debug(
                                     f"letsbonk eval failed {lb_mint[:12]}: {exc}"
