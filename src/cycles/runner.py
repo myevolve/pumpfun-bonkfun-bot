@@ -745,18 +745,81 @@ async def run_session(
                     except Exception as exc:  # noqa: BLE001 - observation only
                         logger.info(f"letsbonk watch load failed: {exc}")
                         letsbonk_watch = {}
-                    for lb_mint in list(letsbonk_watch)[:10]:
+                    # FUNDING snapshots first (shortest divergence window);
+                    # the [:10] cap would otherwise miss them behind dried
+                    # int entries.
+                    lb_sorted = sorted(
+                        letsbonk_watch,
+                        key=lambda m: not isinstance(letsbonk_watch[m], dict),
+                    )[:10]
+                    for lb_mint in lb_sorted:
                         try:
-                            lb_cs = await lb_reader.read_curve_state(lb_mint)
-                            summary["letsbonk_samples"] = (
-                                summary.get("letsbonk_samples", 0) + 1
-                            )
-                            if lb_cs is not None:
+                            entry = letsbonk_watch.get(lb_mint)
+                            if isinstance(entry, dict):
+                                # FUNDING snapshot: read the live curve state
+                                # and compute divergence vs the Raydium pool.
+                                lb_cs = await lb_reader.read_curve_state(lb_mint)
+                                summary["letsbonk_samples"] = (
+                                    summary.get("letsbonk_samples", 0) + 1
+                                )
+                                if lb_cs is None:
+                                    continue
                                 summary["letsbonk_curves_observed"] = (
                                     summary.get("letsbonk_curves_observed", 0) + 1
                                 )
-                                continue  # still FUNDING; nothing to eval
-                            # Not FUNDING: migrated (flip) or dried.
+                                vsol = lb_cs["virtual_sol_reserves"]
+                                vtok = lb_cs["virtual_token_reserves"]
+                                if vsol <= 0 or vtok <= 0:
+                                    continue
+                                curve_price = vsol / vtok
+                                records = await discover_pools_for_mint(
+                                    session, lb_mint
+                                )
+                                for record in records:
+                                    pool_addr = record["id"]
+                                    bank = await _fetch_accounts(
+                                        session, rpc, [pool_addr]
+                                    )
+                                    if pool_addr not in bank:
+                                        continue
+                                    decoded = decode_pool(pool_addr, bank[pool_addr])
+                                    bank.update(
+                                        await _fetch_accounts(
+                                            session,
+                                            rpc,
+                                            decoded.dependencies(),
+                                        )
+                                    )
+                                    vp = hydrate_pool(decoded, bank)
+                                    if min(vp.reserves) <= 0:
+                                        continue
+                                    sol_idx = vp.mints.index(SOL)
+                                    tok_idx = 1 - sol_idx
+                                    if vp.reserves[tok_idx] <= 0:
+                                        continue
+                                    pool_price = (
+                                        vp.reserves[sol_idx] / vp.reserves[tok_idx]
+                                    )
+                                    if pool_price <= 0:
+                                        continue
+                                    divergence = (
+                                        pool_price - curve_price
+                                    ) / curve_price
+                                    if 0.02 < divergence < 10.0:
+                                        summary["letsbonk_divergence_hits"] = (
+                                            summary.get("letsbonk_divergence_hits", 0)
+                                            + 1
+                                        )
+                                        print(
+                                            f"LETSBONK DIVERGENCE "
+                                            f"{lb_mint[:14]}: "
+                                            f"curve={curve_price:.3e} "
+                                            f"pool={pool_price:.3e} "
+                                            f"div={divergence:+.1%}",
+                                            flush=True,
+                                        )
+                                    continue
+                            # Int entry: plain status-flip detection.
                             lb_status = await lb_reader.status(lb_mint)
                             lb_val = int(lb_status) if lb_status is not None else -1
                             last = letsbonk_watch.get(lb_mint, -1)
@@ -816,7 +879,6 @@ async def run_session(
                                 f"{type(exc).__name__}: {exc}",
                                 flush=True,
                             )
-                for coin in graduated:
                     mint = coin["mint"]
                     summary["coins_scanned"] += 1
 
