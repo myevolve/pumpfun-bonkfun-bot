@@ -1364,7 +1364,40 @@ async def run_event_session(
                         except Exception:
                             continue
                         last = letsbonk_watch[lb_mint]
-                        letsbonk_watch[lb_mint] = lb_val
+                        # While FUNDING, snapshot the curve reserves into
+                        # the watch entry (persisted): post-flip evaluation
+                        # needs the curve side, and read_curve_state returns
+                        # None once the pool is migrated.
+                        if lb_val == 0 and not isinstance(
+                            letsbonk_watch.get(lb_mint), dict
+                        ):
+                            try:
+                                lb_curve = await letsbonk_reader.read_curve_state(
+                                    lb_mint
+                                )
+                                if lb_curve is not None:
+                                    letsbonk_watch[lb_mint] = {
+                                        "status": 0,
+                                        "virtual_sol": lb_curve["virtual_sol_reserves"],
+                                        "virtual_token": lb_curve[
+                                            "virtual_token_reserves"
+                                        ],
+                                        "real_sol": lb_curve["real_sol_reserves"],
+                                        "real_token": lb_curve["real_token_reserves"],
+                                    }
+                            except Exception:  # noqa: BLE001
+                                pass
+                            continue
+                        # Flip detection: int entries flip on value; dict
+                        # entries (FUNDING snapshots) flip on the status
+                        # field.
+                        entry = letsbonk_watch.get(lb_mint)
+                        if isinstance(entry, dict):
+                            last = entry.get("status", -1)
+                            curve_snapshot = entry
+                        else:
+                            last = entry if isinstance(entry, int) else -1
+                            curve_snapshot = None
                         if last == 0 and lb_val >= 1:
                             summary["letsbonk_migrations"] = (
                                 summary.get("letsbonk_migrations", 0) + 1
@@ -1379,15 +1412,14 @@ async def run_event_session(
                             # venue for the same mint, exactly like the
                             # pump.fun pool-vs-pool path. Log-only.
                             try:
-                                # Curve-side observation: the LaunchLab
-                                # curve's last FUNDING snapshot is gone once
-                                # status leaves 0, but the reader still
-                                # decodes the pool's reserves directly -
-                                # evaluate curve-vs-pool divergence through
-                                # the same evaluate used by pump.fun.
-                                lb_curve = await letsbonk_reader.read_curve_state(
-                                    lb_mint
-                                )
+                                # Curve side comes from the FUNDING snapshot
+                                # captured while the coin was still funding -
+                                # read_curve_state returns None post-migration.
+                                if curve_snapshot is not None:
+                                    summary["letsbonk_curve_observations"] = (
+                                        summary.get("letsbonk_curve_observations", 0)
+                                        + 1
+                                    )
                                 records = await discover_pools_for_mint(
                                     session, lb_mint
                                 )
