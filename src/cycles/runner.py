@@ -879,9 +879,8 @@ async def run_session(
                                 f"{type(exc).__name__}: {exc}",
                                 flush=True,
                             )
+                for coin in graduated:
                     mint = coin["mint"]
-                    summary["coins_scanned"] += 1
-
                     curve_state = await read_curve_state(session, rpc, mint)
                     summary["http_requests"] = summary.get("http_requests", 0) + 1
                     if curve_state is None:
