@@ -1357,7 +1357,14 @@ async def run_event_session(
                         break
                     # Letsbonk status-flip watcher: poll tracked mints,
                     # evaluate on the FUNDING -> (WAITING|MIGRATED) flip.
-                    for lb_mint in list(letsbonk_watch)[:50]:
+                    # Poll FUNDING snapshots first (they have the shortest
+                    # window), then int entries - the [:50] cap would
+                    # otherwise miss snapshots buried behind dried mints.
+                    lb_sorted = sorted(
+                        letsbonk_watch,
+                        key=lambda m: not isinstance(letsbonk_watch[m], dict),
+                    )[:50]
+                    for lb_mint in lb_sorted:
                         try:
                             lb_status = await letsbonk_reader.status(lb_mint)
                             lb_val = int(lb_status) if lb_status is not None else -1
@@ -1468,11 +1475,49 @@ async def run_event_session(
                                         )
                                         if pair_margin >= min_profit_lamports:
                                             summary["candidates_found"] += 1
-                                if lb_curve is not None:
-                                    summary["letsbonk_curve_observations"] = (
-                                        summary.get("letsbonk_curve_observations", 0)
-                                        + 1
-                                    )
+                                # Curve-vs-pool divergence: the captured
+                                # FUNDING snapshot's curve price vs the
+                                # migrated pool's price. This is the real
+                                # migration-window signal.
+                                if curve_snapshot is not None and venue_pools:
+                                    vsol = curve_snapshot["virtual_sol"]
+                                    vtok = curve_snapshot["virtual_token"]
+                                    if vsol > 0 and vtok > 0:
+                                        curve_price = vsol / vtok
+                                        for vp in venue_pools:
+                                            if (
+                                                min(vp.reserves) <= 0
+                                                or vp.mints.index(SOL) < 0
+                                            ):
+                                                continue
+                                            sol_idx = vp.mints.index(SOL)
+                                            tok_idx = 1 - sol_idx
+                                            if vp.reserves[tok_idx] <= 0:
+                                                continue
+                                            pool_price = (
+                                                vp.reserves[sol_idx]
+                                                / vp.reserves[tok_idx]
+                                            )
+                                            if pool_price <= 0:
+                                                continue
+                                            divergence = (
+                                                pool_price - curve_price
+                                            ) / curve_price
+                                            logger.info(
+                                                f"Letsbonk divergence "
+                                                f"{lb_mint[:12]}: "
+                                                f"curve={curve_price:.3e} "
+                                                f"pool={pool_price:.3e} "
+                                                f"divergence={divergence:+.1%}"
+                                            )
+                                            if divergence > 0.02 and divergence < 10.0:
+                                                summary["letsbonk_divergence_hits"] = (
+                                                    summary.get(
+                                                        "letsbonk_divergence_hits",
+                                                        0,
+                                                    )
+                                                    + 1
+                                                )
                             except Exception as exc:
                                 logger.debug(
                                     f"letsbonk eval failed {lb_mint[:12]}: {exc}"
