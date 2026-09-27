@@ -1235,6 +1235,9 @@ async def run_event_session(
         "wallet": wallet,
         "session_start": time.time(),
         "letsbonk_watch_size": None,  # filled at shutdown
+        "letsbonk_migrations": 0,
+        "letsbonk_curve_observations": 0,
+        "letsbonk_divergence_hits": 0,
     }
 
     async def on_migration_event(event: MigrationEvent) -> None:
