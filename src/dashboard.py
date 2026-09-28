@@ -1,7 +1,8 @@
 """Streamlit dashboard for the pumpfun-bonkfun-bot.
 
-Read-only: loads from the SQLite ledger, JSON trade files, letsbonk watch
-set, structured logs, and the bot YAML config. No transaction submission.
+Read-only market data with operational controls. Buttons run the bot
+runner / cycle scanner as subprocesses; live submission still requires
+the CLI-only --authorize-live gate (never exposed here).
 
 Run: uv run streamlit run src/dashboard.py
 """
@@ -9,10 +10,16 @@ Run: uv run streamlit run src/dashboard.py
 from __future__ import annotations
 
 import json
+import os
+import re
+import signal
 import sqlite3
+import subprocess
 import sys
+import time
 from pathlib import Path
 
+import pandas as pd
 import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -24,32 +31,50 @@ st.set_page_config(page_title="PumpFun Bot", page_icon="🎯", layout="wide")
 # ─── Paths ───────────────────────────────────────────────────────────────────
 
 CONFIG_PATH = Path(".state/configs/live-readiness.yaml")
+PAPER_CFG_PATH = Path(".state/configs/paper-trade-dash.yaml")
+CREDS_PATH = Path(".state/wallets/live-readiness.secrets")
 LEDGER_DIR = Path(".state/transaction-ledgers")
 TRADES_DIR = Path("trades")
 LOGS_DIR = Path("logs")
 WATCH_PATH = Path(".state/letsbonk-watch.json")
-POSITIONS_DIR = Path(".state/positions")
+RUN_LOGS = Path(".state")
+
+PAPER_CFG_PATH = Path(".state/configs/paper-trade-dash.yaml")
+LIVE_CFG_PATH = Path(".state/configs/live-trade-ui.yaml")
+PAPER_LOG = RUN_LOGS / "paper-trade-ui.log"
+LIVE_LOG = RUN_LOGS / "live-trade-ui.log"
+SCANNER_LOG = RUN_LOGS / "scanner-ui.log"
 
 
 # ─── Data loaders ────────────────────────────────────────────────────────────
 
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=5)
 def load_config() -> dict:
     if not CONFIG_PATH.exists():
         return {}
     with CONFIG_PATH.open() as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f) or {}
+    # Display-only interpolation of the expected wallet; never any key material.
+    env_file = Path(cfg.get("env_file", ""))
+    placeholder = "${SOLANA_EXPECTED_WALLET}"
+    expected = cfg.get("execution", {}).get("expected_wallet")
+    if env_file.exists() and expected == placeholder:
+        for line in env_file.read_text().splitlines():
+            if line.startswith("SOLANA_EXPECTED_WALLET="):
+                cfg["execution"]["expected_wallet"] = line.split("=", 1)[1].strip()
+                break
+    return cfg
 
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=5)
 def load_watch_set() -> dict:
     if not WATCH_PATH.exists():
         return {}
     return json.loads(WATCH_PATH.read_text())
 
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=5)
 def load_trade_files() -> list[dict]:
     if not TRADES_DIR.exists():
         return []
@@ -67,7 +92,7 @@ def load_trade_files() -> list[dict]:
     return trades
 
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=5)
 def load_ledger(wallet: str | None) -> list[dict]:
     if not wallet or not LEDGER_DIR.exists():
         return []
@@ -78,7 +103,7 @@ def load_ledger(wallet: str | None) -> list[dict]:
     conn.row_factory = sqlite3.Row
     try:
         rows = conn.execute(
-            "SELECT * FROM submissions ORDER BY rowid DESC LIMIT 50"
+            "SELECT * FROM submissions ORDER BY rowid DESC LIMIT 500"
         ).fetchall()
         return [dict(r) for r in rows]
     except sqlite3.OperationalError:
@@ -87,8 +112,8 @@ def load_ledger(wallet: str | None) -> list[dict]:
         conn.close()
 
 
-@st.cache_data(ttl=30)
-def load_recent_logs(n: int = 200) -> list[dict]:
+@st.cache_data(ttl=5)
+def load_recent_logs(n: int = 300) -> list[dict]:
     if not LOGS_DIR.exists():
         return []
     log_files = sorted(
@@ -106,6 +131,237 @@ def load_recent_logs(n: int = 200) -> list[dict]:
         except json.JSONDecodeError:
             parsed.append({"message": line, "level": "RAW"})
     return parsed
+
+
+BUY_RE = re.compile(r"Buying ([\d,.]+) tokens at average quote ([\d.eE+-]+)")
+
+
+@st.cache_data(ttl=5)
+def load_activity() -> pd.DataFrame:
+    """Per-minute event counts (detected/buy/fail/blocked) from recent logs."""
+    rows: list[dict] = []
+    for entry in load_recent_logs(n=300):
+        msg = entry.get("message", "")
+        ts = entry.get("timestamp", "")
+        if not ts:
+            continue
+        event = None
+        if "New token detected" in msg:
+            event = "detected"
+        elif msg.startswith("Buying "):
+            event = "buy"
+        elif "Failed to buy" in msg:
+            event = "fail"
+        elif "blocked" in msg.lower() and "dry-run" in msg.lower():
+            event = "blocked"
+        if event:
+            rows.append({"ts": ts, "event": event})
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    df["ts"] = pd.to_datetime(df["ts"], utc=True, format="ISO8601", errors="coerce")
+    df = df.dropna(subset=["ts"])
+    df["minute"] = df["ts"].dt.floor("min")
+    return (
+        df.groupby(["minute", "event"])
+        .size()
+        .unstack(fill_value=0)
+        .reset_index()
+        .set_index("minute")
+    )
+
+
+@st.cache_data(ttl=5)
+def load_positions() -> pd.DataFrame:
+    """Token position sizes parsed from 'Buying N tokens ...' log lines."""
+    rows: list[dict] = []
+    for entry in load_recent_logs(n=300):
+        m = BUY_RE.match(entry.get("message", ""))
+        if not m:
+            continue
+        try:
+            rows.append(
+                {
+                    "ts": entry.get("timestamp", ""),
+                    "tokens": float(m.group(1).replace(",", "")),
+                    "quote": float(m.group(2)),
+                }
+            )
+        except ValueError:
+            continue
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows)
+
+
+# ─── Process control ─────────────────────────────────────────────────────────
+
+
+def _pid_path(key: str) -> Path:
+    return RUN_LOGS / f"ui-{key}.pid"
+
+
+def is_running(key: str) -> bool:
+    proc: subprocess.Popen | None = st.session_state.get(f"proc_{key}")
+    if proc is not None and proc.poll() is None:
+        return True
+    pid_file = _pid_path(key)
+    if pid_file.exists():
+        try:
+            pid = int(pid_file.read_text().strip())
+            os.kill(pid, 0)
+        except (ProcessLookupError, ValueError, PermissionError):
+            pid_file.unlink(missing_ok=True)
+        else:
+            return True
+    return False
+
+
+def start_process(key: str, cmd: list[str], log_file: Path) -> None:
+    log = log_file.open("ab")
+    proc = subprocess.Popen(  # noqa: S603 - locally constructed command
+        cmd,
+        stdout=log,
+        stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL,
+        cwd=Path.cwd(),
+    )
+    st.session_state[f"proc_{key}"] = proc
+    _pid_path(key).write_text(str(proc.pid))
+
+
+def stop_process(key: str) -> None:
+    proc: subprocess.Popen | None = st.session_state.get(f"proc_{key}")
+    if proc is not None and proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+    pid_file = _pid_path(key)
+    if pid_file.exists():
+        try:
+            pid = int(pid_file.read_text().strip())
+            os.kill(pid, signal.SIGTERM)
+            time.sleep(1)
+            os.kill(pid, 0)
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, ValueError, PermissionError):
+            pass
+        pid_file.unlink(missing_ok=True)
+    st.session_state.pop(f"proc_{key}", None)
+
+
+def run_command(cmd: list[str], timeout: int = 60) -> tuple[int, str]:
+    try:
+        r = subprocess.run(  # noqa: S603 - locally constructed command
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            cwd=Path.cwd(),
+        )
+        out = (r.stdout or "") + (r.stderr or "")
+        return r.returncode, out.strip() or "(no output)"
+    except subprocess.TimeoutExpired:
+        return 124, f"Timed out after {timeout}s"
+    except FileNotFoundError as e:
+        return 127, str(e)
+
+
+def paper_config() -> Path:
+    """Write a temp bot config: enabled, forced dry-run (no submissions)."""
+    cfg = load_config()
+    cfg["enabled"] = True
+    cfg.setdefault("execution", {})["mode"] = "dry_run"
+    PAPER_CFG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    PAPER_CFG_PATH.write_text(yaml.safe_dump(cfg, sort_keys=False))
+    return PAPER_CFG_PATH
+
+
+def live_config() -> Path:
+    """Write a temp bot config: enabled, live mode (needs --authorize-live)."""
+    cfg = load_config()
+    cfg["enabled"] = True
+    cfg.setdefault("execution", {})["mode"] = "live"
+    LIVE_CFG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    LIVE_CFG_PATH.write_text(yaml.safe_dump(cfg, sort_keys=False))
+    return LIVE_CFG_PATH
+
+
+def _json_from_output(out: str) -> dict:
+    m = re.search(r"\{.*\}", out, re.DOTALL)
+    if not m:
+        return {}
+    try:
+        return json.loads(m.group(0))
+    except json.JSONDecodeError:
+        return {}
+
+
+def run_all_checks() -> tuple[bool, list[dict]]:
+    """Run --status and --preflight; returns (all_ok, checks) for display."""
+    checks: list[dict] = []
+    code, out = run_command(
+        [
+            "uv",
+            "run",
+            "python",
+            "src/bot_runner.py",
+            "--config",
+            str(CONFIG_PATH),
+            "--status",
+        ]
+    )
+    status = _json_from_output(out)
+    busy = bool(
+        status.get("active_position_count")
+        or status.get("active_submissions")
+        or status.get("pending_cleanups")
+        or status.get("unresolved_buy_count")
+    )
+    status_ok = code == 0 and bool(status) and not busy
+    checks.append(
+        {
+            "name": "Status: no open positions or unresolved submissions",
+            "ok": status_ok,
+            "detail": out[:600] if not status_ok else "clean",
+        }
+    )
+    code2, out2 = run_command(
+        [
+            "uv",
+            "run",
+            "python",
+            "src/bot_runner.py",
+            "--config",
+            str(CONFIG_PATH),
+            "--preflight",
+        ]
+    )
+    pre = _json_from_output(out2)
+    ready = bool(pre.get("ready"))
+    pre_ok = code2 == 0 and ready
+    checks.append(
+        {
+            "name": "Preflight: wallet, RPC, fees, ledger all ready",
+            "ok": pre_ok,
+            "detail": out2[:600] if not pre_ok else "ready",
+        }
+    )
+    return status_ok and pre_ok, checks
+
+
+def kill_all() -> None:
+    """Kill every bot/scanner process now (UI-managed and orphaned)."""
+    for key in ("paper", "live", "scanner"):
+        stop_process(key)
+    for pattern in ("src/bot_runner.py", "src/cycles/runner.py"):
+        subprocess.run(  # noqa: S603 - static kill pattern
+            ["/usr/bin/pkill", "-f", pattern], check=False, capture_output=True
+        )
+    st.session_state.pop("live_confirm", None)
 
 
 # ─── Dashboard ───────────────────────────────────────────────────────────────
@@ -133,13 +389,200 @@ with st.sidebar:
     st.text(f"Buy amount: {buy_amount} SOL")
     exit_strategy = config.get("trade", {}).get("exit_strategy", "n/a")
     st.text(f"Exit: {exit_strategy}")
+
     st.divider()
+    st.header("🎛 Controls")
+
+    live_running = is_running("live")
+    paper_running = is_running("paper")
+    scanner_running = is_running("scanner")
+
+    st.subheader("What's running")
+    if live_running:
+        st.error(
+            "🔴 **LIVE TRADING** — real funds from wallet "
+            f"`{wallet[:8]}…`. The bot submits real transactions: one buy "
+            "plus its configured exit, capped by the risk session."
+        )
+    if paper_running:
+        st.success(
+            "🟢 **Paper trading** — watches the live market and simulates "
+            "trades; every submission is blocked at the dry-run gate. "
+            "No funds move."
+        )
+    if scanner_running:
+        st.info(
+            "🔭 **Cycle scanner** — watches graduated coins for "
+            "curve↔AMM divergence. Observation only, never submits."
+        )
+    if not (live_running or paper_running or scanner_running):
+        st.caption("⚪ Idle — nothing running.")
+
+    if st.button("🛑 KILL SWITCH", type="primary", use_container_width=True):
+        kill_all()
+        st.rerun()
+    st.caption(
+        "One click stops everything immediately: paper bot, live bot, "
+        "scanner, and any orphaned bot processes."
+    )
+
+    with st.expander("Last check results"):
+        results = st.session_state.get("check_results", [])
+        if not results:
+            st.caption(
+                "No checks run yet — they run automatically when you "
+                "start paper or live."
+            )
+        for c in results:
+            icon = "✅" if c["ok"] else "❌"
+            st.markdown(f"{icon} {c['name']}")
+            if not c["ok"]:
+                st.code(c["detail"], language="json")
+
+    st.divider()
+    st.subheader("▶️ Paper trading")
+    if paper_running or live_running:
+        st.caption("A bot is already running — use the kill switch first.")
+    elif st.button("▶️ Start Paper Trading", use_container_width=True):
+        ok, checks = run_all_checks()
+        st.session_state["check_results"] = checks
+        if ok:
+            paper_config()
+            start_process(
+                "paper",
+                [
+                    "uv",
+                    "run",
+                    "python",
+                    "src/bot_runner.py",
+                    "--config",
+                    str(PAPER_CFG_PATH),
+                ],
+                PAPER_LOG,
+            )
+        st.rerun()
+    st.caption(
+        "One click: runs status + preflight automatically, then starts the "
+        "bot in **dry-run** mode (real tokens, real prices, zero on-chain "
+        "transactions)."
+    )
+
+    st.divider()
+    st.subheader("🚀 Live trading")
+    if live_running:
+        st.caption("Live bot is running — the kill switch stops it.")
+    elif paper_running:
+        st.caption("Paper bot is running — kill switch, then go live.")
+    else:
+        typed = st.text_input(
+            "Type AUTHORIZE LIVE to arm",
+            key="live_confirm",
+            placeholder="AUTHORIZE LIVE",
+        )
+        armed = typed.strip() == "AUTHORIZE LIVE"
+        if not armed:
+            st.caption("The GO LIVE button unlocks once the text matches exactly.")
+        if st.button(
+            "🚀 GO LIVE",
+            type="primary",
+            use_container_width=True,
+            disabled=not armed,
+        ):
+            ok, checks = run_all_checks()
+            st.session_state["check_results"] = checks
+            if ok:
+                live_config()
+                start_process(
+                    "live",
+                    [
+                        "uv",
+                        "run",
+                        "python",
+                        "src/bot_runner.py",
+                        "--config",
+                        str(LIVE_CFG_PATH),
+                        "--authorize-live",
+                    ],
+                    LIVE_LOG,
+                )
+            st.rerun()
+        st.caption(
+            "Runs all checks automatically and starts only if status is "
+            "clean **and** preflight is ready. Real buys from the wallet "
+            "within the configured risk-session caps."
+        )
+
+    st.divider()
+    st.subheader("🔭 Cycle scanner")
+    if scanner_running:
+        st.caption("Scanner is running — the kill switch stops it.")
+    else:
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🔭 Event", use_container_width=True):
+                start_process(
+                    "scanner",
+                    [
+                        "uv",
+                        "run",
+                        "python",
+                        "src/cycles/runner.py",
+                        "--config",
+                        str(CONFIG_PATH),
+                        "--credentials",
+                        str(CREDS_PATH),
+                        "--event",
+                    ],
+                    SCANNER_LOG,
+                )
+                st.rerun()
+        with col2:
+            if st.button("🔁 Poll", use_container_width=True):
+                start_process(
+                    "scanner",
+                    [
+                        "uv",
+                        "run",
+                        "python",
+                        "src/cycles/runner.py",
+                        "--config",
+                        str(CONFIG_PATH),
+                        "--credentials",
+                        str(CREDS_PATH),
+                    ],
+                    SCANNER_LOG,
+                )
+                st.rerun()
+    st.caption("Observation only — logs divergence opportunities, submits nothing.")
+
+    for key, log in (
+        ("paper", PAPER_LOG),
+        ("live", LIVE_LOG),
+        ("scanner", SCANNER_LOG),
+    ):
+        if is_running(key) and log.exists():
+            with st.expander(f"📜 {key} output", expanded=False):
+                text = log.read_text(errors="replace").splitlines()
+                st.code("\n".join(text[-40:]) or "(no output yet)")
+
+    st.divider()
+    st.header("🔄 Live updates")
+    refresh_secs = st.select_slider(
+        "Auto-refresh",
+        options=[0, 2, 5, 10, 30],
+        value=5,
+        format_func=lambda v: "Off" if v == 0 else f"{v}s",
+    )
+    st.session_state["refresh_secs"] = refresh_secs
+
     st.caption(f"Config: {CONFIG_PATH}")
+    st.caption("Live trading requires typing AUTHORIZE LIVE plus clean checks.")
+
 
 # ─── Tabs ────────────────────────────────────────────────────────────────────
 
-tab_overview, tab_trades, tab_watch, tab_logs = st.tabs(
-    ["📊 Overview", "💱 Trades", "🔍 LetsBonk Watch", "📋 Logs"]
+tab_overview, tab_charts, tab_trades, tab_watch, tab_logs = st.tabs(
+    ["📊 Overview", "📈 Charts", "💱 Trades", "🔍 LetsBonk Watch", "📋 Logs"]
 )
 
 # ─── Overview tab ────────────────────────────────────────────────────────────
@@ -156,9 +599,15 @@ with tab_overview:
         trade_files = load_trade_files()
         st.metric("Tracked Tokens", len(trade_files))
 
+    act = load_activity()
+    if not act.empty and "detected" in act.columns:
+        st.metric(
+            "Tokens detected (recent logs)",
+            int(act["detected"].sum()),
+        )
+
     st.divider()
 
-    # Risk session info
     st.subheader("Risk Session")
     wallet_safe = wallet[:8] + "..." if wallet else "n/a"
     st.text(f"Wallet: {wallet_safe}")
@@ -178,7 +627,6 @@ with tab_overview:
 
     st.divider()
 
-    # Trade parameters
     st.subheader("Trade Parameters")
     trade_cfg = config.get("trade", {})
     col1, col2, col3 = st.columns(3)
@@ -191,6 +639,58 @@ with tab_overview:
     with col3:
         st.text(f"Extreme fast: {trade_cfg.get('extreme_fast_mode', False)}")
         st.text(f"Entry gate: {config.get('entry_gate', {}).get('enabled', False)}")
+
+# ─── Charts tab ──────────────────────────────────────────────────────────────
+
+with tab_charts:
+    st.subheader("Token activity per minute")
+    act = load_activity()
+    if act.empty:
+        st.info("No activity in recent logs")
+    else:
+        st.area_chart(act)
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.subheader("Submissions per day")
+        submissions = load_ledger(wallet)
+        if submissions:
+            sub_df = pd.DataFrame(submissions)
+            sub_df["day"] = pd.to_datetime(
+                sub_df["submitted_at"], errors="coerce"
+            ).dt.date
+            sub_df["kind"] = sub_df["intent_id"].str.split(":").str[0]
+            pivot = sub_df.groupby(["day", "kind"]).size().unstack(fill_value=0)
+            st.bar_chart(pivot)
+        else:
+            st.info("No ledger submissions")
+
+    with col2:
+        st.subheader("Watch set funding (SOL)")
+        watch = load_watch_set()
+        snaps = {
+            m[:8]: {
+                "virtual SOL": s.get("virtual_sol", 0) / 1e9,
+                "real SOL": s.get("real_sol", 0) / 1e9,
+            }
+            for m, s in watch.items()
+            if isinstance(s, dict)
+        }
+        if snaps:
+            st.bar_chart(pd.DataFrame(snaps).T)
+        else:
+            st.info("Watch set empty")
+
+    st.subheader("Position sizes (tokens per buy)")
+    pos = load_positions()
+    if not pos.empty:
+        hist = pos["tokens"].pipe(lambda s: pd.cut(s, bins=15))
+        counts = hist.value_counts().sort_index()
+        counts.index = counts.index.astype(str)
+        st.bar_chart(counts)
+    else:
+        st.info("No buy attempts in recent logs")
 
 # ─── Trades tab ──────────────────────────────────────────────────────────────
 
@@ -234,6 +734,7 @@ with tab_trades:
                 st.text(f"State: {status}")
                 st.text(f"Signature: {s.get('signature', 'n/a')}")
                 st.text(f"Intent: {s.get('intent_id', 'n/a')}")
+                st.text(f"Submitted: {s.get('submitted_at', 'n/a')}")
                 st.text(f"Quote amount: {s.get('quote_amount_raw', 'n/a')} lamports")
                 st.text(f"Fee: {s.get('fee_lamports', 'n/a')} lamports")
 
@@ -246,7 +747,6 @@ with tab_watch:
         st.info("Watch set is empty")
     else:
         st.metric("Total Watched", len(watch))
-        # Separate snapshots from int entries
         snapshots = {}
         ints = {}
         for m, s in watch.items():
@@ -278,15 +778,12 @@ with tab_watch:
 
 # ─── Logs tab ────────────────────────────────────────────────────────────────
 
-# ─── Logs tab ────────────────────────────────────────────────────────────────
-
 with tab_logs:
     st.subheader("Recent Log Entries")
     logs = load_recent_logs()
     if not logs:
         st.info("No logs found")
     else:
-        # Filter dropdown
         levels = sorted({entry.get("level", "RAW") for entry in logs})
         selected = st.multiselect("Filter by level", levels, default=levels)
         filtered = [e for e in logs if e.get("level", "RAW") in selected]
@@ -297,3 +794,11 @@ with tab_logs:
             logger_name = entry.get("logger", "")
             icon = {"ERROR": "🔴", "WARNING": "🟡", "INFO": "🔵"}.get(level, "⚪")
             st.markdown(f"{icon} `{ts}` **{level}** [{logger_name}] {msg}")
+
+# ─── Live refresh: must be the LAST statement so the page fully renders
+# ─── before the rerun fires (in-sidebar rerun aborts before tabs render).
+
+refresh_secs = st.session_state.get("refresh_secs", 0)
+if refresh_secs:
+    time.sleep(refresh_secs)
+    st.rerun()
