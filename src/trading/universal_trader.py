@@ -35,7 +35,7 @@ from core.client import (
     TransactionSubmissionUnknown,
     estimate_transaction_fee_lamports,
 )
-from core.execution_policy import ExecutionMode, ExecutionPolicy
+from core.execution_policy import ExecutionBlocked, ExecutionMode, ExecutionPolicy
 from core.priority_fee.manager import PriorityFeeManager
 from core.pubkeys import (
     TOKEN_DECIMALS,
@@ -2331,6 +2331,16 @@ class UniversalTrader:
                     self._pending_recovery_tokens.append(token_info)
                     self._write_recovery_journal()
                 logger.info("Token queue processor was cancelled")
+                raise
+            except ExecutionBlocked as exc:
+                if self.execution_policy.mode is ExecutionMode.DRY_RUN:
+                    logger.info(
+                        "Paper fill blocked by dry-run gate: %s — "
+                        "continuing to next token",
+                        exc,
+                    )
+                    continue
+                logger.exception("Fatal error in token queue processor")
                 raise
             except Exception:
                 logger.exception("Fatal error in token queue processor")
