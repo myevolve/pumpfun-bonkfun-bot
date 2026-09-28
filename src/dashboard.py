@@ -201,32 +201,69 @@ def _pid_path(key: str) -> Path:
     return RUN_LOGS / f"ui-{key}.pid"
 
 
+def _ps_args(pid: int) -> str:
+    """argv of the process, empty if gone (macOS ps)."""
+    try:
+        r = subprocess.run(  # noqa: S603 - fixed local args
+            ["/bin/ps", "-p", str(pid), "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return ""
+    return r.stdout.strip()
+
+
+def _pid_alive(pid: int) -> bool:
+    """True only if pid exists AND its argv still matches the expected
+    command for this key. Guards against killing a reused PID."""
+    argv = _ps_args(pid)
+    return "bot_runner.py" in argv or "cycles/runner.py" in argv
+
+
 def is_running(key: str) -> bool:
     proc: subprocess.Popen | None = st.session_state.get(f"proc_{key}")
-    if proc is not None and proc.poll() is None:
-        return True
+    if proc is not None:
+        code = proc.poll()
+        if code is None:
+            return True
+        # Child exited: record outcome and clean the handle + pid file.
+        st.session_state[f"last_exit_{key}"] = code
+        st.session_state.pop(f"proc_{key}", None)
+        _pid_path(key).unlink(missing_ok=True)
+        if code not in (0, -15):
+            st.session_state[f"failed_start_{key}"] = code
     pid_file = _pid_path(key)
     if pid_file.exists():
         try:
             pid = int(pid_file.read_text().strip())
-            os.kill(pid, 0)
-        except (ProcessLookupError, ValueError, PermissionError):
+        except ValueError:
             pid_file.unlink(missing_ok=True)
         else:
-            return True
+            if _pid_alive(pid):
+                return True
+            pid_file.unlink(missing_ok=True)
     return False
 
 
 def start_process(key: str, cmd: list[str], log_file: Path) -> None:
+    st.session_state.pop(f"failed_start_{key}", None)
     log = log_file.open("ab")
-    proc = subprocess.Popen(  # noqa: S603 - locally constructed command
-        cmd,
-        stdout=log,
-        stderr=subprocess.STDOUT,
-        stdin=subprocess.DEVNULL,
-        cwd=Path.cwd(),
-    )
+    try:
+        proc = subprocess.Popen(  # noqa: S603 - locally constructed command
+            cmd,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            cwd=Path.cwd(),
+        )
+    except OSError:
+        log.close()
+        raise
     st.session_state[f"proc_{key}"] = proc
+    st.session_state[f"last_exit_{key}"] = None
     _pid_path(key).write_text(str(proc.pid))
 
 
@@ -238,16 +275,21 @@ def stop_process(key: str) -> None:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
+            proc.wait(timeout=5)  # reap: no zombie left behind
     pid_file = _pid_path(key)
     if pid_file.exists():
         try:
             pid = int(pid_file.read_text().strip())
+        except ValueError:
+            pid = None
+        if pid is not None and _pid_alive(pid):
             os.kill(pid, signal.SIGTERM)
-            time.sleep(1)
-            os.kill(pid, 0)
-            os.kill(pid, signal.SIGKILL)
-        except (ProcessLookupError, ValueError, PermissionError):
-            pass
+            for _ in range(10):
+                time.sleep(0.5)
+                if not _pid_alive(pid):
+                    break
+            else:
+                os.kill(pid, signal.SIGKILL)
         pid_file.unlink(missing_ok=True)
     st.session_state.pop(f"proc_{key}", None)
 
@@ -320,6 +362,7 @@ def run_all_checks() -> tuple[bool, list[dict]]:
         or status.get("active_submissions")
         or status.get("pending_cleanups")
         or status.get("unresolved_buy_count")
+        or status.get("pending_token_count")
     )
     status_ok = code == 0 and bool(status) and not busy
     checks.append(
@@ -516,44 +559,36 @@ with st.sidebar:
     st.subheader("🔭 Cycle scanner")
     if scanner_running:
         st.caption("Scanner is running — the kill switch stops it.")
-    else:
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("🔭 Event", use_container_width=True):
-                start_process(
-                    "scanner",
-                    [
-                        "uv",
-                        "run",
-                        "python",
-                        "src/cycles/runner.py",
-                        "--config",
-                        str(CONFIG_PATH),
-                        "--credentials",
-                        str(CREDS_PATH),
-                        "--event",
-                    ],
-                    SCANNER_LOG,
-                )
-                st.rerun()
-        with col2:
-            if st.button("🔁 Poll", use_container_width=True):
-                start_process(
-                    "scanner",
-                    [
-                        "uv",
-                        "run",
-                        "python",
-                        "src/cycles/runner.py",
-                        "--config",
-                        str(CONFIG_PATH),
-                        "--credentials",
-                        str(CREDS_PATH),
-                    ],
-                    SCANNER_LOG,
-                )
-                st.rerun()
-    st.caption("Observation only — logs divergence opportunities, submits nothing.")
+    elif st.button("🔭 Scan (event mode)", use_container_width=True):
+        start_process(
+            "scanner",
+            [
+                "uv",
+                "run",
+                "python",
+                "src/cycles/runner.py",
+                "--config",
+                str(CONFIG_PATH),
+                "--credentials",
+                str(CREDS_PATH),
+                "--event",
+            ],
+            SCANNER_LOG,
+        )
+        st.rerun()
+    st.caption(
+        "Event mode only — watches migrations live, logs divergence "
+        "opportunities, submits nothing. (Polling mode requires "
+        "--authorize-live and can submit, so it is CLI-only.)"
+    )
+
+    failed = {
+        k: st.session_state.get(f"failed_start_{k}")
+        for k in ("paper", "live", "scanner")
+        if st.session_state.get(f"failed_start_{k}") is not None
+    }
+    if failed:
+        st.error(f"Last launch failed with exit code(s): {failed}")
 
     for key, log in (
         ("paper", PAPER_LOG),

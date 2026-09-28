@@ -19,6 +19,7 @@ dependencies = [
     "uvloop>=0.21.0; sys_platform != 'win32'",
     "winloop>=0.1.0; sys_platform == 'win32'",
     "aioquic>=1.3.0",
+    "streamlit>=1.64.0",
 ]
 
 [dependency-groups]
