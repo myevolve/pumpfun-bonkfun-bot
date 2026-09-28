@@ -92,7 +92,22 @@ dry-run mode, but dry-run policy blocks transaction submission.
 
 Public RPC nodes will not work for this workload — see [throughput](#throughput-and-rate-limits) below.
 
-### 4. Configure a bot
+### 4. Validate your setup
+
+Run the onboarding wizard to check every prerequisite before touching a bot
+config. It reports pass/warn/fail per step and never reads your private key or
+signs a transaction:
+
+```bash
+uv run python src/onboard.py --config bots/bot-sniper-1-geyser.yaml --env-file .env
+```
+
+The wizard validates: env-file structure, bot config compatibility, RPC
+health, geyser endpoint reachability, execution-safety gates, IDL file
+integrity, and ledger directory writability. Fix any `fail` steps before
+starting a bot.
+
+### 5. Configure a bot
 
 Each YAML file in `bots/` is one bot instance. Every checked-in sample has
 `enabled: false`, `execution.mode: "dry_run"`, destructive cleanup disabled,
