@@ -111,24 +111,38 @@ def load_ledger(wallet: str | None) -> list[dict]:
 
 
 @st.cache_data(ttl=5)
-def load_recent_logs(n: int = 300) -> list[dict]:
+def load_recent_logs(n: int = 2000) -> list[dict]:
+    """Parsed entries from the newest logs, noisy loggers filtered out.
+
+    event_parser emits ~10 lines per token and httpx one per RPC call, so a
+    raw line window is mostly noise. Filter by logger BEFORE truncating, and
+    read a generous slice (3 files x 20k lines) so activity charts cover the
+    last hour, not the last 40 seconds.
+    """
     if not LOGS_DIR.exists():
         return []
     log_files = sorted(
         LOGS_DIR.glob("*.log"), key=lambda p: p.stat().st_mtime, reverse=True
     )
-    entries = []
+    noisy = {
+        "platforms.pumpfun.event_parser",
+        "platforms.letsbonk.event_parser",
+        "httpx",
+        "urllib3",
+        "asyncio",
+    }
+    parsed: list[dict] = []
     for lf in log_files[:3]:
-        lines = lf.read_text(errors="replace").splitlines()
-        entries.extend(lines[-n:])
-    entries = entries[-n:]
-    parsed = []
-    for line in entries:
-        try:
-            parsed.append(json.loads(line))
-        except json.JSONDecodeError:
-            parsed.append({"message": line, "level": "RAW"})
-    return parsed
+        lines = lf.read_text(errors="replace").splitlines()[-20000:]
+        for line in lines:
+            try:
+                d = json.loads(line)
+            except json.JSONDecodeError:
+                d = {"message": line, "level": "RAW"}
+            if d.get("logger") in noisy:
+                continue
+            parsed.append(d)
+    return parsed[-n:]
 
 
 BUY_RE = re.compile(r"Buying ([\d,.]+) tokens at average quote ([\d.eE+-]+)")
@@ -138,7 +152,7 @@ BUY_RE = re.compile(r"Buying ([\d,.]+) tokens at average quote ([\d.eE+-]+)")
 def load_activity() -> pd.DataFrame:
     """Per-minute event counts (detected/buy/fail/blocked) from recent logs."""
     rows: list[dict] = []
-    for entry in load_recent_logs(n=300):
+    for entry in load_recent_logs(n=2000):
         msg = entry.get("message", "")
         ts = entry.get("timestamp", "")
         if not ts:
@@ -173,7 +187,7 @@ def load_activity() -> pd.DataFrame:
 def load_positions() -> pd.DataFrame:
     """Token position sizes parsed from 'Buying N tokens ...' log lines."""
     rows: list[dict] = []
-    for entry in load_recent_logs(n=300):
+    for entry in load_recent_logs(n=2000):
         m = BUY_RE.match(entry.get("message", ""))
         if not m:
             continue
