@@ -53,6 +53,12 @@ from core.transaction_ledger import (
 )
 from core.wallet import Wallet
 from interfaces.core import Platform, TokenInfo
+from learning.journal import (
+    GateSnapshot,
+    JevScorer,
+    LessonJournal,
+    LessonObservation,
+)
 from monitoring.listener_factory import ListenerFactory
 from monitoring.trade_flow import (
     EntryGate,
@@ -196,6 +202,11 @@ def _validate_exit_config(
 
 class UniversalTrader:
     """Universal trading coordinator that works with any supported platform."""
+
+    # Learning integrations are optional; bare instances (tests, offline
+    # tools) run without them.
+    lesson_journal: object | None = None
+    jev_scorer: object | None = None
 
     def __init__(
         self,
@@ -436,6 +447,11 @@ class UniversalTrader:
         self._flow_signals: dict[str, FlowSignal] = {}
         self._flow_wakeups: dict[str, asyncio.Event] = {}
         self._flow_latched: set[str] = set()
+
+        # Learning (optional): per-transaction lesson journal with optional
+        # Jev scoring. Both fail open (disabled) without configuration.
+        self.lesson_journal = LessonJournal()
+        self.jev_scorer = JevScorer()
 
         # State tracking
         self.traded_mints: set[Pubkey] = set()
@@ -2221,6 +2237,16 @@ class UniversalTrader:
         except BaseException as exc:
             record_failure("Solana client close", exc)
 
+        if self.jev_scorer is not None:
+            try:
+                await self.jev_scorer.close()
+            except BaseException as exc:  # noqa: BLE001 - shutdown must not raise
+                record_failure("Jev scorer close", exc)
+        if self.lesson_journal is not None:
+            try:
+                self.lesson_journal.close()
+            except BaseException as exc:  # noqa: BLE001 - shutdown must not raise
+                record_failure("lesson journal close", exc)
         failures.extend(self._release_persistence_resources())
 
         if failures:
@@ -2427,6 +2453,34 @@ class UniversalTrader:
                 await asyncio.sleep(self.wait_time_after_creation)
 
             decision = await self._await_entry_gate(token_info)
+            if self.lesson_journal is not None:
+                jev = None
+                if self.jev_scorer is not None and self.jev_scorer.enabled:
+                    jev = await self.jev_scorer.score_candidate(
+                        name=token_info.name,
+                        symbol=token_info.symbol,
+                        mayhem=token_info.is_mayhem_mode,
+                        gate=GateSnapshot(
+                            buyers=decision.buyers if decision else 0,
+                            real_sol=decision.real_sol if decision else None,
+                        ),
+                    )
+                self.lesson_journal.record(
+                    LessonObservation(
+                        kind="gate_skip"
+                        if decision and not decision.accept
+                        else "gate_pass",
+                        mint=str(token_info.mint),
+                        symbol=token_info.symbol,
+                        name=token_info.name,
+                        platform=token_info.platform.value,
+                        mayhem=token_info.is_mayhem_mode,
+                        decision=decision.reason if decision else "entry_gate_disabled",
+                        buyers=decision.buyers if decision else None,
+                        real_sol=decision.real_sol if decision else None,
+                    ),
+                    jev=jev,
+                )
             self._record_trade_evidence(
                 "decision",
                 token_info,
@@ -3232,6 +3286,20 @@ class UniversalTrader:
                             )
                             else None
                         )
+                        if self.lesson_journal is not None:
+                            self.lesson_journal.link_outcome(
+                                str(token_info.mint),
+                                pnl_sol=(
+                                    sell_result.quote_amount_raw
+                                    - position.quote_amount_raw
+                                )
+                                if (
+                                    sell_result.quote_amount_raw is not None
+                                    and position.quote_amount_raw is not None
+                                )
+                                else None,
+                                reason=exit_reason.value,
+                            )
                         self._record_trade_evidence(
                             "position_closed",
                             token_info,
