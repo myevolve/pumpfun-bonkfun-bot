@@ -431,6 +431,11 @@ platform = config.get("platform", "unknown")
 live_running = is_running("live")
 paper_running = is_running("paper")
 scanner_running = is_running("scanner")
+# The base config says "live"; the *running* bot's mode is what's true.
+if paper_running:
+    mode = "dry_run (paper)"
+elif live_running:
+    mode = "live"
 
 hdr_l, hdr_r = st.columns([3, 2])
 with hdr_l:
