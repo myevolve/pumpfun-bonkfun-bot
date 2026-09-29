@@ -1868,6 +1868,22 @@ class UniversalTrader:
                             handled = await self._handle_token(token_info)
                         finally:
                             self._finish_token_reservation(token_info, handled)
+                        token_key_check = str(token_info.mint)
+                        if (
+                            self.execution_policy.mode is ExecutionMode.DRY_RUN
+                            and handled
+                            and token_key_check not in self._active_positions
+                            and token_key_check not in self._unresolved_buys
+                            and not self._position_monitor_tasks
+                        ):
+                            # Paper fill: dry-run gate blocked the buy (or the
+                            # sell leg). Log it and keep scanning — the one-shot
+                            # exit is for real fills only.
+                            logger.info(
+                                "Paper fill complete for %s; continuing scan",
+                                token_info.symbol,
+                            )
+                            continue
                         if str(token_info.mint) in self._unresolved_buys:
                             await self._await_unresolved_buy_resolution(
                                 str(token_info.mint),

@@ -15,18 +15,17 @@ import re
 import signal
 import sqlite3
 import subprocess
-import sys
 import time
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
 import yaml
 
-st.set_page_config(page_title="PumpFun Bot", page_icon="🎯", layout="wide")
+import dashboard_theme
+
+st.set_page_config(page_title="PumpFun Terminal", page_icon="🎯", layout="wide")
+dashboard_theme.inject()
 
 # ─── Paths ───────────────────────────────────────────────────────────────────
 
@@ -39,7 +38,6 @@ LOGS_DIR = Path("logs")
 WATCH_PATH = Path(".state/letsbonk-watch.json")
 RUN_LOGS = Path(".state")
 
-PAPER_CFG_PATH = Path(".state/configs/paper-trade-dash.yaml")
 LIVE_CFG_PATH = Path(".state/configs/live-trade-ui.yaml")
 PAPER_LOG = RUN_LOGS / "paper-trade-ui.log"
 LIVE_LOG = RUN_LOGS / "live-trade-ui.log"
@@ -416,7 +414,27 @@ enabled = config.get("enabled", False)
 mode = config.get("execution", {}).get("mode", "unknown")
 platform = config.get("platform", "unknown")
 
-st.title("🎯 PumpFun Bot Dashboard")
+live_running = is_running("live")
+paper_running = is_running("paper")
+scanner_running = is_running("scanner")
+
+hdr_l, hdr_r = st.columns([3, 2])
+with hdr_l:
+    st.markdown("## 🎯 PumpFun Terminal")
+with hdr_r:
+    if live_running:
+        tone, label = "red", "● LIVE"
+    elif paper_running:
+        tone, label = "green", "● PAPER"
+    else:
+        tone, label = "grey", "○ IDLE"
+    extra = dashboard_theme.pill(platform, "blue")
+    st.markdown(
+        f"<div style='text-align:right'>{dashboard_theme.pill(label, tone)} "
+        f"{extra} "
+        f"{dashboard_theme.pill(f'risk: {risk_session[-12:]}', 'grey')}</div>",
+        unsafe_allow_html=True,
+    )
 
 # ─── Sidebar ─────────────────────────────────────────────────────────────────
 
@@ -435,10 +453,6 @@ with st.sidebar:
 
     st.divider()
     st.header("🎛 Controls")
-
-    live_running = is_running("live")
-    paper_running = is_running("paper")
-    scanner_running = is_running("scanner")
 
     st.subheader("What's running")
     if live_running:
@@ -623,72 +637,103 @@ tab_overview, tab_charts, tab_trades, tab_watch, tab_logs = st.tabs(
 # ─── Overview tab ────────────────────────────────────────────────────────────
 
 with tab_overview:
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Enabled", str(enabled))
-    with col2:
-        st.metric("Mode", mode)
-    with col3:
-        st.metric("Platform", platform)
-    with col4:
-        trade_files = load_trade_files()
-        st.metric("Tracked Tokens", len(trade_files))
-
-    act = load_activity()
-    if not act.empty and "detected" in act.columns:
-        st.metric(
-            "Tokens detected (recent logs)",
-            int(act["detected"].sum()),
-        )
-
-    st.divider()
-
-    st.subheader("Risk Session")
-    wallet_safe = wallet[:8] + "..." if wallet else "n/a"
-    st.text(f"Wallet: {wallet_safe}")
-    st.text(f"Risk session: {risk_session}")
-    exec_cfg = config.get("execution", {})
-    col1, col2 = st.columns(2)
-    with col1:
-        st.text(f"Max trade: {exec_cfg.get('max_trade_quote_raw', 'n/a')} lamports")
-        st.text(
-            f"Max session quote: {exec_cfg.get('max_session_quote_raw', 'n/a')} lamports"
-        )
-    with col2:
-        st.text(f"Max fee: {exec_cfg.get('max_total_fee_lamports', 'n/a')} lamports")
-        st.text(
-            f"Max session fee: {exec_cfg.get('max_session_fee_lamports', 'n/a')} lamports"
-        )
-
-    st.divider()
-
-    st.subheader("Trade Parameters")
     trade_cfg = config.get("trade", {})
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.text(f"Buy amount: {trade_cfg.get('buy_amount', 'n/a')} SOL")
-        st.text(f"Slippage: {trade_cfg.get('buy_slippage', 'n/a')}")
-    with col2:
-        st.text(f"Exit: {trade_cfg.get('exit_strategy', 'n/a')}")
-        st.text(f"Max hold: {trade_cfg.get('max_hold_time', 'n/a')}s")
-    with col3:
-        st.text(f"Extreme fast: {trade_cfg.get('extreme_fast_mode', False)}")
-        st.text(f"Entry gate: {config.get('entry_gate', {}).get('enabled', False)}")
+    trade_cfg_amt = trade_cfg.get("buy_amount", "n/a")
+    max_hold = trade_cfg.get("max_hold_time", "n/a")
+    trade_files = load_trade_files()
+    act = load_activity()
+    detected_n = (
+        int(act["detected"].sum())
+        if (not act.empty and "detected" in act.columns)
+        else 0
+    )
+    buys_n = int(act["buy"].sum()) if (not act.empty and "buy" in act.columns) else 0
+    fails_n = int(act["fail"].sum()) if (not act.empty and "fail" in act.columns) else 0
+
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
+    with m1:
+        st.metric("Detected", detected_n)
+    with m2:
+        st.metric("Buys", buys_n)
+    with m3:
+        st.metric("Fails", fails_n)
+    with m4:
+        st.metric("Tracked", len(trade_files))
+    with m5:
+        st.metric("Buy size", f"{trade_cfg_amt} SOL")
+    with m6:
+        st.metric("Max hold", f"{max_hold}s")
+
+    st.divider()
+
+    lk, rk = st.columns([1, 2])
+    with lk:
+        st.subheader("Execution")
+        st.markdown(
+            f"Mode {dashboard_theme.pill(mode, 'blue' if mode == 'dry_run' else 'amber')}  \n"
+            f"Enabled {dashboard_theme.pill(str(enabled), 'green' if enabled else 'red')}  \n"
+            f"Platform {dashboard_theme.pill(platform, 'grey')}  \n"
+            f"Wallet `{wallet[:8]}…`  \n"
+            f"Risk session `{risk_session}`",
+            unsafe_allow_html=True,
+        )
+    with rk:
+        st.subheader("Risk limits (lamports)")
+        exec_cfg = config.get("execution", {})
+        limits = pd.DataFrame(
+            {
+                "limit": [
+                    "max trade quote",
+                    "max session quote",
+                    "max trade fee",
+                    "max session fee",
+                ],
+                "value": [
+                    exec_cfg.get("max_trade_quote_raw", "n/a"),
+                    exec_cfg.get("max_session_quote_raw", "n/a"),
+                    exec_cfg.get("max_total_fee_lamports", "n/a"),
+                    exec_cfg.get("max_session_fee_lamports", "n/a"),
+                ],
+            }
+        ).set_index("limit")
+        st.dataframe(limits, width="stretch", height=150)
+
+    st.subheader("Trade parameters")
+    t1, t2, t3, t4 = st.columns(4)
+    with t1:
+        st.metric("Buy amount", f"{trade_cfg.get('buy_amount', 'n/a')} SOL")
+        st.metric("Buy slippage", trade_cfg.get("buy_slippage", "n/a"))
+    with t2:
+        st.metric("Sell slippage", trade_cfg.get("sell_slippage", "n/a"))
+        st.metric("Exit", trade_cfg.get("exit_strategy", "n/a"))
+    with t3:
+        st.metric("Max hold", f"{max_hold}s")
+        st.metric("Max sell attempts", trade_cfg.get("max_sell_attempts", "n/a"))
+    with t4:
+        ef = trade_cfg.get("extreme_fast_mode", False)
+        st.metric("Extreme fast", "ON" if ef else "off")
+        eg = config.get("entry_gate", {}).get("enabled", False)
+        st.metric("Entry gate", "ON" if eg else "off")
 
 # ─── Charts tab ──────────────────────────────────────────────────────────────
 
 with tab_charts:
-    st.subheader("Token activity per minute")
     act = load_activity()
     if act.empty:
-        st.info("No activity in recent logs")
+        st.info("No activity in recent logs — start the paper bot to see live data.")
     else:
-        st.area_chart(act)
+        c1, c2 = st.columns([3, 1])
+        with c1:
+            st.subheader("Token activity · per minute")
+            st.area_chart(act, color=dashboard_theme.CHART_COLORS[: len(act.columns)])
+        with c2:
+            st.subheader("Latest minutes")
+            st.dataframe(act.tail(8).sort_index(ascending=False), height=260)
 
-    col1, col2 = st.columns(2)
+    c1, c2 = st.columns(2)
 
-    with col1:
-        st.subheader("Submissions per day")
+    with c1:
+        st.subheader("Submissions by intent · per day")
         submissions = load_ledger(wallet)
         if submissions:
             sub_df = pd.DataFrame(submissions)
@@ -697,33 +742,35 @@ with tab_charts:
             ).dt.date
             sub_df["kind"] = sub_df["intent_id"].str.split(":").str[0]
             pivot = sub_df.groupby(["day", "kind"]).size().unstack(fill_value=0)
-            st.bar_chart(pivot)
+            st.bar_chart(
+                pivot, color=dashboard_theme.CHART_COLORS[: len(pivot.columns)]
+            )
         else:
             st.info("No ledger submissions")
 
-    with col2:
-        st.subheader("Watch set funding (SOL)")
+    with c2:
+        st.subheader("Watch set funding · SOL")
         watch = load_watch_set()
         snaps = {
             m[:8]: {
-                "virtual SOL": s.get("virtual_sol", 0) / 1e9,
-                "real SOL": s.get("real_sol", 0) / 1e9,
+                "virtual": s.get("virtual_sol", 0) / 1e9,
+                "real": s.get("real_sol", 0) / 1e9,
             }
             for m, s in watch.items()
             if isinstance(s, dict)
         }
         if snaps:
-            st.bar_chart(pd.DataFrame(snaps).T)
+            st.bar_chart(pd.DataFrame(snaps).T, color=["#3b82f6", "#22c55e"])
         else:
             st.info("Watch set empty")
 
-    st.subheader("Position sizes (tokens per buy)")
+    st.subheader("Buy sizes · tokens per attempt")
     pos = load_positions()
     if not pos.empty:
         hist = pos["tokens"].pipe(lambda s: pd.cut(s, bins=15))
         counts = hist.value_counts().sort_index()
         counts.index = counts.index.astype(str)
-        st.bar_chart(counts)
+        st.bar_chart(counts, color="#f59e0b")
     else:
         st.info("No buy attempts in recent logs")
 

@@ -1793,6 +1793,7 @@ def _lifecycle_trader(*, yolo_mode: bool) -> UniversalTrader:
     trader.processed_tokens = set()
     trader.token_timestamps = {}
     trader.solana_client = SimpleNamespace(get_health=AsyncMock(return_value="ok"))
+    trader.execution_policy = ExecutionPolicy(mode=ExecutionMode.DRY_RUN)
     trader._write_recovery_journal = lambda: None
 
     async def process_queue() -> None:
