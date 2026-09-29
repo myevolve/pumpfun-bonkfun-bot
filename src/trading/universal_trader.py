@@ -451,7 +451,9 @@ class UniversalTrader:
         # Learning (optional): per-transaction lesson journal with optional
         # Jev scoring. Both fail open (disabled) without configuration.
         self.lesson_journal = LessonJournal()
-        self.jev_scorer = JevScorer()
+        self.jev_scorer = JevScorer(
+            env_file=Path(".state/configs/typesafe.env")
+        )
 
         # State tracking
         self.traded_mints: set[Pubkey] = set()

@@ -199,18 +199,22 @@ def _to_int(*, v: bool | None) -> int | None:
 
 
 def _score_of(jev: dict[str, Any] | None, key: str) -> float | None:
+    """Accept either the flat {'quality': 2.1} dict score_candidate returns
+    or a raw API answer object {'quality': {'score': 2.1}}."""
     if not jev:
         return None
-    ans = jev.get(key) or {}
-    value = ans.get("score")
+    value = jev.get(key)
+    if isinstance(value, dict):
+        value = value.get("score")
     return float(value) if isinstance(value, int | float) else None
 
 
 def _prob_of(jev: dict[str, Any] | None, key: str) -> float | None:
     if not jev:
         return None
-    ans = jev.get(key) or {}
-    value = ans.get("bool")
+    value = jev.get(key)
+    if isinstance(value, dict):
+        value = value.get("bool") or value.get("noul")
     return float(value) if isinstance(value, int | float) else None
 
 
