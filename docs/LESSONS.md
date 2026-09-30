@@ -84,8 +84,11 @@ outcome PnL on resolved fills.
 Jev enters the live entry gate only when `pnl_by_quality` shows high
 scores (>=0.6) systematically outperforming low scores (<=0.4) on a
 sample large enough to trust (target: >=50 resolved outcomes per bucket,
-stable across separate windows). Current sample: n=10, all low-quality
-buckets negative, high buckets mixed — **insufficient, not promoting.**
+stable across separate windows). Current sample: n=26 resolved (2026-09-30
+mayhem window): 23% winners, avg **-0.0059 SOL**, total -0.154 SOL. Every
+high-quality bucket (0.6-1.1) is negative; the -100% exits are the
+manufactured-dump pattern. Direction matches the held-out research —
+**insufficient sample to conclude, but no positive signal; not promoting.**
 
 10. **A hung startup looks identical to a running bot from outside.**
     The 12:55 run churned httpx RPC calls for 7+ hours with zero trader
