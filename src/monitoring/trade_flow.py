@@ -278,6 +278,7 @@ class TradeFlowHub:
         self.queue_size = queue_size
         self._subscribers: dict[str, list[asyncio.Queue[TradeEvent]]] = {}
         self.dropped = 0
+        self._latest_events: dict[str, TradeEvent] = {}
         self.migration_hub = migration_hub
         # Strong refs: the loop holds only weak refs to tasks.
         self._migration_tasks: set[asyncio.Task[None]] = set()
@@ -313,6 +314,7 @@ class TradeFlowHub:
                 idl_parser=self.idl_parser,
                 mints=set(self._subscribers),
             ):
+                self._latest_events[event.mint] = event
                 for queue in self._subscribers.get(event.mint, ()):
                     try:
                         queue.put_nowait(event)
@@ -322,6 +324,14 @@ class TradeFlowHub:
         return delivered + self._publish_migrations(
             logs, slot=slot, signature=signature
         )
+
+    def latest_price(self, mint: str) -> float | None:
+        """Most recent SOL-per-token price from decoded trades, if any.
+        Derived from the event's own reserves; None before the first trade."""
+        event = self._latest_events.get(mint)
+        if event is None or event.real_token_reserves <= 0:
+            return None
+        return (event.real_sol_reserves / 1e9) / (event.real_token_reserves / 1e6)
 
     def _publish_migrations(self, logs: list[str], *, slot: int, signature: str) -> int:
         """Decode and schedule migration-event fan-out; contained, never raises."""

@@ -405,6 +405,7 @@ class UniversalTrader:
             self.token_listener.trade_hub = self.trade_hub
         self._gate_queues: dict[str, asyncio.Queue[TradeEvent]] = {}
         self._listener_task: asyncio.Task | None = None
+        self._paper_entry_price: dict[str, float] = {}
         self._buy_attempts = 0
         self._oneshot_found: TokenInfo | None = None
         self._oneshot_event = asyncio.Event()
@@ -451,9 +452,7 @@ class UniversalTrader:
         # Learning (optional): per-transaction lesson journal with optional
         # Jev scoring. Both fail open (disabled) without configuration.
         self.lesson_journal = LessonJournal()
-        self.jev_scorer = JevScorer(
-            env_file=Path(".state/configs/typesafe.env")
-        )
+        self.jev_scorer = JevScorer(env_file=Path(".state/configs/typesafe.env"))
 
         # State tracking
         self.traded_mints: set[Pubkey] = set()
@@ -1881,6 +1880,7 @@ class UniversalTrader:
                             break
                         if token_info is None:
                             break
+                        attempts_before_token = getattr(self, "_buy_attempts", 0)
                         handled = False
                         try:
                             handled = await self._handle_token(token_info)
@@ -1890,17 +1890,33 @@ class UniversalTrader:
                         if (
                             self.execution_policy.mode is ExecutionMode.DRY_RUN
                             and handled
+                            and getattr(self, "_buy_attempts", 0)
+                            > attempts_before_token
                             and token_key_check not in self._active_positions
                             and token_key_check not in self._unresolved_buys
                             and not self._position_monitor_tasks
                         ):
                             # Paper fill: dry-run gate blocked the buy (or the
-                            # sell leg). Log it and keep scanning — the one-shot
-                            # exit is for real fills only.
+                            # sell leg). Log it, schedule a +60s re-price as the
+                            # simulated exit outcome, and keep scanning — the
+                            # one-shot exit is for real fills only.
                             logger.info(
                                 "Paper fill complete for %s; continuing scan",
                                 token_info.symbol,
                             )
+                            hub = getattr(self, "trade_hub", None)
+                            entry_price = (
+                                hub.latest_price(token_key_check)
+                                if hub is not None
+                                else None
+                            )
+                            if entry_price:
+                                self._paper_entry_price[token_key_check] = entry_price
+                            sampler = asyncio.create_task(
+                                self._paper_fill_outcome(token_info)
+                            )
+                            self._position_tasks.add(sampler)
+                            sampler.add_done_callback(self._position_tasks.discard)
                             continue
                         if str(token_info.mint) in self._unresolved_buys:
                             await self._await_unresolved_buy_resolution(
@@ -2394,6 +2410,57 @@ class UniversalTrader:
                     self._inflight_tokens.pop(str(token_info.mint), None)
                     self._finish_token_reservation(token_info, handled)
                     self.token_queue.task_done()
+
+    _PAPER_EXIT_DELAY_S = 60
+
+    async def _paper_fill_outcome(self, token_info: TokenInfo) -> None:
+        """Simulated exit for a dry-run paper fill: re-read the curve ~60s
+        after entry and journal the price delta as the outcome. Entry price
+        comes from the trade hub (SOL per token at the last decoded trade);
+        the exit from a fresh curve read in the same units. Best-effort: a
+        failed read leaves the outcome open, never fakes it."""
+        mint_key = str(token_info.mint)
+        entry_price = self._paper_entry_price.pop(mint_key, None)
+        if entry_price is None:
+            return
+        try:
+            await asyncio.sleep(self._PAPER_EXIT_DELAY_S)
+            curve_manager = getattr(
+                getattr(self, "platform_implementations", None),
+                "curve_manager",
+                None,
+            )
+            get_state = getattr(curve_manager, "get_sell_state_and_token_program", None)
+            pool_key = token_info.bonding_curve or token_info.pool_state
+            if not callable(get_state) or pool_key is None:
+                return
+            state, _ = await get_state(
+                pool_key, token_info.mint, commitment="processed"
+            )
+            real_sol = state.get("real_sol_reserves")
+            real_token = state.get("real_token_reserves")
+            if not real_sol or not real_token:
+                return
+            exit_price = (real_sol / 1e9) / (real_token / 1e6)
+            pnl_frac = (exit_price - entry_price) / entry_price
+            if self.lesson_journal is not None:
+                # 0.01 SOL entry convention: outcome in SOL terms.
+                self.lesson_journal.link_outcome(
+                    mint_key,
+                    pnl_sol=0.01 * pnl_frac,
+                    reason=f"paper_exit_{self._PAPER_EXIT_DELAY_S}s",
+                )
+            logger.info(
+                "Paper exit %s: entry %.3e -> exit %.3e (%+.1f%%)",
+                token_info.symbol,
+                entry_price,
+                exit_price,
+                pnl_frac * 100,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Paper outcome sampling failed (non-fatal)")
 
     async def _handle_token(self, token_info: TokenInfo) -> bool:
         """Handle a token, returning true only after resolved handling."""

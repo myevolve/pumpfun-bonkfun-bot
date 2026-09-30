@@ -144,7 +144,7 @@ class LessonJournal:
         try:
             row = self._conn.execute(
                 "SELECT id FROM lessons WHERE mint=? AND kind IN"
-                " ('paper_fill','buy') AND outcome_utc IS NULL"
+                " ('gate_pass','paper_fill','buy') AND outcome_utc IS NULL"
                 " ORDER BY id DESC LIMIT 1",
                 (mint,),
             ).fetchone()
@@ -165,9 +165,7 @@ class LessonJournal:
         out: dict[str, Any] = {}
         out["total"] = cur.execute("SELECT COUNT(*) FROM lessons").fetchone()[0]
         out["by_kind"] = dict(
-            cur.execute(
-                "SELECT kind, COUNT(*) FROM lessons GROUP BY kind"
-            ).fetchall()
+            cur.execute("SELECT kind, COUNT(*) FROM lessons GROUP BY kind").fetchall()
         )
         resolved = cur.execute(
             "SELECT COUNT(*) FROM lessons WHERE outcome_pnl_sol IS NOT NULL"

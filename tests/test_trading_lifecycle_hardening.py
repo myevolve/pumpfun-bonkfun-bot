@@ -2753,6 +2753,46 @@ async def test_single_shot_keeps_listening_past_gate_skips_until_a_buy() -> None
     trader._cleanup_resources.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_paper_fill_continues_and_gate_skip_does_not_schedule_sampler() -> None:
+    """Dry-run: a blocked buy (paper fill) keeps scanning and schedules a
+    simulated exit; a plain gate skip neither continues the scan loop nor
+    schedules an outcome sampler."""
+    trader = _lifecycle_trader(yolo_mode=False)
+    trader.token_wait_timeout = 5
+    trader._buy_attempts = 0
+    trader.trade_hub = None
+    trader._paper_entry_price = {}
+    tokens = [_token(Platform.LETS_BONK) for _ in range(3)]
+    served = iter([*tokens, None, None, None])
+    handled_symbols: list[str] = []
+    samplers: list[str] = []
+
+    async def wait_for_token() -> TokenInfo:
+        return next(served)
+
+    async def handle_token(token_info: TokenInfo) -> bool:
+        handled_symbols.append(str(token_info.mint))
+        if len(handled_symbols) == 1:
+            trader._buy_attempts += 1  # blocked at the submission gate
+            return True
+        return True  # plain gate skip
+
+    async def paper_outcome(token_info: TokenInfo) -> None:
+        samplers.append(str(token_info.mint))
+
+    trader._wait_for_token = wait_for_token
+    trader._handle_token = handle_token
+    trader._finish_token_reservation = lambda token_info, handled: None
+    trader._cleanup_resources = AsyncMock()
+    trader._paper_fill_outcome = paper_outcome
+
+    await asyncio.wait_for(trader.start(), 3)
+
+    assert samplers == [str(tokens[0].mint)]
+    assert trader._cleanup_resources.await_count == 1
+
+
 def test_failed_pending_recovery_keeps_reservation() -> None:
     trader = object.__new__(UniversalTrader)
     token = _token(Platform.LETS_BONK)
@@ -3636,3 +3676,49 @@ async def test_emergency_exit_reconciles_pending_signature_without_resubmitting(
     assert str(token.mint) not in trader._active_positions
     trader.seller.execute.assert_not_awaited()
     cleanup_after_sell.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_paper_fill_outcome_links_journal_result() -> None:
+    """The +60s sampler re-prices the curve and links the realized delta
+    back to the fill's lesson row."""
+    import types
+
+    from learning.journal import LessonJournal, LessonObservation
+
+    trader = object.__new__(UniversalTrader)
+    trader.execution_policy = ExecutionPolicy(mode=ExecutionMode.DRY_RUN)
+    token = _token(Platform.LETS_BONK)
+    mint_key = str(token.mint)
+
+    journal = LessonJournal(":memory:")
+    trader.lesson_journal = journal
+    trader.jev_scorer = None
+    trader._paper_entry_price = {mint_key: 2e-8}
+    trader._PAPER_EXIT_DELAY_S = 0
+
+    class FakeCurve:
+        async def get_sell_state_and_token_program(self, curve, mint, commitment=None):
+            return (
+                {
+                    "real_sol_reserves": 200_000_000,
+                    "real_token_reserves": 5_000_000_000,
+                },
+                object(),
+            )
+
+    trader.platform_implementations = types.SimpleNamespace(curve_manager=FakeCurve())
+
+    journal.record(
+        LessonObservation(kind="gate_pass", mint=mint_key, symbol=token.symbol)
+    )
+    await trader._paper_fill_outcome(token)
+
+    row = journal._conn.execute(
+        "SELECT outcome_pnl_sol, outcome_reason FROM lessons WHERE mint=?",
+        (mint_key,),
+    ).fetchone()
+    # entry 2e-8; exit = 0.2 SOL / 5000 tokens = 4e-8 -> +100% -> +0.01 SOL
+    assert row[0] is not None and row[0] > 0
+    assert row[1] == "paper_exit_0s"  # delay overridden to 0 in this test
+    journal.close()
