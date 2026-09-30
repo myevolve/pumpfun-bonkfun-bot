@@ -1926,7 +1926,8 @@ class UniversalTrader:
                         token_key = str(token_info.mint)
                         skipped = (
                             handled
-                            and getattr(self, "_buy_attempts", 0) == attempts_before
+                            and getattr(self, "_buy_attempts", 0)
+                            == attempts_before_token
                             and token_key not in self._active_positions
                             and token_key not in self._unresolved_buys
                             and not self._position_monitor_tasks
@@ -2431,9 +2432,7 @@ class UniversalTrader:
                 "curve_manager",
                 None,
             )
-            get_state = getattr(
-                curve_manager, "get_sell_state_and_token_program", None
-            )
+            get_state = getattr(curve_manager, "get_sell_state_and_token_program", None)
             pool_key = token_info.bonding_curve or token_info.pool_state
             if not callable(get_state):
                 logger.info("Paper outcome %s: no curve re-pricer", token_info.symbol)

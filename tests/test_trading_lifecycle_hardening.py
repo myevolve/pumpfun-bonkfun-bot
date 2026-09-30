@@ -2763,6 +2763,8 @@ async def test_paper_fill_continues_and_gate_skip_does_not_schedule_sampler() ->
     trader._buy_attempts = 0
     trader.trade_hub = None
     trader._paper_entry_price = {}
+    # Fill FIRST, then skips: the live failure mode. A hoisted attempt
+    # baseline made every post-fill skip look like a buy and ended the run.
     tokens = [_token(Platform.LETS_BONK) for _ in range(3)]
     served = iter([*tokens, None, None, None])
     handled_symbols: list[str] = []
@@ -2789,6 +2791,9 @@ async def test_paper_fill_continues_and_gate_skip_does_not_schedule_sampler() ->
 
     await asyncio.wait_for(trader.start(), 3)
 
+    # All three handled: the fill continues past, and post-fill skips keep
+    # scanning (the hoisted-baseline bug ended the run right after a fill).
+    assert handled_symbols == [str(t.mint) for t in tokens]
     assert samplers == [str(tokens[0].mint)]
     assert trader._cleanup_resources.await_count == 1
 
