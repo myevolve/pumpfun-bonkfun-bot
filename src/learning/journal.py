@@ -99,6 +99,8 @@ class LessonJournal:
         path = Path(db_path) if db_path is not None else _DEFAULT_DB
         path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(path))
+        # WAL lets the dashboard and report CLI read while the bot writes.
+        self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
 
