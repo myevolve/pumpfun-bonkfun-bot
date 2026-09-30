@@ -206,6 +206,45 @@ def load_positions() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+LESSON_DB = Path(".state/learning/lessons.sqlite3")
+
+
+@st.cache_data(ttl=10)
+def load_learning_stats() -> dict:
+    """Lesson journal summary: counts + Jev-vs-PnL evidence."""
+    if not LESSON_DB.exists():
+        return {}
+    conn = sqlite3.connect(str(LESSON_DB))
+    try:
+        out: dict = {}
+        out["total"] = conn.execute("SELECT COUNT(*) FROM lessons").fetchone()[0]
+        out["by_kind"] = dict(
+            conn.execute("SELECT kind, COUNT(*) FROM lessons GROUP BY kind")
+        )
+        out["scored"] = conn.execute(
+            "SELECT COUNT(*) FROM lessons WHERE jev_quality IS NOT NULL"
+        ).fetchone()[0]
+        out["resolved"] = conn.execute(
+            "SELECT COUNT(*) FROM lessons WHERE outcome_pnl_sol IS NOT NULL"
+        ).fetchone()[0]
+        out["pnl_by_quality"] = conn.execute(
+            "SELECT CAST(jev_quality AS INT) AS q, COUNT(*),"
+            " ROUND(AVG(outcome_pnl_sol), 8), ROUND(SUM(outcome_pnl_sol), 8)"
+            " FROM lessons WHERE outcome_pnl_sol IS NOT NULL"
+            " AND jev_quality IS NOT NULL GROUP BY q ORDER BY q"
+        ).fetchall()
+        out["recent"] = conn.execute(
+            "SELECT utc, kind, symbol, decision, jev_quality, jev_copycat,"
+            " outcome_pnl_sol, outcome_reason FROM lessons"
+            " ORDER BY id DESC LIMIT 40"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    finally:
+        conn.close()
+    return out
+
+
 # ─── Process control ─────────────────────────────────────────────────────────
 
 
@@ -649,8 +688,8 @@ with st.sidebar:
 
 # ─── Tabs ────────────────────────────────────────────────────────────────────
 
-tab_overview, tab_charts, tab_trades, tab_watch, tab_logs = st.tabs(
-    ["📊 Overview", "📈 Charts", "💱 Trades", "🔍 LetsBonk Watch", "📋 Logs"]
+tab_overview, tab_charts, tab_learning, tab_trades, tab_watch, tab_logs = st.tabs(
+    ["📊 Overview", "📈 Charts", "🧠 Learning", "💱 Trades", "🔍 Watch", "📋 Logs"]
 )
 
 # ─── Overview tab ────────────────────────────────────────────────────────────
@@ -792,6 +831,67 @@ with tab_charts:
         st.bar_chart(counts, color="#f59e0b")
     else:
         st.info("No buy attempts in recent logs")
+
+# ─── Learning tab ────────────────────────────────────────────────────────────
+
+with tab_learning:
+    st.subheader("Learning journal — does Jev predict outcomes?")
+    lstats = load_learning_stats()
+    if not lstats:
+        st.info(
+            "No lesson journal found (.state/learning/lessons.sqlite3). "
+            "Run the bot — every gate decision, fill, and exit lands here."
+        )
+    else:
+        l1, l2, l3, l4 = st.columns(4)
+        with l1:
+            st.metric("Lessons", lstats["total"])
+        with l2:
+            st.metric("Jev-scored", lstats["scored"])
+        with l3:
+            st.metric("Resolved outcomes", lstats["resolved"])
+        with l4:
+            skips = lstats["by_kind"].get("gate_skip", 0)
+            passes = lstats["by_kind"].get("gate_pass", 0)
+            st.metric("Pass / skip", f"{passes} / {skips}")
+
+        if lstats["resolved"] == 0:
+            st.info(
+                "No resolved outcomes yet. Paper fills resolve ~60s after "
+                "the fill (curve re-read); they only occur when the gate "
+                "accepts a coin (mayhem + real buyers). Live trades resolve "
+                "on exit."
+            )
+
+        if lstats["pnl_by_quality"]:
+            st.subheader("Realized PnL by Jev quality score")
+            st.caption(
+                "Each row: Jev score bucket → count, avg PnL, total PnL "
+                "(SOL). High buckets losing while low buckets win means Jev "
+                "has no edge here — do not promote it to the live gate."
+            )
+            qdf = pd.DataFrame(
+                lstats["pnl_by_quality"],
+                columns=["jev score", "count", "avg pnl (SOL)", "total pnl (SOL)"],
+            ).set_index("jev score")
+            st.dataframe(qdf, width="stretch")
+            st.bar_chart(qdf["avg pnl (SOL)"], color="#3b82f6")
+
+        st.subheader("Recent lessons")
+        rdf = pd.DataFrame(
+            lstats["recent"],
+            columns=[
+                "utc",
+                "kind",
+                "symbol",
+                "decision",
+                "jev_quality",
+                "jev_copycat",
+                "outcome_pnl_sol",
+                "outcome_reason",
+            ],
+        )
+        st.dataframe(rdf, width="stretch", height=420)
 
 # ─── Trades tab ──────────────────────────────────────────────────────────────
 
