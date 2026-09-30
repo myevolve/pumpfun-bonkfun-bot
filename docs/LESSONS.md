@@ -87,6 +87,14 @@ sample large enough to trust (target: >=50 resolved outcomes per bucket,
 stable across separate windows). Current sample: n=10, all low-quality
 buckets negative, high buckets mixed — **insufficient, not promoting.**
 
+10. **A hung startup looks identical to a running bot from outside.**
+    The 12:55 run churned httpx RPC calls for 7+ hours with zero trader
+    output - never connected the geyser, never started the trader. pgrep
+    (the keeper's check) sees a live process and does nothing. Fix: the
+    keeper also checks log staleness - if the newest run log grew in the
+    last 5 minutes but contains no non-httpx lines, kill and restart.
+    (2026-09-30 12:54 incident, keeper.log)
+
 ## Current system (as of this document)
 
 - Paper bot alive under keeper (auto-restarts on 600s budget), instrumented
