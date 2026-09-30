@@ -2422,6 +2422,7 @@ class UniversalTrader:
         mint_key = str(token_info.mint)
         entry_price = self._paper_entry_price.pop(mint_key, None)
         if entry_price is None:
+            logger.info("Paper outcome %s: no entry price captured", token_info.symbol)
             return
         try:
             await asyncio.sleep(self._PAPER_EXIT_DELAY_S)
@@ -2430,9 +2431,15 @@ class UniversalTrader:
                 "curve_manager",
                 None,
             )
-            get_state = getattr(curve_manager, "get_sell_state_and_token_program", None)
+            get_state = getattr(
+                curve_manager, "get_sell_state_and_token_program", None
+            )
             pool_key = token_info.bonding_curve or token_info.pool_state
-            if not callable(get_state) or pool_key is None:
+            if not callable(get_state):
+                logger.info("Paper outcome %s: no curve re-pricer", token_info.symbol)
+                return
+            if pool_key is None:
+                logger.info("Paper outcome %s: no pool key", token_info.symbol)
                 return
             state, _ = await get_state(
                 pool_key, token_info.mint, commitment="processed"
@@ -2440,6 +2447,10 @@ class UniversalTrader:
             real_sol = state.get("real_sol_reserves")
             real_token = state.get("real_token_reserves")
             if not real_sol or not real_token:
+                logger.info(
+                    "Paper outcome %s: curve drained or unreadable",
+                    token_info.symbol,
+                )
                 return
             exit_price = (real_sol / 1e9) / (real_token / 1e6)
             pnl_frac = (exit_price - entry_price) / entry_price
