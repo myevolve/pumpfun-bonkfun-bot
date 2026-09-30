@@ -276,7 +276,7 @@ class JevScorer:
                     "quality": {
                         "type": "score",
                         "instructions": (
-                            "Rate this pump.fun snipe candidate 0-4 on launch "
+                            "Rate this pump.fun snipe candidate on launch "
                             "quality. state.token has name/symbol/mayhem; "
                             "state.gate has buyers (distinct non-creator "
                             "buyers so far), real_sol (SOL on the curve), "

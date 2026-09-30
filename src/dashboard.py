@@ -228,7 +228,7 @@ def load_learning_stats() -> dict:
             "SELECT COUNT(*) FROM lessons WHERE outcome_pnl_sol IS NOT NULL"
         ).fetchone()[0]
         out["pnl_by_quality"] = conn.execute(
-            "SELECT CAST(jev_quality AS INT) AS q, COUNT(*),"
+            "SELECT ROUND(jev_quality, 1) AS q, COUNT(*),"
             " ROUND(AVG(outcome_pnl_sol), 8), ROUND(SUM(outcome_pnl_sol), 8)"
             " FROM lessons WHERE outcome_pnl_sol IS NOT NULL"
             " AND jev_quality IS NOT NULL GROUP BY q ORDER BY q"

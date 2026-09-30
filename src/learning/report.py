@@ -21,10 +21,10 @@ from pathlib import Path
 
 DB = Path(".state/learning/lessons.sqlite3")
 
-# Jev promotion thresholds: scores in [HI_MIN, 4] are "high", [0, LO_MAX]
-# are "low". The promotion verdict compares realized PnL across the two.
-HI_MIN = 3
-LO_MAX = 1
+# Jev promotion thresholds on the observed 0-1 quality scale: >= HI_MIN is
+# "high", <= LO_MAX is "low". The verdict compares realized PnL across the two.
+HI_MIN = 0.6
+LO_MAX = 0.4
 
 
 def _load(limit: int) -> dict:
@@ -52,7 +52,7 @@ def _load(limit: int) -> dict:
         out["pnl_by_quality"] = [
             dict(r)
             for r in conn.execute(
-                "SELECT CAST(jev_quality AS INT) AS q, COUNT(*) AS n,"
+                "SELECT ROUND(jev_quality, 1) AS q, COUNT(*) AS n,"
                 " ROUND(AVG(outcome_pnl_sol), 8) AS avg_pnl,"
                 " ROUND(SUM(outcome_pnl_sol), 8) AS total_pnl"
                 " FROM lessons WHERE outcome_pnl_sol IS NOT NULL"
