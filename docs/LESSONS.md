@@ -70,6 +70,15 @@ uncertain is marked. Update this file when the evidence changes.
    above because decisions, fills, and outcomes land in SQLite with Jev
    annotations — no memory, no vibes.
 
+## Jev-vs-gate correlation (2026-09-30, n=5,864 scored lessons)
+
+Accepted coins (buyers_present) average jev_quality **0.897**; skipped
+cohorts average 0.33-0.48. This correlation is **expected and partially
+circular**: the scorer's prompt includes the gate state (buyers, real_sol)
+that also drives the accept decision. It is NOT independent evidence of
+predictive power. The only admissible test remains jev_quality vs realized
+outcome PnL on resolved fills.
+
 ## The Jev promotion rule (unchanged until evidence says otherwise)
 
 Jev enters the live entry gate only when `pnl_by_quality` shows high
