@@ -1,0 +1,179 @@
+"""Learning report: turn the lesson journal into actionable evidence.
+
+Read-only. Prints what the journal has learned so far and whether Jev
+quality scores predict realized outcomes. The promotion decision for
+Jev-in-the-gate comes from the pnl_by_quality table once enough outcomes
+resolve - this report is the CLI surface for that evidence.
+
+Usage:
+    uv run python -m learning.report            # summary
+    uv run python -m learning.report --json     # machine-readable
+    uv run python -m learning.report --limit 20 # more recent lessons
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+DB = Path(".state/learning/lessons.sqlite3")
+
+# Jev promotion thresholds: scores in [HI_MIN, 4] are "high", [0, LO_MAX]
+# are "low". The promotion verdict compares realized PnL across the two.
+HI_MIN = 3
+LO_MAX = 1
+
+
+def _load(limit: int) -> dict:
+    if not DB.exists():
+        return {"error": f"no journal at {DB} - run the bot first"}
+    conn = sqlite3.connect(str(DB))
+    conn.row_factory = sqlite3.Row
+    try:
+        out: dict = {}
+        out["total"] = conn.execute("SELECT COUNT(*) FROM lessons").fetchone()[0]
+        out["by_kind"] = {
+            r["kind"]: r["n"]
+            for r in conn.execute(
+                "SELECT kind, COUNT(*) AS n FROM lessons GROUP BY kind"
+            )
+        }
+        out["scored"] = conn.execute(
+            "SELECT COUNT(*) FROM lessons WHERE jev_quality IS NOT NULL"
+        ).fetchone()[0]
+        out["resolved"] = conn.execute(
+            "SELECT COUNT(*) FROM lessons WHERE outcome_pnl_sol IS NOT NULL"
+        ).fetchone()[0]
+
+        # Jev-vs-outcome evidence: the promotion table
+        out["pnl_by_quality"] = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT CAST(jev_quality AS INT) AS q, COUNT(*) AS n,"
+                " ROUND(AVG(outcome_pnl_sol), 8) AS avg_pnl,"
+                " ROUND(SUM(outcome_pnl_sol), 8) AS total_pnl"
+                " FROM lessons WHERE outcome_pnl_sol IS NOT NULL"
+                " AND jev_quality IS NOT NULL GROUP BY q ORDER BY q"
+            )
+        ]
+
+        # Copycat cohort: do flagged coins fare worse?
+        out["pnl_by_copycat"] = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT CASE WHEN jev_copycat >= 0.8 THEN 'copycat(>=0.8)'"
+                " WHEN jev_copycat < 0.2 THEN 'organic(<0.2)'"
+                " ELSE 'mixed' END AS cohort, COUNT(*) AS n,"
+                " ROUND(AVG(outcome_pnl_sol), 8) AS avg_pnl"
+                " FROM lessons WHERE outcome_pnl_sol IS NOT NULL"
+                " AND jev_copycat IS NOT NULL GROUP BY cohort"
+            )
+        ]
+
+        # Skip reason distribution - where does the gate spend its rejections?
+        out["skip_reasons"] = {
+            r["decision"]: r["n"]
+            for r in conn.execute(
+                "SELECT decision, COUNT(*) AS n FROM lessons"
+                " WHERE kind='gate_skip' GROUP BY decision ORDER BY n DESC"
+            )
+        }
+
+        out["recent"] = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT utc, kind, symbol, decision, jev_quality, jev_copycat,"
+                " outcome_pnl_sol, outcome_reason FROM lessons"
+                " ORDER BY id DESC LIMIT ?",
+                (limit,),
+            )
+        ]
+        return out
+    finally:
+        conn.close()
+
+
+def _render(data: dict) -> None:
+    if "error" in data:
+        print(data["error"])
+        return
+    print("=== Learning journal ===")
+    print(
+        f"lessons: {data['total']}  (jev-scored: {data['scored']},"
+        f" resolved outcomes: {data['resolved']})"
+    )
+    print(f"by kind: {data['by_kind']}")
+    print("\n--- gate skip reasons (where rejections go) ---")
+    for reason, n in list(data["skip_reasons"].items())[:6]:
+        print(f"  {n:6d}  {reason}")
+
+    if not data["resolved"]:
+        print(
+            "\nNo resolved outcomes yet - evidence tables appear when"
+            " paper fills resolve (~60s after a gate accept) or live"
+            " trades exit."
+        )
+        print("Keep the bot running through a mayhem window.")
+        return
+
+    print("\n--- PnL by Jev quality (promotion evidence) ---")
+    print(f"{'score':>6} {'n':>6} {'avg pnl SOL':>14} {'total':>12}")
+    for row in data["pnl_by_quality"]:
+        print(
+            f"{row['q']:>6} {row['n']:>6} {row['avg_pnl']:>14} {row['total_pnl']:>12}"
+        )
+    hi = [r for r in data["pnl_by_quality"] if r["q"] >= HI_MIN]
+    lo = [r for r in data["pnl_by_quality"] if r["q"] <= LO_MAX]
+    hi_pnl = sum(r["total_pnl"] for r in hi)
+    lo_pnl = sum(r["total_pnl"] for r in lo)
+    hi_n = sum(r["n"] for r in hi)
+    lo_n = sum(r["n"] for r in lo)
+    if hi_n and lo_n:
+        verdict = (
+            "Jev predictive: high scores outperform low scores"
+            if hi_pnl / hi_n > lo_pnl / lo_n
+            else "Jev NOT predictive on this sample"
+        )
+        print(f"\nverdict ({hi_n} hi vs {lo_n} lo outcomes): {verdict}")
+        print(
+            "Promote Jev into the live gate ONLY if the sample is large"
+            " enough to trust - see learning-examples held-out discipline."
+        )
+
+    if data["pnl_by_copycat"]:
+        print("\n--- PnL by copycat cohort ---")
+        for row in data["pnl_by_copycat"]:
+            print(f"  {row['cohort']:>15} n={row['n']}  avg={row['avg_pnl']}")
+
+    print(f"\n--- last {len(data['recent'])} lessons ---")
+    for r in data["recent"]:
+        score = f"{r['jev_quality']:.2f}" if r["jev_quality"] is not None else "-"
+        outcome = (
+            f"{r['outcome_pnl_sol']:+.6f}"
+            if r["outcome_pnl_sol"] is not None
+            else "open"
+        )
+        print(
+            f"  {r['utc'][11:19]} {r['kind']:<10} {str(r['symbol'])[:12]:<12}"
+            f" q={score} {r['decision'] or '-':<16} {outcome:>10}"
+        )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--json", action="store_true", help="emit JSON")
+    parser.add_argument("--limit", type=int, default=15, help="recent rows")
+    args = parser.parse_args()
+    data = _load(args.limit)
+    if args.json:
+        print(json.dumps(data, indent=1, default=str))
+    else:
+        _render(data)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
