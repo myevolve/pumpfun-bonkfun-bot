@@ -120,7 +120,12 @@ independent jevbench calibration study.
    band as a gate amendment (currently min_real_sol=0.1, max=0.5 - a
    0.30-0.43 band would be narrower and needs its own held-out window).
    Not promoted - exploratory only, one split, no held-out confirmation.
-   HELD-OUT RESULT (2026-10-01, +137 new outcomes): FAILED. Q3 new avg
+   SYSTEMATIC MINER (2026-10-01, n=826 fills, 70/30 split): grid-searched
+   ALL features (real_sol, buyers, mayhem, all 5 Jev signals, hour) at
+   7 quantile thresholds x 2 directions. Result: **ZERO threshold rules
+   survive held-out**. The Q3 band was one instance of a universal
+   failure mode: any positive-on-train subset dies out-of-sample. The
+   mayhem-snipe substrate is exhausted at every measurable cut. Q3 new avg
    +0.0021 (27% win) vs non-Q3 new avg +0.0019 (21% win) - the band edge
    over non-Q3 collapsed to +0.0002/fill (noise). The new non-Q3 cohort
    itself turned positive (+0.0019 avg) - that positivity was mostly the
