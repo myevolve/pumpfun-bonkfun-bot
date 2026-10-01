@@ -120,6 +120,12 @@ independent jevbench calibration study.
    band as a gate amendment (currently min_real_sol=0.1, max=0.5 - a
    0.30-0.43 band would be narrower and needs its own held-out window).
    Not promoted - exploratory only, one split, no held-out confirmation.
+   HELD-OUT RESULT (2026-10-01, +137 new outcomes): FAILED. Q3 new avg
+   +0.0021 (27% win) vs non-Q3 new avg +0.0019 (21% win) - the band edge
+   over non-Q3 collapsed to +0.0002/fill (noise). The new non-Q3 cohort
+   itself turned positive (regime change from the negative evening
+   windows), erasing the comparative advantage. Same trap as the Jev
+   signals: exploratory structure -> regime shift -> nothing.
 3. **Calibration is the product.** buberlo logs (state, decision,
    outcome) triples and computes Brier/ECE/reliability, then Platt-scales
    thresholds to YOUR venue. Our journal already logs the triples; what's
