@@ -226,3 +226,20 @@ hypothesis holds in non-mayhem coins too.
 - Journal scale: ~5k-6k lessons/day, ~90% Jev-scored.
 - Wallet 9MFfWXdT…: 0.562180 SOL, zero real transactions — every submission
   still blocked at the dry-run gate.
+
+## Latency: mobile host vs GCP (2026-10-01, sealed 4572e45f)
+
+Same probes, three vantages (n=20-30 each): local mobile, Cloud Run
+us-central1, Cloud Run us-east1 (Chainstack node is us-east, 64.31.55.5).
+
+| Target | mobile p50/p95 | us-central1 | us-east1 |
+|---|---|---|---|
+| RPC getHealth | 188 / 978 ms | 96 / 169 | **68 / 133** |
+| Geyser TCP | 54 / 324 ms | 32 / 37 | **21 / 168** |
+| Jev API | 195 / 738 ms | 159 / 220 | 181 / 247 |
+
+Verdict: the mobile host has 2x median latency and 10x variance — the
+variance is what kills a 1.5s gate window (a 978ms p95 spike eats the
+whole budget randomly). If a strategy is ever promoted, deploy to
+Cloud Run us-east1 first. The paper/learning pipeline is
+latency-insensitive (60s-delayed outcomes) and ran fine from mobile.
