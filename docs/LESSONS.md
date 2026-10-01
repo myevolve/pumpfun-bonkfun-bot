@@ -107,6 +107,12 @@ independent jevbench calibration study.
    copycat +0.178 (borderline, CI +-0.16). Outlier-checked: one +0.33 SOL
    fill in the mid cohort inflates it; the all-scored population shows
    only +0.068. Watch, don't act.
+   n=499 scored-resolved / n=178 battery (2026-10-01): Pearson +0.045 but
+   Spearman -0.029 - the "correlation" is one +0.33 SOL outlier in the
+   mid band, not a monotone effect. Stable structure: mid copycat
+   (0.5-0.8) is the LEAST-BAD cohort (23% win, avg -0.0009, near
+   breakeven) vs extremes (17% win, avg -0.0035). No tradable edge; the
+   mid band merely avoids the worst dumps.
 3. **Calibration is the product.** buberlo logs (state, decision,
    outcome) triples and computes Brier/ECE/reliability, then Platt-scales
    thresholds to YOUR venue. Our journal already logs the triples; what's
