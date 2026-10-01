@@ -97,7 +97,15 @@ the 0.6 bucket (n=3) is positive. Approaching measurably anti-predictive.
 Win rate by bucket: 0.6: 33%, 0.7: 50%, 0.8: **12%**, 0.9: 30%,
 1.0: 20%, 1.1: **14%**. Mechanism hypothesis: coins rated 0.8+ are the
 ones that look impressive (credible names, visible momentum) - exactly
-the bait a manufactured dump optimizes for. **n=106 checkpoint review (2026-09-30):**
+the bait a manufactured dump optimizes for. **n=290 review (2026-10-01):** Pearson
+r(quality, pnl) = **+0.014** - ZERO correlation. The earlier -0.119
+inversion washed out with more data: the honest verdict is "uninformative"
+on this substrate. Avg pnl/fill: -0.0018 SOL (-18% on 0.01 entries).
+Report verdict logic hardened: it now refuses to compare cohorts until
+each side has >= 10 outcomes (the 288-vs-1 split made a "predictive"
+verdict off one lo outcome). Windows: 3 positive of 17, all small-n.
+
+**n=106 checkpoint review (2026-09-30):**
 r(quality, pnl) = **-0.119** (weak inverse). Every bucket 0.8-1.1
 negative; best buckets are the LOW ones (0.6: +0.0032). Only 2 of 12
 windows positive (04h +0.001, 21h +0.006), both small-n. **Jev: NOT

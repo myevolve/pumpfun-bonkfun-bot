@@ -23,6 +23,7 @@ DB = Path(".state/learning/lessons.sqlite3")
 
 # Jev promotion thresholds on the observed 0-1 quality scale: >= HI_MIN is
 # "high", <= LO_MAX is "low". The verdict compares realized PnL across the two.
+_MIN_COHORT_N = 10  # verdicts need at least this many outcomes per cohort
 HI_MIN = 0.6
 LO_MAX = 0.4
 
@@ -131,17 +132,20 @@ def _render(data: dict) -> None:
     lo_pnl = sum(r["total_pnl"] for r in lo)
     hi_n = sum(r["n"] for r in hi)
     lo_n = sum(r["n"] for r in lo)
-    if hi_n and lo_n:
+    if hi_n and lo_n and min(hi_n, lo_n) < _MIN_COHORT_N:
+        print(
+            f"\nverdict: INSUFFICIENT COHORT BALANCE ({hi_n} hi vs {lo_n}"
+            f" lo) - need >= {_MIN_COHORT_N} per side before any verdict."
+            " The gate only accepts high-scored coins, so the lo cohort"
+            " may never fill: compare buckets WITHIN the hi range instead."
+        )
+    elif hi_n and lo_n:
         verdict = (
             "Jev predictive: high scores outperform low scores"
             if hi_pnl / hi_n > lo_pnl / lo_n
             else "Jev NOT predictive on this sample"
         )
         print(f"\nverdict ({hi_n} hi vs {lo_n} lo outcomes): {verdict}")
-        print(
-            "Promote Jev into the live gate ONLY if the sample is large"
-            " enough to trust - see learning-examples held-out discipline."
-        )
 
     if data["pnl_by_copycat"]:
         print("\n--- PnL by copycat cohort ---")
