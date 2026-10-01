@@ -97,9 +97,15 @@ the 0.6 bucket (n=3) is positive. Approaching measurably anti-predictive.
 Win rate by bucket: 0.6: 33%, 0.7: 50%, 0.8: **12%**, 0.9: 30%,
 1.0: 20%, 1.1: **14%**. Mechanism hypothesis: coins rated 0.8+ are the
 ones that look impressive (credible names, visible momentum) - exactly
-the bait a manufactured dump optimizes for. **Still not promoting; if
-the inverse pattern holds past n=100, a jev_quality <= 0.6 filter is a
-testable gate amendment.**
+the bait a manufactured dump optimizes for. **n=106 checkpoint review (2026-09-30):**
+r(quality, pnl) = **-0.119** (weak inverse). Every bucket 0.8-1.1
+negative; best buckets are the LOW ones (0.6: +0.0032). Only 2 of 12
+windows positive (04h +0.001, 21h +0.006), both small-n. **Jev: NOT
+promoted** - at best uninformative, at worst mildly anti-predictive.
+Deeper verdict: the underlying strategy (mayhem snipe at creation,
++60s exit) loses -0.42% per fill on its own paper book (-0.449 SOL over
+106 fills), consistent with the held-out research. No Jev configuration
+rescues a negative-strategy substrate. Jev stays an observer.
 
 10. **A hung startup looks identical to a running bot from outside.**
     The 12:55 run churned httpx RPC calls for 7+ hours with zero trader
