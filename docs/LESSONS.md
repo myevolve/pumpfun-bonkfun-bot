@@ -79,6 +79,45 @@ that also drives the accept decision. It is NOT independent evidence of
 predictive power. The only admissible test remains jev_quality vs realized
 outcome PnL on resolved fills.
 
+## How the ecosystem uses Jev in trading (survey 2026-10-01)
+
+Sources: drillan's finance-project survey (updated 9/30), the reference
+jev-trader (jarrodwatts, 2.7k stars), buberlo/jev-trader (the rigorous
+Python redesign), jev-harness (confidence gates + shadow mode), and the
+independent jevbench calibration study.
+
+1. **"Jev judges, code executes" is universal.** Every serious project
+   keeps thresholds, sizing, risk vetoes and order placement in
+   deterministic code; Jev supplies only typed judgments over a compact
+   (<400-token) state snapshot. buberlo: "Jev should not own the trading
+   system. It should own selected judgments inside it."
+2. **The battery pattern.** One call, many ATOMIC questions (buberlo uses
+   six: regime, direction, toxic_flow, liquidity_stressed,
+   quote_environment, inventory_pressure), composed in a policy engine.
+   Our scorer asks two (quality, copycat) - the pattern says add
+   independent dimensions (early_rug_risk, momentum_quality,
+   liquidity_trap) rather than relying on one composite score.
+3. **Calibration is the product.** buberlo logs (state, decision,
+   outcome) triples and computes Brier/ECE/reliability, then Platt-scales
+   thresholds to YOUR venue. Our journal already logs the triples; what's
+   missing is Brier/ECE reporting and per-bucket reliability curves.
+   jevbench: Jev's ECE is 0.10-0.13 on public datasets - good but not
+   perfect; treat probabilities as features, verify on your own tape.
+4. **Independent benchmark (jevbench, n=500):** Jev accuracy 76-95%
+   across text-classification datasets, latency p50 ~380 ms (OpenRouter
+   hop), $0.02-0.08/1k. Beats gpt-5-mini on accuracy at 1/5 the cost;
+   loses to fine-tuned DistilBERT (as any zero-shot does). On
+   text-classification jobs Jev is a strong zero-shot; nothing in the
+   published benchmarks measures TRADING outcome prediction.
+5. **Shadow mode is standard.** jev-harness: log what you WOULD do before
+   changing live behavior. Our dry-run journal IS shadow mode; keep it.
+6. **Nobody publishes a profitable Jev trading result.** The survey's
+   pattern list ends with "no prediction-market, arbitrage or DeFi
+   projects" and every live desk is days old. Our n=290 zero-correlation
+   finding is consistent with the field's public state.
+
+## The Jev promotion rule (unchanged until evidence says otherwise)
+
 ## The Jev promotion rule (unchanged until evidence says otherwise)
 
 Jev enters the live entry gate only when `pnl_by_quality` shows high
