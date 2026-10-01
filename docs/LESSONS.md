@@ -123,8 +123,11 @@ independent jevbench calibration study.
    HELD-OUT RESULT (2026-10-01, +137 new outcomes): FAILED. Q3 new avg
    +0.0021 (27% win) vs non-Q3 new avg +0.0019 (21% win) - the band edge
    over non-Q3 collapsed to +0.0002/fill (noise). The new non-Q3 cohort
-   itself turned positive (regime change from the negative evening
-   windows), erasing the comparative advantage. Same trap as the Jev
+   itself turned positive (+0.0019 avg) - that positivity was mostly the
+   same migration artifacts. Clean-book recheck: Q3 n=186, 26% win,
+   avg -0.0010 vs non-Q3 18% win, -0.0037. The RELATIVE band edge
+   survives (+0.0026/fill) but both cohorts are ABSOLUTELY negative - a
+   relative edge over a losing baseline is not a strategy. Same trap as the Jev
    signals: exploratory structure -> regime shift -> nothing.
    **AND the regime shift was partly an artifact: 12 outcome rows (+2.47
    SOL) were migration corruption** - the +60s sampler read a MIGRATED
