@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sqlite3
 import sys
 from pathlib import Path
@@ -26,6 +27,32 @@ DB = Path(".state/learning/lessons.sqlite3")
 _MIN_COHORT_N = 10  # verdicts need at least this many outcomes per cohort
 HI_MIN = 0.6
 LO_MAX = 0.4
+
+
+def _battery_correlations(conn: sqlite3.Connection, signals: tuple) -> list[dict]:
+    """Pearson r(signal, pnl) per battery signal on resolved outcomes."""
+    # Signal names are module-owned constants, never user input.
+    cols = ", ".join(signals)
+    rows = conn.execute(
+        f"SELECT {cols}, outcome_pnl_sol FROM lessons"  # noqa: S608
+        " WHERE outcome_pnl_sol IS NOT NULL AND jev_quality IS NOT NULL"
+        " ORDER BY id DESC LIMIT 500"
+    ).fetchall()
+    out = []
+    for i, name in enumerate(signals):
+        pairs = [(r[i], r[-1]) for r in rows if r[i] is not None]
+        if len(pairs) < _MIN_COHORT_N:
+            out.append({"signal": name, "n": len(pairs), "r": None})
+            continue
+        xs = [x for x, _ in pairs]
+        ys = [y for _, y in pairs]
+        mx, my = sum(xs) / len(xs), sum(ys) / len(ys)
+        cov = sum((x - mx) * (y - my) for x, y in pairs)
+        sx = math.sqrt(sum((x - mx) ** 2 for x in xs))
+        sy = math.sqrt(sum((y - my) ** 2 for y in ys))
+        r = cov / (sx * sy) if sx and sy else 0.0
+        out.append({"signal": name, "n": len(pairs), "r": round(r, 3)})
+    return out
 
 
 def _load(limit: int) -> dict:
@@ -79,6 +106,16 @@ def _load(limit: int) -> dict:
                 / len(rows_b),
                 6,
             )
+        out["battery_corr"] = _battery_correlations(
+            conn,
+            (
+                "jev_quality",
+                "jev_copycat",
+                "jev_dump_risk",
+                "jev_organic",
+                "jev_liq_trap",
+            ),
+        )
 
         # Copycat cohort: do flagged coins fare worse?
         out["pnl_by_copycat"] = [
@@ -162,6 +199,15 @@ def _print_quality_evidence(data: dict) -> None:
             else "Jev NOT predictive on this sample"
         )
         print(f"\nverdict ({hi_n} hi vs {lo_n} lo outcomes): {verdict}")
+    corr = data.get("battery_corr") or []
+    meaningful = [c for c in corr if c["r"] is not None]
+    if meaningful:
+        print("\n--- Battery signal correlation with outcome (r, on resolved) ---")
+        for c in corr:
+            rr = (
+                f"{c['r']:+.3f}" if c["r"] is not None else f"n/a (n<{_MIN_COHORT_N})"
+            )
+            print(f"  {c['signal']:<18} n={c['n']:<4} r={rr}")
 
 
 def _render(data: dict) -> None:
