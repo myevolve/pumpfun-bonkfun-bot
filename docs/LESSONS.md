@@ -103,6 +103,10 @@ independent jevbench calibration study.
    ~±0.2 at n<100 are indistinguishable from zero - never read a trend into
    them. The report's correlation table auto-updates; trust only stable
    signs at n>=100.
+   n=154 battery-resolved reading (2026-10-01): all signals ~zero EXCEPT
+   copycat +0.178 (borderline, CI +-0.16). Outlier-checked: one +0.33 SOL
+   fill in the mid cohort inflates it; the all-scored population shows
+   only +0.068. Watch, don't act.
 3. **Calibration is the product.** buberlo logs (state, decision,
    outcome) triples and computes Brier/ECE/reliability, then Platt-scales
    thresholds to YOUR venue. Our journal already logs the triples; what's
