@@ -113,6 +113,13 @@ independent jevbench calibration study.
    (0.5-0.8) is the LEAST-BAD cohort (23% win, avg -0.0009, near
    breakeven) vs extremes (17% win, avg -0.0035). No tradable edge; the
    mid band merely avoids the worst dumps.
+   Exploratory substrate mining (2026-10-01, n=594 fills): entry-liquidity
+   quartiles - Q3 (0.30-0.43 SOL real) is the only quartile positive in
+   BOTH time halves (early +0.0065 n=36, late +0.0011 n=112). Q1/Q4 flip
+   sign across halves. Hypothesis for forward testing: entry liquidity
+   band as a gate amendment (currently min_real_sol=0.1, max=0.5 - a
+   0.30-0.43 band would be narrower and needs its own held-out window).
+   Not promoted - exploratory only, one split, no held-out confirmation.
 3. **Calibration is the product.** buberlo logs (state, decision,
    outcome) triples and computes Brier/ECE/reliability, then Platt-scales
    thresholds to YOUR venue. Our journal already logs the triples; what's
