@@ -2451,6 +2451,17 @@ class UniversalTrader:
                     token_info.symbol,
                 )
                 return
+            # Migration guard: a migrated pool's reserves live in a different
+            # vault (SOL-sized pumpswap liquidity, not curve lamports). Its
+            # price is NOT comparable to the curve entry price - a genuine
+            # migration mid-window produces fake +5000% "outcomes".
+            if state.get("complete") is True:
+                logger.info(
+                    "Paper outcome %s: curve migrated mid-window; "
+                    "outcome not comparable, left open",
+                    token_info.symbol,
+                )
+                return
             exit_price = (real_sol / 1e9) / (real_token / 1e6)
             pnl_frac = (exit_price - entry_price) / entry_price
             if self.lesson_journal is not None:
