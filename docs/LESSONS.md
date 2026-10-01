@@ -143,6 +143,10 @@ on this substrate. Avg pnl/fill: -0.0018 SOL (-18% on 0.01 entries).
 Report verdict logic hardened: it now refuses to compare cohorts until
 each side has >= 10 outcomes (the 288-vs-1 split made a "predictive"
 verdict off one lo outcome). Windows: 3 positive of 17, all small-n.
+**Brier(win) = 0.666 vs a 0.161 no-information base rate** - treating
+quality as a win-probability is far worse than guessing the base rate.
+Formally: Jev's quality score does not forecast wins on this substrate
+(journal.py `_brier`, surfaced in learning.report).
 
 **n=106 checkpoint review (2026-09-30):**
 r(quality, pnl) = **-0.119** (weak inverse). Every bucket 0.8-1.1
