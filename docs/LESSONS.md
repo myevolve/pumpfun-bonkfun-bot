@@ -97,6 +97,12 @@ independent jevbench calibration study.
    Our scorer now asks FIVE (quality, copycat, early_dump_risk,
    momentum_organic, liquidity_trap) in one call - the battery pattern
    applied (0bbe8b9).
+   Small-sample caution PROVEN: the first battery correlations that looked
+   directionally-correct at n=25 (dump_risk -0.188, organic +0.133) flipped
+   to noise by n=41 (dump_risk -0.054, organic -0.063). Correlations under
+   ~±0.2 at n<100 are indistinguishable from zero - never read a trend into
+   them. The report's correlation table auto-updates; trust only stable
+   signs at n>=100.
 3. **Calibration is the product.** buberlo logs (state, decision,
    outcome) triples and computes Brier/ECE/reliability, then Platt-scales
    thresholds to YOUR venue. Our journal already logs the triples; what's
