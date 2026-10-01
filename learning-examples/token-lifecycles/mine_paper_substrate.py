@@ -12,7 +12,7 @@ from pathlib import Path
 DB = Path(".state/learning/lessons.sqlite3")
 
 
-def load():
+def load() -> list[tuple]:
     c = sqlite3.connect(str(DB))
     rows = c.execute(
         "SELECT utc, real_sol, buyers, mayhem, jev_quality, jev_copycat,"
@@ -25,7 +25,7 @@ def load():
     return rows
 
 
-def pearson(xs, ys):
+def pearson(xs: list[float], ys: list[float]) -> float:
     n = len(xs)
     if n < 2:
         return 0.0
@@ -36,7 +36,7 @@ def pearson(xs, ys):
     return cov / (sx * sy) if sx and sy else 0.0
 
 
-def main():
+def main() -> int:
     rows = load()
     n = len(rows)
     if n < 100:
