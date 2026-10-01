@@ -174,17 +174,40 @@ class LessonJournal:
         ).fetchone()[0]
         out["resolved_outcomes"] = resolved
         if resolved:
-            # Does a higher Jev quality score predict better PnL?
+            # Does a higher Jev quality score predict better PnL? Buckets on
+            # the observed 0-1 scale (ROUND to 0.1), not the old INT cast.
             out["pnl_by_quality"] = [
                 list(r)
                 for r in cur.execute(
-                    "SELECT CAST(jev_quality/1.0 AS INT),"
+                    "SELECT ROUND(jev_quality, 1),"
                     " ROUND(AVG(outcome_pnl_sol),8), COUNT(*)"
                     " FROM lessons WHERE outcome_pnl_sol IS NOT NULL"
                     " AND jev_quality IS NOT NULL GROUP BY 1 ORDER BY 1"
                 ).fetchall()
             ]
+            out["brier_win"] = self._brier(cur)
+            out["win_rate"] = cur.execute(
+                "SELECT AVG(CASE WHEN outcome_pnl_sol > 0 THEN 1.0 ELSE 0.0 END)"
+                " FROM lessons WHERE outcome_pnl_sol IS NOT NULL"
+            ).fetchone()[0]
         return out
+
+    @staticmethod
+    def _brier(cur: sqlite3.Cursor) -> float | None:
+        """Brier score for 'win' as the outcome and jev_quality as the
+        forecast, capped to [0,1]. 0 = perfect calibration. Mirrors the
+        buberlo/jev-trader calibration loop (state, decision, outcome)."""
+        rows = cur.execute(
+            "SELECT jev_quality, outcome_pnl_sol FROM lessons"
+            " WHERE outcome_pnl_sol IS NOT NULL AND jev_quality IS NOT NULL"
+        ).fetchall()
+        if len(rows) < 10:
+            return None
+        b = sum(
+            (max(0.0, min(1.0, q)) - (1.0 if p > 0 else 0.0)) ** 2
+            for q, p in rows
+        )
+        return round(b / len(rows), 6)
 
     def close(self) -> None:
         self._conn.close()
