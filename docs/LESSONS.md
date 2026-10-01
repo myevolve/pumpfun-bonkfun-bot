@@ -90,7 +90,11 @@ windows dumped (avg -0.0045 to -0.0077, curve-to-zero exits); the 21h
 window ran +0.0057 avg across 13 fills, including e/acc at +913% in 60s
 (entry 1.15e-9 -> 1.17e-8, real curve reads). Jev quality did NOT separate
 winners from dumpers (e/acc 0.91, Loop 0.91 - one +913%, one -100%).
-**Sample still far too small; verdict remains: not promoting.**
+n=63 resolved (7 windows): 23% winners, total
+-0.222 SOL. Every high bucket negative (0.8: -0.0062, 0.9: -0.0007,
+1.0: -0.0065, 1.1: **-0.0079 — the highest-rated coins did WORST**); only
+the 0.6 bucket (n=3) is positive. Approaching measurably anti-predictive.
+**Still not promoting; the negative trend is itself useful evidence.**
 
 10. **A hung startup looks identical to a running bot from outside.**
     The 12:55 run churned httpx RPC calls for 7+ hours with zero trader
