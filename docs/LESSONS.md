@@ -107,6 +107,14 @@ Deeper verdict: the underlying strategy (mayhem snipe at creation,
 106 fills), consistent with the held-out research. No Jev configuration
 rescues a negative-strategy substrate. Jev stays an observer.
 
+**Widened-gate replication (2026-10-01, mayhem_only=false):** with the
+gate no longer restricted to mayhem coins, non-mayhem fills resolve at
+~10x the prior rate (n=106 -> 122 in one window; ~18k lessons/day). The
+inverse pattern REPLICATES in the mixed cohort: buckets 0.8-1.1 all
+negative (17-23% win rates), 0.6-0.7 the least-bad. Jev quality is
+anti-predictive across both coin classes - the "impressive launch" bait
+hypothesis holds in non-mayhem coins too.
+
 10. **A hung startup looks identical to a running bot from outside.**
     The 12:55 run churned httpx RPC calls for 7+ hours with zero trader
     output - never connected the geyser, never started the trader. pgrep
