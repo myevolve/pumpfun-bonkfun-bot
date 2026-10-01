@@ -126,6 +126,16 @@ independent jevbench calibration study.
    itself turned positive (regime change from the negative evening
    windows), erasing the comparative advantage. Same trap as the Jev
    signals: exploratory structure -> regime shift -> nothing.
+   **AND the regime shift was partly an artifact: 12 outcome rows (+2.47
+   SOL) were migration corruption** - the +60s sampler read a MIGRATED
+   pumpswap pool (SOL-sized vault reserves) and compared its price to the
+   curve entry, producing fake +1000..5700% "wins" (ELON +0.57 SOL on a
+   0.01 entry). Fixed with a complete-flag migration guard in the
+   sampler; the 12 rows are quarantined (outcome_reason=
+   'invalid_migration_artifact'), outcomes left open. The honest book:
+   **-2.0934 SOL over 690 fills (-0.003/fill, -30%)**. Every "positive
+   window" earlier today was corruption. The substrate is far worse
+   than the corrupted view suggested.
 3. **Calibration is the product.** buberlo logs (state, decision,
    outcome) triples and computes Brier/ECE/reliability, then Platt-scales
    thresholds to YOUR venue. Our journal already logs the triples; what's
