@@ -94,9 +94,9 @@ independent jevbench calibration study.
 2. **The battery pattern.** One call, many ATOMIC questions (buberlo uses
    six: regime, direction, toxic_flow, liquidity_stressed,
    quote_environment, inventory_pressure), composed in a policy engine.
-   Our scorer asks two (quality, copycat) - the pattern says add
-   independent dimensions (early_rug_risk, momentum_quality,
-   liquidity_trap) rather than relying on one composite score.
+   Our scorer now asks FIVE (quality, copycat, early_dump_risk,
+   momentum_organic, liquidity_trap) in one call - the battery pattern
+   applied (0bbe8b9).
 3. **Calibration is the product.** buberlo logs (state, decision,
    outcome) triples and computes Brier/ECE/reliability, then Platt-scales
    thresholds to YOUR venue. Our journal already logs the triples; what's
