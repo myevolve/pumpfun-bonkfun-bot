@@ -60,6 +60,25 @@ def _load(limit: int) -> dict:
                 " AND jev_quality IS NOT NULL GROUP BY q ORDER BY q"
             )
         ]
+        # Calibration: Brier score of quality-as-win-probability vs the
+        # no-information base rate (win_rate*(1-win_rate)).
+        out["win_rate"] = conn.execute(
+            "SELECT AVG(CASE WHEN outcome_pnl_sol > 0 THEN 1.0 ELSE 0.0 END)"
+            " FROM lessons WHERE outcome_pnl_sol IS NOT NULL"
+        ).fetchone()[0]
+        rows_b = conn.execute(
+            "SELECT jev_quality, outcome_pnl_sol FROM lessons"
+            " WHERE outcome_pnl_sol IS NOT NULL AND jev_quality IS NOT NULL"
+        ).fetchall()
+        if len(rows_b) >= _MIN_COHORT_N:
+            out["brier_win"] = round(
+                sum(
+                    (max(0.0, min(1.0, q)) - (1.0 if p > 0 else 0.0)) ** 2
+                    for q, p in rows_b
+                )
+                / len(rows_b),
+                6,
+            )
 
         # Copycat cohort: do flagged coins fare worse?
         out["pnl_by_copycat"] = [
@@ -97,30 +116,27 @@ def _load(limit: int) -> dict:
         conn.close()
 
 
-def _render(data: dict) -> None:
-    if "error" in data:
-        print(data["error"])
-        return
-    print("=== Learning journal ===")
+def _print_no_outcomes() -> None:
+    """Early render when the journal has no resolved outcomes yet."""
     print(
-        f"lessons: {data['total']}  (jev-scored: {data['scored']},"
-        f" resolved outcomes: {data['resolved']})"
+        "\nNo resolved outcomes yet - evidence tables appear when"
+        " paper fills resolve (~60s after a gate accept) or live"
+        " trades exit."
     )
-    print(f"by kind: {data['by_kind']}")
-    print("\n--- gate skip reasons (where rejections go) ---")
-    for reason, n in list(data["skip_reasons"].items())[:6]:
-        print(f"  {n:6d}  {reason}")
+    print("Keep the bot running through a mayhem window.")
 
-    if not data["resolved"]:
-        print(
-            "\nNo resolved outcomes yet - evidence tables appear when"
-            " paper fills resolve (~60s after a gate accept) or live"
-            " trades exit."
+
+def _print_quality_evidence(data: dict) -> None:
+    """Bucketed PnL by Jev quality + the calibrated verdict."""
+    header = "\n--- PnL by Jev quality (promotion evidence) ---"
+    if data.get("brier_win") is not None:
+        wr = data.get("win_rate", 0.0)
+        header += (
+            f"\n    Brier(win) = {data['brier_win']:.4f}"
+            f"  |  no-information base rate = {wr * (1 - wr):.4f}"
+            "  (lower is better)"
         )
-        print("Keep the bot running through a mayhem window.")
-        return
-
-    print("\n--- PnL by Jev quality (promotion evidence) ---")
+    print(header)
     print(f"{'score':>6} {'n':>6} {'avg pnl SOL':>14} {'total':>12}")
     for row in data["pnl_by_quality"]:
         print(
@@ -146,6 +162,27 @@ def _render(data: dict) -> None:
             else "Jev NOT predictive on this sample"
         )
         print(f"\nverdict ({hi_n} hi vs {lo_n} lo outcomes): {verdict}")
+
+
+def _render(data: dict) -> None:
+    if "error" in data:
+        print(data["error"])
+        return
+    print("=== Learning journal ===")
+    print(
+        f"lessons: {data['total']}  (jev-scored: {data['scored']},"
+        f" resolved outcomes: {data['resolved']})"
+    )
+    print(f"by kind: {data['by_kind']}")
+    print("\n--- gate skip reasons (where rejections go) ---")
+    for reason, n in list(data["skip_reasons"].items())[:6]:
+        print(f"  {n:6d}  {reason}")
+
+    if not data["resolved"]:
+        _print_no_outcomes()
+        return
+
+    _print_quality_evidence(data)
 
     if data["pnl_by_copycat"]:
         print("\n--- PnL by copycat cohort ---")
