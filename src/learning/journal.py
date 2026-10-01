@@ -37,6 +37,7 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 _DEFAULT_DB = Path(".state/learning/lessons.sqlite3")
+_MIN_BRIER_N = 10  # Brier needs at least this many resolved outcomes
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS lessons (
@@ -53,6 +54,9 @@ CREATE TABLE IF NOT EXISTS lessons (
     real_sol REAL,
     jev_quality REAL,                 -- 0-4, NULL when Jev unavailable
     jev_copycat REAL,                 -- P(copycat), NULL when unavailable
+    jev_dump_risk REAL,               -- P(early dump within 60s)
+    jev_organic REAL,                 -- P(buying is organic, not one wallet)
+    jev_liq_trap REAL,                -- P(thin-curve exit trap)
     jev_model TEXT,
     outcome_utc TEXT,                 -- filled when the position closes
     outcome_pnl_sol REAL,             -- net quote at close, NULL until known
@@ -102,6 +106,13 @@ class LessonJournal:
         # WAL lets the dashboard and report CLI read while the bot writes.
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(_SCHEMA)
+        # Idempotent migration: existing journals lack the battery columns.
+        existing = {
+            r[1] for r in self._conn.execute("PRAGMA table_info(lessons)")
+        }
+        for col in ("jev_dump_risk", "jev_organic", "jev_liq_trap"):
+            if col not in existing:
+                self._conn.execute(f"ALTER TABLE lessons ADD COLUMN {col} REAL")
         self._conn.commit()
 
     def record(
@@ -114,7 +125,8 @@ class LessonJournal:
             self._conn.execute(
                 "INSERT INTO lessons (utc, kind, mint, symbol, name, platform,"
                 " mayhem, decision, buyers, real_sol, jev_quality, jev_copycat,"
-                " jev_model, raw) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " jev_dump_risk, jev_organic, jev_liq_trap,"
+                " jev_model, raw) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     _utc(),
                     obs.kind,
@@ -128,6 +140,9 @@ class LessonJournal:
                     obs.real_sol,
                     _score_of(jev, "quality"),
                     _prob_of(jev, "is_copycat"),
+                    _prob_of(jev, "early_dump_risk"),
+                    _prob_of(jev, "momentum_organic"),
+                    _prob_of(jev, "liquidity_trap"),
                     (jev or {}).get("model"),
                     json.dumps(obs.raw, default=str)[:8000],
                 ),
@@ -201,7 +216,7 @@ class LessonJournal:
             "SELECT jev_quality, outcome_pnl_sol FROM lessons"
             " WHERE outcome_pnl_sol IS NOT NULL AND jev_quality IS NOT NULL"
         ).fetchall()
-        if len(rows) < 10:
+        if len(rows) < _MIN_BRIER_N:
             return None
         b = sum(
             (max(0.0, min(1.0, q)) - (1.0 if p > 0 else 0.0)) ** 2
@@ -322,6 +337,34 @@ class JevScorer:
                             "added substance? (deploy-and-dump pattern)"
                         ),
                     },
+                    "early_dump_risk": {
+                        "type": "noul",
+                        "instructions": (
+                            "Given state.token and state.gate, how likely "
+                            "is it that the curve reserves drop by half "
+                            "or more within the next minute (early dump "
+                            "by the deployer or a coordinated holder)?"
+                        ),
+                    },
+                    "momentum_organic": {
+                        "type": "noul",
+                        "instructions": (
+                            "Is the buying activity described by state.gate "
+                            "organic crowd interest rather than one wallet "
+                            "or the deployer pushing volume to attract "
+                            "snipers? buys_recent/sells_recent and buyers "
+                            "are the evidence."
+                        ),
+                    },
+                    "liquidity_trap": {
+                        "type": "noul",
+                        "instructions": (
+                            "Given real_sol on the curve, would an exit "
+                            "of a typical snipe-size position move the "
+                            "price so much that the trade cannot close "
+                            "profitably? (thin-curve trap)"
+                        ),
+                    },
                 },
             )
         except Exception:
@@ -331,6 +374,9 @@ class JevScorer:
         try:
             out["quality"] = response.scores["quality"].score
             out["is_copycat"] = response.nouls["is_copycat"].noul
+            out["early_dump_risk"] = response.nouls["early_dump_risk"].noul
+            out["momentum_organic"] = response.nouls["momentum_organic"].noul
+            out["liquidity_trap"] = response.nouls["liquidity_trap"].noul
             out["model"] = response.model
         except (KeyError, AttributeError):
             logger.exception("Jev response shape unexpected")
