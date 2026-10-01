@@ -94,7 +94,12 @@ n=63 resolved (7 windows): 23% winners, total
 -0.222 SOL. Every high bucket negative (0.8: -0.0062, 0.9: -0.0007,
 1.0: -0.0065, 1.1: **-0.0079 — the highest-rated coins did WORST**); only
 the 0.6 bucket (n=3) is positive. Approaching measurably anti-predictive.
-**Still not promoting; the negative trend is itself useful evidence.**
+Win rate by bucket: 0.6: 33%, 0.7: 50%, 0.8: **12%**, 0.9: 30%,
+1.0: 20%, 1.1: **14%**. Mechanism hypothesis: coins rated 0.8+ are the
+ones that look impressive (credible names, visible momentum) - exactly
+the bait a manufactured dump optimizes for. **Still not promoting; if
+the inverse pattern holds past n=100, a jev_quality <= 0.6 filter is a
+testable gate amendment.**
 
 10. **A hung startup looks identical to a running bot from outside.**
     The 12:55 run churned httpx RPC calls for 7+ hours with zero trader
