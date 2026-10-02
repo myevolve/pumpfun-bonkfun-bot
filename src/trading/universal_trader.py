@@ -405,7 +405,7 @@ class UniversalTrader:
             self.token_listener.trade_hub = self.trade_hub
         self._gate_queues: dict[str, asyncio.Queue[TradeEvent]] = {}
         self._listener_task: asyncio.Task | None = None
-        self._paper_entry_price: dict[str, float] = {}
+        self._paper_entry_price: dict[tuple[str, int], float] = {}
         self._buy_attempts = 0
         self._oneshot_found: TokenInfo | None = None
         self._oneshot_event = asyncio.Event()
@@ -1910,13 +1910,18 @@ class UniversalTrader:
                                 if hub is not None
                                 else None
                             )
-                            if entry_price:
-                                self._paper_entry_price[token_key_check] = entry_price
-                            sampler = asyncio.create_task(
-                                self._paper_fill_outcome(token_info)
-                            )
-                            self._position_tasks.add(sampler)
-                            sampler.add_done_callback(self._position_tasks.discard)
+                            # One entry-price slot per horizon so each
+                            # sampler consumes the same captured price.
+                            for horizon_s in (60, 300, 900):
+                                self._paper_entry_price[
+                                    (token_key_check, horizon_s)
+                                ] = entry_price
+                            for horizon_s in (60, 300, 900):
+                                sampler = asyncio.create_task(
+                                    self._paper_fill_outcome(token_info, horizon_s)
+                                )
+                                self._position_tasks.add(sampler)
+                                sampler.add_done_callback(self._position_tasks.discard)
                             continue
                         if str(token_info.mint) in self._unresolved_buys:
                             await self._await_unresolved_buy_resolution(
@@ -2414,19 +2419,26 @@ class UniversalTrader:
 
     _PAPER_EXIT_DELAY_S = 60
 
-    async def _paper_fill_outcome(self, token_info: TokenInfo) -> None:
-        """Simulated exit for a dry-run paper fill: re-read the curve ~60s
-        after entry and journal the price delta as the outcome. Entry price
-        comes from the trade hub (SOL per token at the last decoded trade);
-        the exit from a fresh curve read in the same units. Best-effort: a
-        failed read leaves the outcome open, never fakes it."""
+    async def _paper_fill_outcome(
+        self, token_info: TokenInfo, horizon_s: int = 60
+    ) -> None:
+        """Simulated exit for a dry-run paper fill: re-read the curve
+        horizon_s seconds after entry and journal the price delta as a
+        per-horizon outcome lesson. Entry price comes from the trade hub
+        (SOL per token at the last decoded trade); the exit from a fresh
+        curve read in the same units. Best-effort: a failed read leaves
+        the outcome open, never fakes it."""
         mint_key = str(token_info.mint)
-        entry_price = self._paper_entry_price.pop(mint_key, None)
+        entry_price = self._paper_entry_price.pop((mint_key, horizon_s), None)
+        if entry_price is None:
+            # Only the first horizon consumes the captured price; later
+            # horizons reuse the same entry price without popping.
+            entry_price = self._paper_entry_price.get((mint_key, 60))
         if entry_price is None:
             logger.info("Paper outcome %s: no entry price captured", token_info.symbol)
             return
         try:
-            await asyncio.sleep(self._PAPER_EXIT_DELAY_S)
+            await asyncio.sleep(horizon_s)
             curve_manager = getattr(
                 getattr(self, "platform_implementations", None),
                 "curve_manager",
@@ -2465,11 +2477,29 @@ class UniversalTrader:
             exit_price = (real_sol / 1e9) / (real_token / 1e6)
             pnl_frac = (exit_price - entry_price) / entry_price
             if self.lesson_journal is not None:
-                # 0.01 SOL entry convention: outcome in SOL terms.
-                self.lesson_journal.link_outcome(
+                # 0.01 SOL entry convention: outcome in SOL terms. One
+                # outcome lesson per horizon (kind='horizon') so horizon
+                # comparison is a group-by, not an overwrite.
+                self.lesson_journal.record(
+                    LessonObservation(
+                        kind=f"horizon_{horizon_s}s",
+                        mint=mint_key,
+                        symbol=token_info.symbol,
+                        name=token_info.name,
+                        platform=token_info.platform.value,
+                        mayhem=token_info.is_mayhem_mode,
+                        decision="paper_entry",
+                        real_sol=token_info.real_sol_reserves / 1e9
+                        if token_info.real_sol_reserves
+                        else None,
+                    ),
+                    jev=None,
+                )
+                self.lesson_journal.link_outcome_kind(
                     mint_key,
+                    kind=f"horizon_{horizon_s}s",
                     pnl_sol=0.01 * pnl_frac,
-                    reason=f"paper_exit_{self._PAPER_EXIT_DELAY_S}s",
+                    reason=f"paper_exit_{horizon_s}s",
                 )
             logger.info(
                 "Paper exit %s: entry %.3e -> exit %.3e (%+.1f%%)",

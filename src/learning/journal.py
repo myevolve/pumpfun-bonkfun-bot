@@ -107,9 +107,7 @@ class LessonJournal:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(_SCHEMA)
         # Idempotent migration: existing journals lack the battery columns.
-        existing = {
-            r[1] for r in self._conn.execute("PRAGMA table_info(lessons)")
-        }
+        existing = {r[1] for r in self._conn.execute("PRAGMA table_info(lessons)")}
         for col in ("jev_dump_risk", "jev_organic", "jev_liq_trap"):
             if col not in existing:
                 self._conn.execute(f"ALTER TABLE lessons ADD COLUMN {col} REAL")
@@ -176,6 +174,33 @@ class LessonJournal:
         except sqlite3.Error:
             logger.exception("Lesson outcome link failed (non-fatal)")
 
+    def link_outcome_kind(
+        self,
+        mint: str,
+        *,
+        kind: str,
+        pnl_sol: float | None,
+        reason: str | None = None,
+    ) -> None:
+        """Attach an outcome to the most recent open lesson of a given kind
+        (used by the multi-horizon outcome samplers)."""
+        try:
+            row = self._conn.execute(
+                "SELECT id FROM lessons WHERE mint=? AND kind=?"
+                " AND outcome_utc IS NULL ORDER BY id DESC LIMIT 1",
+                (mint, kind),
+            ).fetchone()
+            if row is None:
+                return
+            self._conn.execute(
+                "UPDATE lessons SET outcome_utc=?, outcome_pnl_sol=?,"
+                " outcome_reason=? WHERE id=?",
+                (_utc(), pnl_sol, reason, row[0]),
+            )
+            self._conn.commit()
+        except sqlite3.Error:
+            logger.exception("Horizon outcome link failed (non-fatal)")
+
     def stats(self) -> dict[str, Any]:
         """Summary for the dashboard: counts and Jev-vs-outcome agreement."""
         cur = self._conn
@@ -218,10 +243,7 @@ class LessonJournal:
         ).fetchall()
         if len(rows) < _MIN_BRIER_N:
             return None
-        b = sum(
-            (max(0.0, min(1.0, q)) - (1.0 if p > 0 else 0.0)) ** 2
-            for q, p in rows
-        )
+        b = sum((max(0.0, min(1.0, q)) - (1.0 if p > 0 else 0.0)) ** 2 for q, p in rows)
         return round(b / len(rows), 6)
 
     def close(self) -> None:

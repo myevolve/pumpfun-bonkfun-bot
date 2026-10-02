@@ -2780,7 +2780,7 @@ async def test_paper_fill_continues_and_gate_skip_does_not_schedule_sampler() ->
             return True
         return True  # plain gate skip
 
-    async def paper_outcome(token_info: TokenInfo) -> None:
+    async def paper_outcome(token_info: TokenInfo, horizon_s: int) -> None:
         samplers.append(str(token_info.mint))
 
     trader._wait_for_token = wait_for_token
@@ -2794,7 +2794,8 @@ async def test_paper_fill_continues_and_gate_skip_does_not_schedule_sampler() ->
     # All three handled: the fill continues past, and post-fill skips keep
     # scanning (the hoisted-baseline bug ended the run right after a fill).
     assert handled_symbols == [str(t.mint) for t in tokens]
-    assert samplers == [str(tokens[0].mint)]
+    # Three horizons (60/300/900) each schedule one sampler for the fill
+    assert samplers == [str(tokens[0].mint)] * 3
     assert trader._cleanup_resources.await_count == 1
 
 
@@ -3699,7 +3700,7 @@ async def test_paper_fill_outcome_links_journal_result() -> None:
     journal = LessonJournal(":memory:")
     trader.lesson_journal = journal
     trader.jev_scorer = None
-    trader._paper_entry_price = {mint_key: 2e-8}
+    trader._paper_entry_price = {(mint_key, 60): 2e-8}
     trader._PAPER_EXIT_DELAY_S = 0
 
     class FakeCurve:
@@ -3717,10 +3718,11 @@ async def test_paper_fill_outcome_links_journal_result() -> None:
     journal.record(
         LessonObservation(kind="gate_pass", mint=mint_key, symbol=token.symbol)
     )
-    await trader._paper_fill_outcome(token)
+    await trader._paper_fill_outcome(token, horizon_s=0)
 
     row = journal._conn.execute(
-        "SELECT outcome_pnl_sol, outcome_reason FROM lessons WHERE mint=?",
+        "SELECT outcome_pnl_sol, outcome_reason FROM lessons"
+        " WHERE mint=? AND kind='horizon_0s'",
         (mint_key,),
     ).fetchone()
     # entry 2e-8; exit = 0.2 SOL / 5000 tokens = 4e-8 -> +100% -> +0.01 SOL
