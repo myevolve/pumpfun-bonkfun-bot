@@ -248,3 +248,14 @@ variance is what kills a 1.5s gate window (a 978ms p95 spike eats the
 whole budget randomly). If a strategy is ever promoted, deploy to
 Cloud Run us-east1 first. The paper/learning pipeline is
 latency-insensitive (60s-delayed outcomes) and ran fine from mobile.
+
+## Horizon question answered (2026-10-01, n=123 paired fills)
+
+Multi-horizon outcomes (+60s/+300s/+900s per fill) test whether the 40%
+instant-dump coins recover with time. **They do not**: of 59 full-losses
+at 60s, only 2 improve by 300s (300s avg -0.0099 = nearly another full
+loss); only 11% of fills do better at 300s than 60s; win rate drops
+19% -> 15%. Bonding-curve math keeps price above zero but the *flow*
+keeps selling. **Exit timing is not the problem - +60s is the
+least-bad horizon, and the substrate's loss is structural.** The
+horizon rows stay in the journal; longer horizons just confirm.
