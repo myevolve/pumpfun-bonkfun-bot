@@ -1367,6 +1367,7 @@ class SolanaClient:
                     else json.dumps(tx_error, sort_keys=True, default=str)
                 ),
                 slot=result.get("slot"),
+                commitment=commitment,
             )
         elif (
             confirmation_status is not None
@@ -1390,6 +1391,7 @@ class SolanaClient:
                     else json.dumps(status_error, sort_keys=True, default=str)
                 ),
                 slot=getattr(confirmation_status, "slot", None),
+                commitment=commitment,
             )
         elif (
             last_valid_block_height is not None
@@ -1403,12 +1405,14 @@ class SolanaClient:
                 TransactionStatus.EXPIRED,
                 signature_text,
                 error=confirmation_error,
+                commitment=commitment,
             )
         else:
             outcome = TransactionOutcome(
                 TransactionStatus.UNKNOWN,
                 signature_text,
                 error=confirmation_error,
+                commitment=commitment,
             )
 
         if self.ledger is not None:

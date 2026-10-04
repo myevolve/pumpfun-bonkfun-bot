@@ -636,6 +636,37 @@ def test_reservation_cannot_be_claimed_by_another_risk_session(tmp_path: Path) -
         assert record.quote_mint == "SOL"
 
 
+def test_finalized_promotes_a_confirmed_outcome_without_replacing_it(
+    tmp_path: Path,
+) -> None:
+    """Finality strengthens evidence; it never rewrites a status or demotes."""
+    with TransactionLedger(tmp_path / "ledger.sqlite") as ledger:
+        _record_submission(ledger, intent="buy-1", signature="sig-1")
+        confirmed = TransactionOutcome(
+            TransactionStatus.SUCCESS, "sig-1", slot=42, commitment="confirmed"
+        )
+        ledger.record_outcome(confirmed)
+        ledger.record_outcome(
+            TransactionOutcome(
+                TransactionStatus.SUCCESS, "sig-1", slot=42, commitment="finalized"
+            )
+        )
+
+        assert ledger.get_outcome("sig-1").commitment == "finalized"
+
+        # A later weaker observation never demotes the stored strength.
+        ledger.record_outcome(confirmed)
+        assert ledger.get_outcome("sig-1").commitment == "finalized"
+
+        # A different status is still a replacement, even at finality.
+        with pytest.raises(LedgerConflict, match="cannot be replaced"):
+            ledger.record_outcome(
+                TransactionOutcome(
+                    TransactionStatus.REVERTED, "sig-1", slot=42, commitment="finalized"
+                )
+            )
+
+
 def test_releasing_never_submitted_wire_releases_session_budget(
     tmp_path: Path,
 ) -> None:

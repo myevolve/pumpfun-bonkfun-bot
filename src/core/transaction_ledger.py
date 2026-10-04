@@ -29,6 +29,13 @@ _MAX_OPERATION_KEY_LENGTH = 512
 _MAX_OPERATION_GENERATION = 0x7FFF_FFFF_FFFF_FFFF
 _SHA256_HEX_LENGTH = 64
 
+_COMMITMENT_RANK = {"processed": 0, "confirmed": 1, "finalized": 2}
+
+
+def _commitment_rank(commitment: str | None) -> int:
+    """Order observation strength; an unrecorded commitment ranks lowest."""
+    return _COMMITMENT_RANK.get(commitment or "", -1)
+
 
 def resolve_transaction_ledger_path(wallet: str | Pubkey) -> Path:
     """Return the shared ledger unless unreconciled platform ledgers exist."""
@@ -201,6 +208,7 @@ class TransactionLedger:
                     ),
                     error TEXT,
                     slot INTEGER,
+                    commitment TEXT,                  -- confirmed/finalized strength
                     observed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
 
@@ -260,6 +268,17 @@ class TransactionLedger:
                 self._connection.execute(
                     "ALTER TABLE submissions ADD COLUMN evidence_profile_id TEXT "
                     "REFERENCES evidence_profiles(profile_id)"
+                )
+
+            outcome_columns = {
+                row["name"]
+                for row in self._connection.execute(
+                    "PRAGMA table_info(outcomes)"
+                ).fetchall()
+            }
+            if "commitment" not in outcome_columns:
+                self._connection.execute(
+                    "ALTER TABLE outcomes ADD COLUMN commitment TEXT"
                 )
 
     @staticmethod
@@ -1327,6 +1346,7 @@ class TransactionLedger:
             outcome.status.value,
             outcome.error,
             outcome.slot,
+            outcome.commitment,
         )
         with self._lock:
             try:
@@ -1357,7 +1377,7 @@ class TransactionLedger:
 
                 existing = self._connection.execute(
                     """
-                    SELECT status, error, slot
+                    SELECT status, error, slot, commitment
                     FROM outcomes WHERE signature = ?
                     """,
                     (outcome.signature,),
@@ -1365,8 +1385,9 @@ class TransactionLedger:
                 if existing is None:
                     cursor = self._connection.execute(
                         """
-                        INSERT INTO outcomes (signature, status, error, slot)
-                        VALUES (?, ?, ?, ?)
+                        INSERT INTO outcomes
+                            (signature, status, error, slot, commitment)
+                        VALUES (?, ?, ?, ?, ?)
                         """,
                         values,
                     )
@@ -1387,13 +1408,51 @@ class TransactionLedger:
                     self._connection.commit()
                     return
                 if existing_status is outcome.status:
+                    stronger = _commitment_rank(outcome.commitment) > (
+                        _commitment_rank(existing["commitment"])
+                    )
                     if (
                         existing["error"] != outcome.error
                         or existing["slot"] != outcome.slot
                     ):
-                        raise LedgerConflict(
-                            f"outcome for {outcome.signature!r} has "
-                            "conflicting evidence"
+                        # A stronger commitment may complete evidence the first
+                        # observation lacked; it may never contradict it.
+                        contradicts = (
+                            existing["slot"] is not None
+                            and outcome.slot is not None
+                            and existing["slot"] != outcome.slot
+                        ) or (
+                            existing["error"] is not None
+                            and outcome.error is not None
+                            and existing["error"] != outcome.error
+                        )
+                        if not stronger or contradicts:
+                            raise LedgerConflict(
+                                f"outcome for {outcome.signature!r} has "
+                                "conflicting evidence"
+                            )
+                        self._connection.execute(
+                            """
+                            UPDATE outcomes
+                            SET slot = COALESCE(slot, ?),
+                                error = COALESCE(error, ?),
+                                commitment = ?,
+                                observed_at = CURRENT_TIMESTAMP
+                            WHERE signature = ?
+                            """,
+                            (
+                                outcome.slot,
+                                outcome.error,
+                                outcome.commitment,
+                                outcome.signature,
+                            ),
+                        )
+                        self._connection.commit()
+                        return
+                    if stronger:
+                        self._connection.execute(
+                            "UPDATE outcomes SET commitment = ? WHERE signature = ?",
+                            (outcome.commitment, outcome.signature),
                         )
                     self._connection.commit()
                     return
@@ -1404,7 +1463,7 @@ class TransactionLedger:
                 cursor = self._connection.execute(
                     """
                     UPDATE outcomes
-                    SET status = ?, error = ?, slot = ?,
+                    SET status = ?, error = ?, slot = ?, commitment = ?,
                         observed_at = CURRENT_TIMESTAMP
                     WHERE signature = ? AND status = 'unknown'
                     """,
@@ -1412,6 +1471,7 @@ class TransactionLedger:
                         outcome.status.value,
                         outcome.error,
                         outcome.slot,
+                        outcome.commitment,
                         outcome.signature,
                     ),
                 )
@@ -1429,7 +1489,8 @@ class TransactionLedger:
         with self._lock:
             row = self._connection.execute(
                 """
-                SELECT status, error, slot FROM outcomes WHERE signature = ?
+                SELECT status, error, slot, commitment
+                FROM outcomes WHERE signature = ?
                 """,
                 (signature,),
             ).fetchone()
@@ -1440,6 +1501,7 @@ class TransactionLedger:
             signature=signature,
             error=row["error"],
             slot=row["slot"],
+            commitment=row["commitment"],
         )
 
     def get_last_valid_block_height(self, signature: str) -> int | None:

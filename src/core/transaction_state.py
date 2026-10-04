@@ -27,6 +27,7 @@ class TransactionOutcome:
     signature: str
     error: str | None = None
     slot: int | None = None
+    commitment: str | None = None
 
     @property
     def succeeded(self) -> bool:
