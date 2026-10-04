@@ -1,4 +1,4 @@
-"""Audit durable trade evidence and observed network fees without changing the ledger."""
+"""Audit durable trade receipts, wallet balance changes and observed network fees."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import math
 import re
 import sqlite3
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 from solders.pubkey import Pubkey
@@ -225,14 +226,12 @@ def _outcome_claim_issues(transaction: dict, status: object, slot: object) -> li
             issues.append("event_receipt_unavailable")
     elif status != receipt_status:
         issues.append("event_receipt_status_conflict")
-    if slot is not None:
-        if not _uint(slot):
-            issues.append("invalid_event_slot")
-        elif (
-            transaction["receipt_slot"] is not None
-            and slot != transaction["receipt_slot"]
-        ):
-            issues.append("event_receipt_slot_conflict")
+    if (
+        _uint(slot)
+        and transaction["receipt_slot"] is not None
+        and slot != transaction["receipt_slot"]
+    ):
+        issues.append("event_receipt_slot_conflict")
     return issues
 
 
@@ -272,6 +271,9 @@ def _live_event_issues(  # noqa: C901, PLR0911, PLR0912, PLR0915 - one event's d
     details = payload.get("result") if category == "trade_result" else payload
     if not isinstance(details, dict):
         return ["invalid_event_result"]
+    slot = details.get("slot")
+    if slot is not None and not _uint(slot):
+        issues.append("invalid_event_slot")
     status = details.get("status")
     if category == "trade_result":
         success = details.get("success")
@@ -304,7 +306,7 @@ def _live_event_issues(  # noqa: C901, PLR0911, PLR0912, PLR0915 - one event's d
     transaction = submissions.get(signature)
     if transaction is None:
         return issues  # The common signature check reports untracked references.
-    issues.extend(_outcome_claim_issues(transaction, status, details.get("slot")))
+    issues.extend(_outcome_claim_issues(transaction, status, slot))
     intents = [payload.get("intent_id")]
     if payload.get("action") == "sell" or category == "position_closed":
         intents.append(position.get("pending_exit_intent_id"))
@@ -335,18 +337,63 @@ def _live_event_issues(  # noqa: C901, PLR0911, PLR0912, PLR0915 - one event's d
     return issues
 
 
+def _event_claims(
+    category: str | None, payload: dict, submissions: dict, by_intent: dict
+) -> dict:
+    """Project typed claims and exact recorded links, not a causal timeline."""
+    links: dict[str, set[str]] = {}
+    if category in ("decision", "trade_result", "chain_outcome", "position_closed"):
+        intent = payload.get("intent_id")
+        if category == "decision" and isinstance(intent, str):
+            for transaction in by_intent.get(intent, []):
+                links.setdefault(transaction["signature"], set()).add("decision_intent")
+        for signature in _event_signatures(payload):
+            if isinstance(signature, str) and signature in submissions:
+                links.setdefault(signature, set()).add("signature_reference")
+        position = payload.get("position")
+        if isinstance(position, dict):
+            entry = position.get("position_id")
+            if isinstance(entry, str) and entry in submissions:
+                links.setdefault(entry, set()).add("position_entry")
+    details = payload.get("result") if category == "trade_result" else payload
+    details = details if isinstance(details, dict) else {}
+    gate = payload.get("gate")
+    gate = gate if isinstance(gate, dict) else {}
+    action = payload.get("action")
+    status = details.get("status")
+    return {
+        "declared_action": action if action in ("buy", "sell", "skip") else None,
+        "reported_status": status
+        if status in ("success", "reverted", "expired", "unknown", "failed")
+        else None,
+        "reported_success": details.get("success")
+        if type(details.get("success")) is bool
+        else None,
+        "reported_slot": details.get("slot") if _uint(details.get("slot")) else None,
+        "gate_accepted": gate.get("accept")
+        if type(gate.get("accept")) is bool
+        else None,
+        "submission_links": [
+            {"signature": signature, "relations": sorted(links[signature])}
+            for signature in sorted(links)
+        ],
+    }
+
+
 def _events(  # noqa: C901, PLR0912 - validate each observation before counting it
     rows: list[dict], profiles: dict, submissions: dict[str, dict]
-) -> tuple[dict, list]:
+) -> tuple[dict, list, list]:
     if not rows:
-        return {}, []
+        return {}, [], []
     by_intent = {}
     for transaction in submissions.values():
         by_intent.setdefault(transaction["intent_id"], []).append(transaction)
     counts = {}
     failures = []
+    observations = []
     for row in rows:
         issues = []
+        payload = {}
         kind = _kind(row["profile_id"], profiles)
         category = row["category"]
         valid = isinstance(category, str) and bool(category)
@@ -396,13 +443,111 @@ def _events(  # noqa: C901, PLR0912 - validate each observation before counting 
         if valid and kind != "invalid":
             categories = counts.setdefault(kind, {})
             categories[category] = categories.get(category, 0) + 1
+        issues = sorted(set(issues))
         if issues:
-            failures.append(
-                {"event_id": row["event_id"], "issues": sorted(set(issues))}
-            )
-    return {
-        kind: dict(sorted(counts[kind].items())) for kind in sorted(counts)
-    }, failures
+            failures.append({"event_id": row["event_id"], "issues": issues})
+        observations.append(
+            {
+                "event_id": row["event_id"],
+                "profile_id": row["profile_id"]
+                if isinstance(row["profile_id"], str)
+                else None,
+                "kind": kind,
+                "category": category if isinstance(category, str) else None,
+                **_event_claims(
+                    category,
+                    payload if valid and kind in KINDS else {},
+                    submissions,
+                    by_intent,
+                ),
+                "issues": issues,
+            }
+        )
+    return (
+        {kind: dict(sorted(counts[kind].items())) for kind in sorted(counts)},
+        failures,
+        observations,
+    )
+
+
+def _instruction_fields(instructions: list) -> dict:  # noqa: C901, PLR0912 - RPC instruction variants share one fact projection
+    """Compare available instruction facts without decoding program-specific data."""
+    fields = {"instructionCount": len(instructions)}
+    for index, instruction in enumerate(instructions):
+        if not isinstance(instruction, dict) or (
+            instruction.get("programIdIndex") is None
+            and instruction.get("programId") is None
+        ):
+            reason = "missing instruction program"
+            raise ValueError(reason)
+        for name in (
+            "programIdIndex",
+            "programId",
+            "accounts",
+            "data",
+            "parsed",
+            "stackHeight",
+        ):
+            value = instruction.get(name)
+            if value is None:
+                continue
+            field_name = name
+            if name in {"programIdIndex", "stackHeight"}:
+                bits = 8 if name == "programIdIndex" else 32
+                if not _uint(value) or value >= 2**bits:
+                    reason = "invalid instruction index or height"
+                    raise ValueError(reason)
+            elif name == "programId":
+                value = _public_key(value)
+            elif name == "accounts":
+                if not isinstance(value, list):
+                    reason = "invalid instruction accounts"
+                    raise TypeError(reason)
+                if instruction.get("programIdIndex") is not None:
+                    if any(not _uint(item) or item >= 2**8 for item in value):
+                        reason = "invalid instruction account index"
+                        raise ValueError(reason)
+                    field_name = "accountIndexes"
+                else:
+                    value = [_public_key(item) for item in value]
+            elif not isinstance(value, str if name == "data" else dict):
+                reason = "invalid instruction data"
+                raise TypeError(reason)
+            fields[f"instruction_{index}_{field_name}"] = value
+    return fields
+
+
+def _message_issues(fields: dict) -> list[str]:  # noqa: C901 - one pass over retained instruction references
+    """Resolve compiled references using all retained, consistent account evidence."""
+    issues = []
+    static = fields.get("staticAccountKeys", [])
+    complete = "resolvedAccountKeys" in fields
+    keys = fields.get("resolvedAccountKeys", static)
+    if complete and keys[: len(static)] != static:
+        issues.append("conflicting_receipt_staticAccountKeys")
+    for index in range(fields.get("instructionCount", 0)):
+        prefix = f"instruction_{index}_"
+        for index_name, address_name in (
+            ("programIdIndex", "programId"),
+            ("accountIndexes", "accounts"),
+        ):
+            indexes = fields.get(prefix + index_name)
+            if indexes is None:
+                continue
+            addresses = fields.get(prefix + address_name)
+            if index_name == "programIdIndex":
+                indexes = [indexes]
+                addresses = [addresses] if addresses is not None else None
+            if addresses is not None and len(addresses) != len(indexes):
+                issues.append("conflicting_receipt_" + prefix + address_name)
+                continue
+            for offset, account_index in enumerate(indexes):
+                if account_index >= len(keys):
+                    if complete:
+                        issues.append("invalid_instruction_account_index")
+                elif addresses is not None and addresses[offset] != keys[account_index]:
+                    issues.append("conflicting_receipt_" + prefix + address_name)
+    return issues
 
 
 def _receipt_fields(result: dict, signature: str) -> dict:  # noqa: C901, PLR0912, PLR0915 - one receipt trust boundary
@@ -427,9 +572,10 @@ def _receipt_fields(result: dict, signature: str) -> dict:  # noqa: C901, PLR091
         reason = "invalid message"
         raise TypeError(reason)
     keys = message.get("accountKeys")
-    if not isinstance(keys, list) or not keys:
-        reason = "missing account keys"
+    if not isinstance(keys, list) or len(keys) < len(signatures):
+        reason = "insufficient account keys"
         raise ValueError(reason)
+    parsed_keys = all(isinstance(item, dict) for item in keys)
     keys = [
         _public_key(item.get("pubkey") if isinstance(item, dict) else item)
         for item in keys
@@ -444,19 +590,59 @@ def _receipt_fields(result: dict, signature: str) -> dict:  # noqa: C901, PLR091
     fields = {
         "slot": result["slot"],
         "signatures": signatures,
-        "accountKeys": keys,
+        "feePayer": keys[0],
         "err": meta["err"],
     }
-    for name in ("recentBlockhash", "instructions", "addressTableLookups"):
+    if not parsed_keys:
+        fields["staticAccountKeys"] = keys
+    for index, account in enumerate(message["accountKeys"]):
+        if isinstance(account, dict) != parsed_keys:
+            reason = "mixed account key formats"
+            raise ValueError(reason)
+        if not parsed_keys:
+            continue
+        signer = account.get("signer")
+        writable = account.get("writable")
+        if (signer is not None and signer is not (index < len(signatures))) or (
+            writable is not None
+            and (type(writable) is not bool or (index == 0 and not writable))
+        ):
+            reason = "invalid parsed account permissions"
+            raise ValueError(reason)
+        if writable is not None:
+            fields[f"accountKeys_{index}_writable"] = writable
+    for name in ("recentBlockhash", "instructions", "addressTableLookups", "header"):
         if name in message and message[name] is not None:
             if name == "recentBlockhash":
                 _public_key(
                     message[name]
                 )  # A blockhash is also a base58-encoded 32-byte value.
+            elif name == "header":
+                header = message[name]
+                if (
+                    not isinstance(header, dict)
+                    or any(
+                        not _uint(header.get(field)) or header[field] >= 2**8
+                        for field in (
+                            "numRequiredSignatures",
+                            "numReadonlySignedAccounts",
+                            "numReadonlyUnsignedAccounts",
+                        )
+                    )
+                    or header["numRequiredSignatures"] != len(signatures)
+                    or header["numReadonlySignedAccounts"] >= len(signatures)
+                    or header["numReadonlyUnsignedAccounts"]
+                    > len(keys) - len(signatures)
+                ):
+                    reason = "invalid message header"
+                    raise ValueError(reason)
             elif not isinstance(message[name], list):
                 reason = "invalid message field"
                 raise TypeError(reason)
-            fields[name] = message[name]
+            if name == "instructions":
+                fields.update(_instruction_fields(message[name]))
+            else:
+                fields[name] = message[name]
     for name in (
         "preBalances",
         "postBalances",
@@ -486,14 +672,45 @@ def _receipt_fields(result: dict, signature: str) -> dict:  # noqa: C901, PLR091
         ):
             reason = "invalid native balance"
             raise ValueError(reason)
-        elif name in {"preTokenBalances", "postTokenBalances"} and any(
-            not isinstance(item, dict) for item in value
-        ):
-            reason = "invalid token balance"
-            raise ValueError(reason)
+        elif name in {"preTokenBalances", "postTokenBalances"}:
+            if any(not isinstance(item, dict) for item in value):
+                reason = "invalid token balance"
+                raise ValueError(reason)
+            # Compare raw units, not RPC display amounts or formatting.
+            balances = []
+            for row in value:
+                amount = row.get("uiTokenAmount")
+                if isinstance(amount, dict):
+                    balances.append(
+                        {
+                            **row,
+                            "uiTokenAmount": {
+                                key: item
+                                for key, item in amount.items()
+                                if key not in {"uiAmount", "uiAmountString"}
+                            },
+                        }
+                    )
+                else:
+                    balances.append(row)
+            # Token rows are indexed records; keep duplicates for balance validation.
+            if all(_uint(row.get("accountIndex")) for row in balances):
+                balances.sort(key=lambda row: row["accountIndex"])
+            value = balances
         fields[name] = value
     if _uint(meta.get("fee")):
         fields["fee"] = meta["fee"]
+    loaded = fields.get("loadedAddresses")
+    if parsed_keys:
+        fields["resolvedAccountKeys"] = keys
+    elif loaded is not None:
+        fields["resolvedAccountKeys"] = [
+            *keys,
+            *loaded["writable"],
+            *loaded["readonly"],
+        ]
+    elif not fields.get("addressTableLookups"):
+        fields["resolvedAccountKeys"] = keys
     return fields
 
 
@@ -569,6 +786,154 @@ def _receipts(  # noqa: C901 - retain invalid observations alongside valid ones
     return grouped, failures
 
 
+def _token_balance_changes(fields: dict, keys: list[str], signer: str) -> list[dict]:
+    """Read raw owner balances; only proven account creation/closure supplies zero."""
+    sides = []
+    for field in ("preTokenBalances", "postTokenBalances"):
+        rows = {}
+        for row in fields[field]:
+            index = row.get("accountIndex")
+            amount = row.get("uiTokenAmount")
+            if (
+                not _uint(index)
+                or index >= len(keys)
+                or index in rows
+                or not isinstance(amount, dict)
+            ):
+                reason = "invalid token account balance"
+                raise ValueError(reason)
+            raw = amount.get("amount")
+            decimals = amount.get("decimals")
+            if (
+                not isinstance(raw, str)
+                or re.fullmatch(r"[0-9]{1,20}", raw) is None
+                or not _uint(int(raw))
+                or type(decimals) is not int
+                or not 0 <= decimals < 2**8
+            ):
+                reason = "invalid raw token amount"
+                raise ValueError(reason)
+            rows[index] = {
+                "owner": _public_key(row.get("owner")),
+                "mint": _public_key(row.get("mint")),
+                "program_id": _public_key(row["programId"])
+                if "programId" in row
+                else None,
+                "decimals": decimals,
+                "amount": int(raw),
+            }
+        sides.append(rows)
+    before, after = sides
+    changes = []
+    for index in sorted(before.keys() | after.keys()):
+        pre, post = before.get(index), after.get(index)
+        identity = pre if pre is not None else post
+        if (
+            pre is not None
+            and post is not None
+            and any(
+                pre[field] != post[field]
+                for field in ("owner", "mint", "program_id", "decimals")
+            )
+        ):
+            reason = "token account identity changed"
+            raise ValueError(reason)
+        pre_amount = pre["amount"] if pre is not None else 0
+        post_amount = post["amount"] if post is not None else 0
+        if fields["err"] is not None and pre_amount != post_amount:
+            reason = "reverted transaction changed token balance"
+            raise ValueError(reason)
+        if identity["owner"] != signer:
+            continue
+        if (pre is None and fields["preBalances"][index] != 0) or (
+            post is None and fields["postBalances"][index] != 0
+        ):
+            reason = "unproven token account creation or closure"
+            raise ValueError(reason)
+        changes.append(
+            {
+                "account": keys[index],
+                "mint": identity["mint"],
+                "program_id": identity["program_id"],
+                "decimals": identity["decimals"],
+                "pre_amount_raw": pre_amount,
+                "post_amount_raw": post_amount,
+                "change_raw": post_amount - pre_amount,
+            }
+        )
+    return changes
+
+
+def _economic_receipt(fields: dict, commitments: dict[str, str], signer: str) -> dict:
+    """Expose observed movements, never infer fills or classify transfers as profit."""
+    report = {"native": None, "tokens": None, "token_commitment": None, "issues": []}
+    required = {"resolvedAccountKeys", "preBalances", "postBalances"}
+    if not required <= fields.keys():
+        report["issues"].append(
+            "missing_loaded_addresses"
+            if "resolvedAccountKeys" not in fields
+            else "missing_native_balances"
+        )
+        return report
+    keys = fields["resolvedAccountKeys"]
+    pre, post = fields["preBalances"], fields["postBalances"]
+    if len(keys) != len(set(keys)) or len(pre) != len(keys) or len(post) != len(keys):
+        report["issues"].append("invalid_native_balance_layout")
+        return report
+    fee = fields.get("fee")
+    native_required = required | ({"fee"} if fee is not None else set())
+    report["native"] = {
+        "pre_lamports": pre[0],
+        "post_lamports": post[0],
+        "change_lamports": post[0] - pre[0],
+        "change_excluding_network_fee_lamports": post[0] - pre[0] + fee
+        if fee is not None
+        else None,
+        "commitment": "finalized"
+        if all(commitments[name] == "finalized" for name in native_required)
+        else "confirmed",
+    }
+    required.update(("preTokenBalances", "postTokenBalances"))
+    if not required <= fields.keys():
+        report["issues"].append("missing_token_balances")
+        return report
+    try:
+        report["tokens"] = _token_balance_changes(fields, keys, signer)
+    except (ValueError, TypeError):
+        report["issues"].append("invalid_or_incomplete_token_balances")
+        return report
+    report["token_commitment"] = (
+        "finalized"
+        if all(commitments[name] == "finalized" for name in required)
+        else "confirmed"
+    )
+    return report
+
+
+def _orphan_outcome(row: dict) -> dict:
+    """Project unassigned ledger claims without inferring a submission or receipt."""
+    issues = []
+    try:
+        signature = _signature(row["signature"])
+    except (ValueError, TypeError):
+        signature = None
+        issues.append("invalid_outcome_signature")
+    status = row["status"]
+    if status not in ("success", "reverted", "expired", "unknown"):
+        status = None
+        issues.append("invalid_ledger_status")
+    slot = row["slot"]
+    if slot is not None and not _uint(slot):
+        slot = None
+        issues.append("invalid_ledger_slot")
+    return {
+        "signature": signature,
+        "ledger_status": status,
+        "ledger_slot": slot,
+        "issues": sorted(issues),
+    }
+
+
 def _transaction(  # noqa: C901, PLR0912, PLR0915 - one signature's reconciliation state
     row: dict,
     intent: dict | None,
@@ -613,6 +978,7 @@ def _transaction(  # noqa: C901, PLR0912, PLR0915 - one signature's reconciliati
         valid_ledger = False
     known = {}
     known_hashes = {}
+    field_commitments = {}
     conflict = False
     fee_commitment = None
     for observation in observations:
@@ -632,12 +998,18 @@ def _transaction(  # noqa: C901, PLR0912, PLR0915 - one signature's reconciliati
             else:
                 known[name] = value
                 known_hashes[name] = value_hash
+            if field_commitments.get(name) != "finalized":
+                field_commitments[name] = observation["commitment"]
         if "fee" in fields and (
             fee_commitment is None or observation["commitment"] == "finalized"
         ):
             fee_commitment = observation["commitment"]
     receipt_status = None
     if known:
+        message_issues = _message_issues(known)
+        if message_issues:
+            conflict = True
+            issues.extend(message_issues)
         receipt_status = "success" if known["err"] is None else "reverted"
         if status in {"success", "reverted", "expired"} and status != receipt_status:
             conflict = True
@@ -649,7 +1021,7 @@ def _transaction(  # noqa: C901, PLR0912, PLR0915 - one signature's reconciliati
         ):
             conflict = True
             issues.append("ledger_receipt_slot_conflict")
-        if known["accountKeys"][0] != signer:
+        if known["feePayer"] != signer:
             valid_ledger = False
             issues.append("receipt_payer_mismatch")
     else:
@@ -674,6 +1046,9 @@ def _transaction(  # noqa: C901, PLR0912, PLR0915 - one signature's reconciliati
         "receipt_observations": len(observations),
         "observed_network_fee_lamports": fee,
         "fee_commitment": fee_commitment,
+        "economic_receipt": _economic_receipt(known, field_commitments, signer)
+        if kind == "live" and receipt_status is not None
+        else None,
         "issues": sorted(set(issues)),
     }
 
@@ -702,11 +1077,15 @@ def summarize(path: Path) -> dict:
                 receipts.get(row["signature"], []),
             )
         )
-    counts, event_issues = _events(
-        data["evidence_events"],
-        profiles,
-        {row["signature"]: row for row in transactions},
+    by_signature = {row["signature"]: row for row in transactions}
+    counts, event_issues, events = _events(
+        data["evidence_events"], profiles, by_signature
     )
+    for transaction in transactions:
+        transaction["event_ids"] = []
+    for event in events:
+        for link in event["submission_links"]:
+            by_signature[link["signature"]]["event_ids"].append(event["event_id"])
     live = [row for row in transactions if row["kind"] == "live"]
     observed = [row for row in live if row["observed_network_fee_lamports"] is not None]
     unattributed = sum(
@@ -720,26 +1099,91 @@ def summarize(path: Path) -> dict:
         )
         for commitment in ("confirmed", "finalized")
     }
-    orphan_outcomes = bool(set(outcomes) - submissions)
-    complete = (
-        bool(live)
-        and len(observed) == len(live)
-        and all(row["fee_commitment"] == "finalized" for row in observed)
-        and not unattributed
-        and not missing_tables
-        and has_profile_column
-        and not event_issues
-        and not orphan_outcomes
-        and not any(
-            set(row["issues"])
-            - {
-                "missing_receipt_fee",
-                "invalid_receipt_fee",
-                "receipt_observer_not_live",
-            }
-            for row in receipt_issues
+    orphan_outcomes = [
+        _orphan_outcome(outcome)
+        for signature, outcome in outcomes.items()
+        if signature not in submissions
+    ]
+    finalized_total_blockers = [
+        {"code": code, "reason": reason, "next_check": next_check}
+        for code, satisfied, reason, next_check in (
+            (
+                "no_attributable_live_submissions",
+                bool(live),
+                "No attributable live submissions are retained.",
+                "Review original submission provenance. A zero observed subtotal is not a proven session total.",
+            ),
+            (
+                "unknown_live_fees",
+                len(observed) == len(live),
+                "Some attributable live submissions have unknown network fees.",
+                "Inspect submissions with unknown observed fees and their receipt issues. Fee budgets cannot replace receipts.",
+            ),
+            (
+                "unfinalized_live_fees",
+                all(row["fee_commitment"] == "finalized" for row in observed),
+                "Some observed fees lack finalized evidence.",
+                "Check retained finalized receipts for those signatures. A confirmed fee must not be relabeled finalized.",
+            ),
+            (
+                "unattributed_or_invalid_submissions",
+                not unattributed,
+                "Some submissions lack valid original execution provenance.",
+                "Inspect submission profile issues. Later observers cannot establish the original execution kind.",
+            ),
+            (
+                "missing_evidence_tables",
+                not missing_tables,
+                "The ledger is missing evidence tables.",
+                "Review missing_evidence_tables. Preserve the legacy ledger; missing history cannot be inferred.",
+            ),
+            (
+                "missing_submission_profile_column",
+                has_profile_column,
+                "The submission schema has no evidence-profile column.",
+                "Treat original execution provenance as unavailable. Adding a column would not establish historical attribution.",
+            ),
+            (
+                "event_integrity_issues",
+                not event_issues,
+                "Lifecycle observations have unresolved validation issues.",
+                "Inspect linked and unlinked event checks. Disputed claims must not erase independently observed fees.",
+            ),
+            (
+                "orphan_ledger_outcomes",
+                not orphan_outcomes,
+                "Some ledger outcomes have no retained submission.",
+                "Inspect orphan_outcomes and compare their signatures with retained submissions. Preserve unassigned outcomes rather than dropping them.",
+            ),
+            (
+                "receipt_integrity_issues",
+                not any(
+                    set(row["issues"])
+                    - {
+                        "missing_receipt_fee",
+                        "invalid_receipt_fee",
+                        "receipt_observer_not_live",
+                    }
+                    for row in receipt_issues
+                ),
+                "Receipt validation or coverage issues remain.",
+                "Inspect receipt_issues and matching submissions. Preserve rejected, conflicting and orphan observations.",
+            ),
+            (
+                "invalid_evidence_profiles",
+                all(profile["valid"] for profile in profiles.values()),
+                "Some stored evidence profiles fail validation.",
+                "Inspect profile issues and stored hashes. Do not replace historical provenance with a current profile.",
+            ),
         )
-        and all(profile["valid"] for profile in profiles.values())
+        if not satisfied
+    ]
+    economics = [row["economic_receipt"] for row in live]
+    native_count = sum(
+        row is not None and row["native"] is not None for row in economics
+    )
+    token_count = sum(
+        row is not None and row["tokens"] is not None for row in economics
     )
     limitations = [
         "Network fees alone do not establish all-in return, fills, strategy validity, or capacity; no PnL is computed.",
@@ -750,6 +1194,14 @@ def summarize(path: Path) -> dict:
         "Live event checks cover declared status, slot, gate action, intent and entry/exit links only; fill quantities, prices, token identity, event order and decision quality are not verified.",
         "Unknown or locally failed observations do not contradict later success. Expiry claims are compared with the retained ledger, not independently verified on chain.",
         "Coverage is limited to this ledger snapshot; unrecorded transactions cannot be ruled out.",
+        "Economic receipts show signer native and owner-attributed token balance changes, not trade fills, spendable inventory, or realized PnL.",
+        "Native changes already include network fees. The fee-excluded change adds meta.fee back once; it still includes rent, wrapping, tips and other transfers, which are not separately attributed.",
+        "Token changes are per account in raw units; WSOL is not combined with native SOL or valued as profit. Missing metadata, changed ownership and unproven account creation/closure remain unknown.",
+        "Balance finality is no stronger than the observations containing its inputs. A finalized fee alone cannot finalize earlier balance observations.",
+        "Lifecycle links are recorded associations, not a timeline or proof of causality. A decision intent may cover multiple wire attempts; result signatures never imply outcomes for sibling attempts.",
+        "Event projections omit free text and raw payloads. Invalid JSON, content hashes or profiles cannot supply claims or links; consistent but disputed claims remain linked with their issues.",
+        "Finalized-total blockers explain the existing network-fee completeness checks only. Their absence is not trading readiness, complete balance accounting, or proof of profit; next checks do not fetch, repair, or relabel evidence.",
+        "snapshot.generated_utc is the local report generation time, not a receipt time, ledger update watermark, or proof of market freshness. Cached reports retain their original generation time.",
     ]
     if not has_profile_column:
         limitations.append(
@@ -760,14 +1212,21 @@ def summarize(path: Path) -> dict:
             "Evidence tables are missing; legacy evidence is not backfilled or inferred."
         )
     if orphan_outcomes:
-        limitations.append("Orphan ledger outcomes make submission coverage uncertain.")
+        limitations.append(
+            "Orphan ledger outcomes make submission coverage uncertain. Their statuses "
+            "and slots are stored claims, not verified receipts; no submission, "
+            "original execution kind, fee or balance is inferred."
+        )
     return {
-        "version": 2,
+        "version": 7,
+        "snapshot": {"generated_utc": datetime.now(UTC).isoformat()},
         "missing_evidence_tables": missing_tables,
         "profiles": list(profiles.values()),
         "events_by_kind": counts,
+        "events": events,
         "event_issues": event_issues,
         "receipt_issues": receipt_issues,
+        "orphan_outcomes": orphan_outcomes,
         "transactions": transactions,
         "live_network_fees": {
             "submission_count": len(live),
@@ -777,8 +1236,16 @@ def summarize(path: Path) -> dict:
             "finalized_subtotal_lamports": subtotals["finalized"],
             "known_subtotal_lamports": sum(subtotals.values()),
             "complete_finalized_total_lamports": subtotals["finalized"]
-            if complete
+            if not finalized_total_blockers
             else None,
+            "finalized_total_blockers": finalized_total_blockers,
+        },
+        "live_balance_coverage": {
+            "submission_count": len(live),
+            "native_observed_count": native_count,
+            "native_unknown_count": len(live) - native_count,
+            "token_observed_count": token_count,
+            "token_unknown_count": len(live) - token_count,
         },
         "unattributed_submission_count": unattributed,
         "limitations": limitations,
@@ -789,6 +1256,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "path", type=Path, help="existing transaction ledger SQLite file"
+    )
+    parser.add_argument(
+        "--output", type=Path, help="save JSON evidence snapshot; refuses to overwrite"
     )
     args = parser.parse_args()
     try:
@@ -801,6 +1271,12 @@ def main() -> None:
             file=sys.stderr,
         )
         raise SystemExit(1) from None
+    if args.output is not None:
+        try:
+            with args.output.open("x", encoding="utf-8") as destination:
+                print(encoded, file=destination)
+        except OSError as exc:
+            parser.exit(1, f"Cannot save evidence report: {type(exc).__name__}\n")
     print(encoded)
 
 

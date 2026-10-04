@@ -826,8 +826,9 @@ these records. Existing live history has **not** been backfilled or relabeled.
 
 Offline lifecycle proof, including a real SQLite write rejection and reopen:
 `uv run --offline --no-sync python -B learning-examples/verify_trade_evidence.py`.
-It uses only synthetic receipts and temporary storage, without keys, signing,
-network access, or reads/writes of the live state.
+It uses only synthetic receipts and temporary storage (including the learning
+journal), with external scoring disabled. The safety guard forbids keys,
+signing, network access, and reads/writes of the live state.
 
 ### Read-only reconciliation
 
@@ -835,8 +836,17 @@ Audit a retained ledger without loading bot configuration, contacting a provider
 or running startup/status migrations:
 
 ```bash
-uv run --offline --no-sync python -B learning-examples/token-lifecycles/summarize_trade_evidence.py LEDGER.sqlite3
+uv run --offline --no-sync python -B -m learning.trade_evidence LEDGER.sqlite3
+
+# Or save a new snapshot as well as printing it:
+uv run --offline --no-sync python -B -m learning.trade_evidence LEDGER.sqlite3 --output evidence.json
 ```
+
+`--output` saves the same JSON emitted on stdout. Existing files and symlinks,
+including the input ledger, are refused rather than overwritten. Audit failures
+create no export. Write failures exit nonzero without emitting a report to stdout;
+a failed or interrupted write can leave an incomplete newly created file. File
+presence alone is not proof of a successful export.
 
 The reader uses SQLite `mode=ro`, `query_only`, and a transaction snapshot.
 Committed WAL rows remain visible; missing evidence tables stay missing.
@@ -844,6 +854,26 @@ SQLite still uses its normal reader locking/WAL bookkeeping. A missing path is
 an error, never a new database. Read/schema failures and fatal data errors exit
 nonzero. A valid report containing evidence gaps or integrity failures exits
 zero, **not** a readiness signal.
+
+The dashboard exposes the same `learning.trade_evidence` report under **Trades →
+Economic receipts**. Select an existing local ledger, then a submission to inspect
+native and raw token movements with their own commitments. Unknown amounts remain
+**Unknown**, distinct from zero; integer amounts are displayed as text to avoid
+browser floating-point rounding. Confirmed and finalized fee subtotals remain
+separate, and missing attribution stays visible.
+
+**Download trade evidence (JSON)** exports the displayed report snapshot, cached
+for 10 seconds between reruns. It is not a replay package or trading authorization.
+Read-only applies to this receipt panel, **not** the surrounding dashboard's
+trading controls or configuration loading. Use the CLI above for a
+configuration-free audit.
+
+`snapshot.generated_utc` is a timezone-aware ISO 8601 UTC timestamp from the local
+reporting clock. It records report generation, not the ledger's last update,
+receipt time, capture latency or market freshness. CLI stdout and the saved JSON
+share one timestamp; the dashboard caption and download retain the cached report's
+timestamp. Viewing or downloading an old report does not regenerate it. A new
+generation time does not prove the ledger changed.
 
 The JSON report separates original submission kind from receipt-observer kind.
 It checks stored content hashes and reconciles receipt identity, chain status,
@@ -855,7 +885,39 @@ Practice receipts cannot supply live costs, and a later observer cannot supply
 an old submission's missing provenance. Profiles/source hashes establish stored
 self-consistency, not independent authenticity.
 
-Report **version 2** also checks live event claims against the reconciled
+A supplied [`message.header`](https://solana.com/docs/core/transactions/transaction-structure#header)
+is validated and compared across receipts. All three counts must be unsigned
+bytes; the required signer count must match the retained signatures, and the
+read-only groups must leave a writable fee payer and fit the supplied account
+keys. Conflicting valid headers report `conflicting_receipt_header`; malformed
+headers report `invalid_receipt_payload`. Missing/null headers remain unavailable,
+so later valid headers add evidence without contradicting a partial receipt.
+This checks structure and consistency, not cryptographic signatures.
+
+[Parsed account keys](https://solana.com/docs/rpc/json-structures#parsed-accounts)
+also validate supplied, non-null `signer` and `writable` flags as booleans.
+Signer flags must match the leading signature positions; the payer cannot be
+declared unsigned or read-only. Missing/null flags remain unknown, so later
+per-account metadata can enrich a partial capture. Conflicting writable flags
+report `conflicting_receipt_accountKeys_<index>_writable` and withhold the fee.
+Malformed flags, raw and parsed keys mixed within one receipt, or more signatures
+than account keys report `invalid_receipt_payload`, including headerless receipts.
+
+Separate `json` and `jsonParsed` observations of one signature are reconciled by
+common facts, not RPC layout. Static keys must match the prefix of the resolved
+account list; a parsed observation can supply lookup addresses absent from a raw
+one. Instruction count/order, program IDs, account references and raw `data` are
+compared where available. Fully parsed instruction objects remain additional
+evidence: the audit does **not** decode raw program data to prove that its parsed
+meaning is equivalent. Missing/null stack heights and RPC program labels do not
+manufacture conflicts. Receipt hashes still cover the entire original payload.
+
+Malformed instruction indices or references outside a complete account list
+withhold fees. Unresolved lookup references remain unknown, not invalid.
+An observation without lookup identities cannot promote the balance accounting's
+finality, even when that observation independently finalizes the network fee.
+
+Report **version 7** also checks live event claims against the reconciled
 submissions. `event_issues` exposes terminal-status/slot contradictions, mismatched
 intent IDs, gate/action contradictions, and closures with missing, reverted,
 same-signature, or different-wallet entry links. The transaction's `receipt_slot`
@@ -865,10 +927,40 @@ remain in the known subtotal even when a separate event claim is false.
 Earlier `unknown` or local `failed` observations may converge to later success.
 `success: false` with chain status `success` can mean unavailable accounting, not
 a revert. A decision may fail before submission; no receipt is invented for it.
+
+Provided slots on live trade results, chain outcomes and closures must be unsigned
+64-bit integers, including uncertain or unsubmitted observations. Missing/null
+slots remain unknown; booleans, text and out-of-range values report
+`invalid_event_slot`. This does not erase independently observed fees.
+
 Position snapshots are captured before local removal, so `is_active: true` is
 expected in closure evidence. Changed observer profiles do not relabel entry
 submissions. Expiry is checked against the retained ledger, not independently
 proved on chain.
+
+The report retains typed `events` and each transaction's `event_ids`. Links state
+their basis: `decision_intent` associates a recorded decision with all retained
+wire attempts for that intent; `signature_reference` associates only explicitly
+named signatures; `position_entry` connects the recorded position to its entry.
+A result for one attempt never becomes another attempt's result. Repeated
+references produce one event association per signature, without multiplying fees.
+
+The dashboard's submission inspector shows **Linked lifecycle observations** with
+event kind, relationship, recorded claims and integrity checks. Self-consistent
+but disputed claims stay visible beside the reconciled receipt; a declared
+success cannot hide a revert or erase its fee. Corrupt JSON, content hashes or
+profiles cannot supply claims or links. Their issue records, and decisions with
+no matching submission, remain in the JSON export and the dashboard's **Unlinked
+lifecycle observations** panel. It lists category, event kind, checks and IDs;
+select one observation to inspect its sanitized record. Event-only ledgers open
+this panel by default; ledgers with no unlinked observations show no inspector.
+An absent link does not prove no transaction was sent. Raw event payloads and
+free-form reason/error fields are omitted.
+
+These are **recorded associations, not a timeline**. Identifier ordering does not
+establish event chronology or causality. Event kind never replaces a submission's
+original provenance, and a closure link does not establish token identity, fill
+quantity, complete costs or realized PnL.
 
 These checks validate declared links and outcomes, **not** traded token identity,
 fill quantities/prices, event ordering, or decision quality. Event counts still
@@ -884,6 +976,63 @@ each signature uses its strongest observation **containing the fee**.
 coverage, or finality is uncertain. This is network-fee accounting within the
 snapshot, not all-in PnL, a wallet census, validated learning, or policy activation.
 Event counts are observations, not trade counts.
+
+`live_network_fees.finalized_total_blockers` lists every failed completeness
+check as `code`, `reason`, and a read-only `next_check`. The dashboard's **Why the
+finalized fee total is unknown** expander shows the same explanations. Several
+blockers can coexist; the list uses the total's existing attribution, coverage,
+integrity and finality rules without changing eligible fees or paid subtotals.
+An empty list means only that this snapshot's network-fee total meets those
+rules—not trading readiness, complete balance accounting, or proof of profit.
+The suggested checks do not fetch, repair, or relabel evidence.
+
+`orphan_outcomes` preserves outcomes with no retained submission, exposing
+`signature`, `ledger_status`, `ledger_slot`, and validation `issues`. Invalid field
+values become `null`; raw errors are omitted. These are stored ledger claims, not
+verified receipts or evidence of original execution kind. They never create
+submissions or enter fee/balance totals, but continue to block completeness.
+The dashboard's **Integrity and accounting limits** panel includes these records
+and the existing `profiles` checks, without settings or source contents.
+
+Each attributable live submission with a consistent receipt now has an
+`economic_receipt`, separate from declared trade results:
+
+- `native` records the signer's pre/post lamports and signed change. The change
+  already includes network fees; `change_excluding_network_fee_lamports` adds
+  the observed `meta.fee` back exactly once, or stays `null` if that fee is
+  unknown. A fee-only revert therefore has a negative native change and a zero
+  fee-excluded change, not a successful zero-cost trade.
+- `tokens` records owner-attributed, per-account mint/program identity, decimals,
+  and raw pre/post quantities and changes. It uses integer amounts, not UI
+  prices or floating-point token amounts.
+  [RPC display fields](https://solana.com/docs/rpc/json-structures#token-balances)
+  `uiAmount` and `uiAmountString` are excluded from cross-read comparisons;
+  raw amounts, decimals and identities still participate. Stored receipt hashes
+  cover the original payload, including display fields. A missing creation/closure
+  side is zero only when the corresponding native account balance is zero. Missing
+  owner/amount metadata, changed identity, duplicate/out-of-range indices and
+  nonzero token changes on a reverted receipt leave token accounting unknown.
+  Revert checks run before owner filtering, including other owners' accounts;
+  invalid token movements do not erase independently observed network fees.
+  Token-balance rows compare by `accountIndex`, not list position; reordering
+  unchanged rows is not a conflict. Duplicate rows are retained for validation,
+  never deduplicated. Account-key and native-balance arrays remain positional.
+- Raw v0 receipts resolve loaded writable addresses before loaded readonly
+  addresses. Parsed account lists are already resolved and are not expanded
+  again. Missing lookup addresses or inconsistent native-array lengths leave
+  balance accounting unknown, without replacing independently observed fees.
+- `native.commitment` and `token_commitment` are bounded by the observations
+  containing their inputs. A finalized fee cannot promote confirmed balances.
+  `live_balance_coverage` reports observed and unknown counts separately for
+  native and token balances; `null` means unavailable, while an empty token list
+  means the supplied metadata contains no signer-owned token accounts.
+
+These are **balance movements, not fills or realized PnL**. Rent deposits/refunds,
+tips, wrapping and unrelated transfers remain included in native movements and
+are not separately classified. WSOL quantities stay separate from native SOL;
+there is no inferred token valuation, spendability, complete-wallet coverage or
+entry/exit profit. Practice and unattributed submissions cannot acquire live
+economic receipts from a later observer. Legacy history is not backfilled.
 
 The [retained version 1 legacy audit](trade-evidence-audit-20260916T040623Z.json) records
 26 submissions (24 successful, two expired), all without modern submission

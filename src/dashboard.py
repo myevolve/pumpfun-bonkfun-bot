@@ -23,6 +23,8 @@ import streamlit as st
 import yaml
 
 import dashboard_theme
+from learning import trade_evidence
+from learning.report import load_report
 
 st.set_page_config(page_title="PumpFun Terminal", page_icon="🎯", layout="wide")
 dashboard_theme.inject()
@@ -211,38 +213,20 @@ LESSON_DB = Path(".state/learning/lessons.sqlite3")
 
 @st.cache_data(ttl=10)
 def load_learning_stats() -> dict:
-    """Lesson journal summary: counts + Jev-vs-PnL evidence."""
-    if not LESSON_DB.exists():
-        return {}
-    conn = sqlite3.connect(str(LESSON_DB))
-    try:
-        out: dict = {}
-        out["total"] = conn.execute("SELECT COUNT(*) FROM lessons").fetchone()[0]
-        out["by_kind"] = dict(
-            conn.execute("SELECT kind, COUNT(*) FROM lessons GROUP BY kind")
-        )
-        out["scored"] = conn.execute(
-            "SELECT COUNT(*) FROM lessons WHERE jev_quality IS NOT NULL"
-        ).fetchone()[0]
-        out["resolved"] = conn.execute(
-            "SELECT COUNT(*) FROM lessons WHERE outcome_pnl_sol IS NOT NULL"
-        ).fetchone()[0]
-        out["pnl_by_quality"] = conn.execute(
-            "SELECT ROUND(jev_quality, 1) AS q, COUNT(*),"
-            " ROUND(AVG(outcome_pnl_sol), 8), ROUND(SUM(outcome_pnl_sol), 8)"
-            " FROM lessons WHERE outcome_pnl_sol IS NOT NULL"
-            " AND jev_quality IS NOT NULL GROUP BY q ORDER BY q"
-        ).fetchall()
-        out["recent"] = conn.execute(
-            "SELECT utc, kind, symbol, decision, jev_quality, jev_copycat,"
-            " outcome_pnl_sol, outcome_reason FROM lessons"
-            " ORDER BY id DESC LIMIT 40"
-        ).fetchall()
-    except sqlite3.OperationalError:
-        return {}
-    finally:
-        conn.close()
-    return out
+    """Use the same read-only eligibility rules as the CLI report."""
+    data = load_report(limit=40, db_path=LESSON_DB)
+    return {} if "error" in data else data
+
+
+@st.cache_data(ttl=10, max_entries=8)
+def load_trade_evidence(path: Path) -> dict:
+    """Cache the shared audit snapshot together with its original generation time."""
+    return trade_evidence.summarize(path)
+
+
+def _evidence_amount(value: int | None) -> str:
+    """Keep unknowns distinct from zero and integer amounts exact in the browser."""
+    return "Unknown" if value is None else f"{value:,}"
 
 
 # ─── Process control ─────────────────────────────────────────────────────────
@@ -835,13 +819,14 @@ with tab_charts:
 # ─── Learning tab ────────────────────────────────────────────────────────────
 
 with tab_learning:
-    st.subheader("Learning journal — does Jev predict outcomes?")
+    st.subheader("Learning journal — measurement coverage")
     lstats = load_learning_stats()
     if not lstats:
         st.info(
             "No lesson journal found (.state/learning/lessons.sqlite3). "
-            "Run the bot — every gate decision, fill, and exit lands here."
+            "Verify the measurement path offline before starting any collector."
         )
+        st.code("uv run --offline --no-sync learning-examples/verify_paper_horizons.py")
     else:
         l1, l2, l3, l4 = st.columns(4)
         with l1:
@@ -849,35 +834,90 @@ with tab_learning:
         with l2:
             st.metric("Jev-scored", lstats["scored"])
         with l3:
-            st.metric("Resolved outcomes", lstats["resolved"])
+            st.metric("Eligible live outcomes", lstats["resolved"])
         with l4:
             skips = lstats["by_kind"].get("gate_skip", 0)
             passes = lstats["by_kind"].get("gate_pass", 0)
             st.metric("Pass / skip", f"{passes} / {skips}")
 
+        st.warning(lstats["measurement_note"])
+        st.metric("Excluded legacy paper rows", lstats["excluded_legacy_paper"])
+        coverage = lstats["paper_coverage"]
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Planned paper entries", coverage["planned_entries"])
+        c2.metric("Complete paired entries", coverage["paired_entries"])
+        c3.metric("Distinct paired mints", coverage["paired_mints"])
+        st.caption(
+            f"Entry window: {coverage['first_entry_utc'] or 'none'} to "
+            f"{coverage['last_entry_utc'] or 'none'}. "
+            f"Pending entries: {coverage['pending_entries']}; "
+            f"entries with censoring: {coverage['censored_entries']} (can overlap). "
+            "Pending is not proof that a collector is alive. Repeated mints are not "
+            "independent market samples."
+        )
+        if not coverage["paired_entries"]:
+            st.info("No complete three-horizon cohorts. No comparative conclusion yet.")
+        st.download_button(
+            "Download evidence report (JSON)",
+            data=json.dumps(lstats, indent=2, allow_nan=False),
+            file_name="learning-evidence.json",
+            mime="application/json",
+            on_click="ignore",
+        )
+        st.caption(
+            "A summary of one database snapshot, not a frozen dataset, replay package, "
+            "profit certification, or execution authorization."
+        )
+        if lstats["paper_marks"]:
+            st.subheader("Gross mark returns by horizon")
+            st.caption(
+                "Same entry IDs at all three horizons. Return fractions, not SOL PnL. "
+                "Pending and censored observations remain in the denominator."
+            )
+            st.dataframe(pd.DataFrame(lstats["paper_marks"]), width="stretch")
+        if lstats["paper_comparisons"]:
+            st.subheader("Same-entry changes versus 60 seconds")
+            st.caption(
+                "Differences in gross return fractions on complete three-arm entries. "
+                "Fees, impact and missing exits are not priced; this is not a ranking "
+                "of executable strategies."
+            )
+            st.dataframe(pd.DataFrame(lstats["paper_comparisons"]), width="stretch")
+        if lstats["paper_censors"]:
+            st.subheader("Missing observations: causes and next checks")
+            st.dataframe(pd.DataFrame(lstats["paper_censors"]), width="stretch")
+
         if lstats["resolved"] == 0:
             st.info(
-                "No resolved outcomes yet. Paper fills resolve ~60s after "
-                "the fill (curve re-read); they only occur when the gate "
-                "accepts a coin (mayhem + real buyers). Live trades resolve "
-                "on exit."
+                "No eligible live outcomes. Historical paper proxies are excluded. "
+                "Gross marks are separate observations, not simulated fills."
             )
 
         if lstats["pnl_by_quality"]:
-            st.subheader("Realized PnL by Jev quality score")
+            st.subheader("Live outcome associations by raw Jev quality")
             st.caption(
-                "Each row: Jev score bucket → count, avg PnL, total PnL "
-                "(SOL). High buckets losing while low buckets win means Jev "
-                "has no edge here — do not promote it to the live gate."
+                "Descriptive only. Quality is an ordinal rubric, not a calibrated "
+                "win probability; these associations do not establish an edge."
             )
-            qdf = pd.DataFrame(
-                lstats["pnl_by_quality"],
-                columns=["jev score", "count", "avg pnl (SOL)", "total pnl (SOL)"],
-            ).set_index("jev score")
+            qdf = (
+                pd.DataFrame(lstats["pnl_by_quality"])
+                .rename(
+                    columns={
+                        "q": "jev score",
+                        "n": "count",
+                        "avg_pnl": "avg pnl (SOL)",
+                        "total_pnl": "total pnl (SOL)",
+                    }
+                )
+                .set_index("jev score")
+            )
             st.dataframe(qdf, width="stretch")
             st.bar_chart(qdf["avg pnl (SOL)"], color="#3b82f6")
 
-        st.subheader("Recent lessons")
+        st.subheader("Recent lessons (archive)")
+        st.caption(
+            "Legacy paper PnL values below are retained, but excluded from evidence."
+        )
         rdf = pd.DataFrame(
             lstats["recent"],
             columns=[
@@ -923,21 +963,337 @@ with tab_trades:
                     st.caption(t["uri"])
 
     st.divider()
-    st.subheader("Ledger Submissions")
-    submissions = load_ledger(wallet)
-    if not submissions:
-        st.info("No ledger submissions found")
+    st.subheader("Economic receipts")
+    st.caption(
+        "Read-only ledger evidence. Balance movements are not fills or realized PnL. "
+        "Rent, wrapping, tips and other transfers are not separately attributed."
+    )
+    ledger_paths = sorted(
+        path
+        for path in LEDGER_DIR.glob("*.sqlite3")
+        if path.is_file() and not path.is_symlink()
+    )
+    if not ledger_paths:
+        st.info("No transaction ledgers found in .state/transaction-ledgers.")
     else:
-        for s in submissions[:20]:
-            status = s.get("state", "?")
-            sig = s.get("signature", "?")[:16]
-            with st.expander(f"{status} — {sig}..."):
-                st.text(f"State: {status}")
-                st.text(f"Signature: {s.get('signature', 'n/a')}")
-                st.text(f"Intent: {s.get('intent_id', 'n/a')}")
-                st.text(f"Submitted: {s.get('submitted_at', 'n/a')}")
-                st.text(f"Quote amount: {s.get('quote_amount_raw', 'n/a')} lamports")
-                st.text(f"Fee: {s.get('fee_lamports', 'n/a')} lamports")
+        ledger_path = st.selectbox(
+            "Evidence ledger",
+            ledger_paths,
+            format_func=lambda path: path.name,
+        )
+        try:
+            evidence = load_trade_evidence(ledger_path)
+        except (OSError, sqlite3.Error, ValueError, TypeError, RecursionError):
+            st.error(
+                "Could not audit this ledger: unreadable file, invalid data, "
+                "or unsupported schema. No accounting result is available."
+            )
+        else:
+            fees = evidence["live_network_fees"]
+            balances = evidence["live_balance_coverage"]
+            with st.container(horizontal=True):
+                st.metric("Recorded submissions", len(evidence["transactions"]))
+                st.metric("Attributable live submissions", fees["submission_count"])
+                st.metric(
+                    "Unattributed or invalid submissions",
+                    evidence["unattributed_submission_count"],
+                )
+            if fees["complete_finalized_total_lamports"] is None:
+                st.warning(
+                    "Complete finalized network fees are unknown. Known subtotals "
+                    "are partial evidence, not total session spend or zero cost."
+                )
+                with st.expander("Why the finalized fee total is unknown"):
+                    for blocker in fees["finalized_total_blockers"]:
+                        st.markdown(f"**{blocker['reason']}**")
+                        st.caption("Next check: " + blocker["next_check"])
+            with st.container(horizontal=True):
+                st.metric(
+                    "Confirmed fee subtotal (lamports)",
+                    _evidence_amount(fees["confirmed_subtotal_lamports"]),
+                )
+                st.metric(
+                    "Finalized fee subtotal (lamports)",
+                    _evidence_amount(fees["finalized_subtotal_lamports"]),
+                )
+                st.metric(
+                    "Complete finalized fees (lamports)",
+                    _evidence_amount(fees["complete_finalized_total_lamports"]),
+                )
+            st.caption(
+                f"Fees observed for {fees['observed_count']} of "
+                f"{fees['submission_count']} attributable live submissions. "
+                f"Native accounting unknown: {balances['native_unknown_count']}; "
+                f"token accounting unknown: {balances['token_unknown_count']}. "
+                "Unattributed submissions are excluded from these counts and totals."
+            )
+            st.download_button(
+                "Download trade evidence (JSON)",
+                data=json.dumps(evidence, indent=2, sort_keys=True, allow_nan=False),
+                file_name=f"trade-evidence-{ledger_path.stem}.json",
+                mime="application/json",
+                on_click="ignore",
+            )
+            st.caption(
+                f"Report generated (UTC): {evidence['snapshot']['generated_utc']}. "
+                "Cached for 10 seconds between reruns. The download matches this "
+                "displayed snapshot, including its generation time. This local report "
+                "time is not receipt time or market freshness; the snapshot is not a "
+                "replay package or trading authorization."
+            )
+            evidence_rows = []
+            for transaction in evidence["transactions"]:
+                economic = transaction["economic_receipt"] or {}
+                native = economic.get("native") or {}
+                evidence_rows.append(
+                    {
+                        "Signature": transaction["signature"],
+                        "Original kind": transaction["kind"],
+                        "Recorded status": transaction["ledger_status"] or "Unknown",
+                        "Receipt status": transaction["receipt_status"] or "Unverified",
+                        "Network fee (lamports)": _evidence_amount(
+                            transaction["observed_network_fee_lamports"]
+                        ),
+                        "Fee commitment": transaction["fee_commitment"] or "Unknown",
+                        "Native change (lamports)": _evidence_amount(
+                            native.get("change_lamports")
+                        ),
+                        "Native commitment": native.get("commitment", "Unknown"),
+                    }
+                )
+            unlinked_events = {
+                event["event_id"]: event
+                for event in evidence["events"]
+                if not event["submission_links"]
+            }
+            st.caption(
+                f"{len(unlinked_events)} lifecycle observations have no linkable retained "
+                "submission. They are observations, not trade counts."
+            )
+            if unlinked_events:
+                with st.expander(
+                    "Unlinked lifecycle observations", expanded=not evidence_rows
+                ):
+                    st.caption(
+                        "A decision may stop before submission, reference an absent "
+                        "record, or have quarantined claims. No link does not prove "
+                        "no transaction was sent. Invalid observations cannot supply "
+                        "claims; raw payloads and free-form reasons remain excluded."
+                    )
+                    st.dataframe(
+                        [
+                            {
+                                "Category": event["category"] or "Unknown",
+                                "Event kind": event["kind"],
+                                "Checks": ", ".join(event["issues"])
+                                or "No detected inconsistency",
+                                "Event ID": event_id,
+                            }
+                            for event_id, event in unlinked_events.items()
+                        ],
+                        hide_index=True,
+                        width="stretch",
+                    )
+                    inspected_event_id = st.selectbox(
+                        "Inspect unlinked observation",
+                        list(unlinked_events),
+                        index=None,
+                        placeholder="Choose an observation",
+                        format_func=lambda event_id: (
+                            f"{event_id[:16]} | {unlinked_events[event_id]['kind']} | "
+                            f"{unlinked_events[event_id]['category'] or 'Unknown'}"
+                        ),
+                    )
+                    if inspected_event_id is not None:
+                        st.code(
+                            json.dumps(
+                                unlinked_events[inspected_event_id],
+                                indent=2,
+                                sort_keys=True,
+                                allow_nan=False,
+                            ),
+                            language="json",
+                        )
+            if not evidence_rows:
+                st.info("This ledger has no recorded submissions.")
+            else:
+                st.dataframe(evidence_rows, hide_index=True, width="stretch")
+                by_signature = {
+                    transaction["signature"]: transaction
+                    for transaction in evidence["transactions"]
+                }
+                inspected_signature = st.selectbox(
+                    "Inspect submission",
+                    list(by_signature),
+                    index=None,
+                    placeholder="Choose a signature",
+                    format_func=lambda signature: (
+                        f"{signature[:16]} | {by_signature[signature]['kind']} | "
+                        f"{by_signature[signature]['receipt_status'] or 'unverified'}"
+                    ),
+                )
+                if inspected_signature is not None:
+                    inspected = by_signature[inspected_signature]
+                    st.code(inspected_signature, language=None)
+                    economic = inspected["economic_receipt"]
+                    issues = inspected["issues"] + (
+                        economic["issues"] if economic is not None else []
+                    )
+                    if issues:
+                        st.warning(
+                            "Accounting issues: " + ", ".join(sorted(set(issues)))
+                        )
+                    if economic is None:
+                        st.info(
+                            "No attributable live economic receipt. Missing or excluded "
+                            "evidence does not mean zero cost."
+                        )
+                    else:
+                        native = economic["native"]
+                        if native is None:
+                            st.info("Native balance accounting is unknown.")
+                        else:
+                            st.table(
+                                {
+                                    "Before (lamports)": _evidence_amount(
+                                        native["pre_lamports"]
+                                    ),
+                                    "After (lamports)": _evidence_amount(
+                                        native["post_lamports"]
+                                    ),
+                                    "Change including network fee (lamports)": _evidence_amount(
+                                        native["change_lamports"]
+                                    ),
+                                    "Change excluding network fee (lamports)": _evidence_amount(
+                                        native["change_excluding_network_fee_lamports"]
+                                    ),
+                                    "Native commitment": native["commitment"],
+                                }
+                            )
+                        if economic["tokens"] is None:
+                            st.info("Token balance accounting is unknown.")
+                        elif not economic["tokens"]:
+                            st.info(
+                                "No signer-owned token balances were reported for "
+                                "this transaction."
+                            )
+                        else:
+                            st.caption(
+                                f"Token commitment: {economic['token_commitment']}. "
+                                "Raw units, not token valuations or spendable inventory."
+                            )
+                            st.dataframe(
+                                [
+                                    {
+                                        "Account": token["account"],
+                                        "Mint": token["mint"],
+                                        "Program": token["program_id"] or "Unknown",
+                                        "Decimals": str(token["decimals"]),
+                                        "Before (raw)": _evidence_amount(
+                                            token["pre_amount_raw"]
+                                        ),
+                                        "After (raw)": _evidence_amount(
+                                            token["post_amount_raw"]
+                                        ),
+                                        "Change (raw)": _evidence_amount(
+                                            token["change_raw"]
+                                        ),
+                                    }
+                                    for token in economic["tokens"]
+                                ],
+                                hide_index=True,
+                                width="stretch",
+                            )
+                    st.markdown("#### Linked lifecycle observations")
+                    st.caption(
+                        "Recorded associations, ordered by identifier, not a timeline. "
+                        "A decision intent may cover multiple attempts. Links do not "
+                        "certify fills, promote practice evidence, or change accounting."
+                    )
+                    event_ids = set(inspected["event_ids"])
+                    linked_events = [
+                        event
+                        for event in evidence["events"]
+                        if event["event_id"] in event_ids
+                    ]
+                    if not linked_events:
+                        st.info(
+                            "No linkable lifecycle observations for this submission. "
+                            "Missing evidence does not prove no decision was made."
+                        )
+                    else:
+                        if any(event["issues"] for event in linked_events):
+                            st.warning(
+                                "Some linked observations lack supporting evidence or "
+                                "contain conflicting claims. Review their checks."
+                            )
+                        st.dataframe(
+                            [
+                                {
+                                    "Category": event["category"] or "Unknown",
+                                    "Event kind": event["kind"],
+                                    "Relation": ", ".join(
+                                        relation.replace("_", " ")
+                                        for link in event["submission_links"]
+                                        if link["signature"] == inspected_signature
+                                        for relation in link["relations"]
+                                    ),
+                                    "Checks": ", ".join(event["issues"])
+                                    or "No detected inconsistency",
+                                    "Declared action": event["declared_action"]
+                                    or "Unknown",
+                                    "Reported status": event["reported_status"]
+                                    or "Unknown",
+                                    "Reported success": str(event["reported_success"])
+                                    if event["reported_success"] is not None
+                                    else "Unknown",
+                                    "Gate accepted": str(event["gate_accepted"])
+                                    if event["gate_accepted"] is not None
+                                    else "Unknown",
+                                    "Event ID": event["event_id"],
+                                }
+                                for event in linked_events
+                            ],
+                            hide_index=True,
+                            width="stretch",
+                        )
+                        with st.expander("Linked observation records"):
+                            st.code(
+                                json.dumps(
+                                    linked_events,
+                                    indent=2,
+                                    sort_keys=True,
+                                    allow_nan=False,
+                                ),
+                                language="json",
+                            )
+                    with st.expander("Reconciled submission record"):
+                        st.code(
+                            json.dumps(
+                                inspected, indent=2, sort_keys=True, allow_nan=False
+                            ),
+                            language="json",
+                        )
+            with st.expander("Integrity and accounting limits"):
+                st.code(
+                    json.dumps(
+                        {
+                            "missing_evidence_tables": evidence[
+                                "missing_evidence_tables"
+                            ],
+                            "receipt_issues": evidence["receipt_issues"],
+                            "event_issues": evidence["event_issues"],
+                            "orphan_outcomes": evidence["orphan_outcomes"],
+                            "profiles": evidence["profiles"],
+                        },
+                        indent=2,
+                        sort_keys=True,
+                        allow_nan=False,
+                    ),
+                    language="json",
+                )
+                for limitation in evidence["limitations"]:
+                    st.write(limitation)
 
 # ─── LetsBonk Watch tab ──────────────────────────────────────────────────────
 

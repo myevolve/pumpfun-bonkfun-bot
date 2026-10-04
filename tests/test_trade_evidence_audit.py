@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 import pytest
 from solders.pubkey import Pubkey
 from solders.signature import Signature
+from spl.token.constants import TOKEN_2022_PROGRAM_ID
 
 from core.transaction_ledger import TransactionLedger
 from core.transaction_state import TransactionOutcome, TransactionStatus
@@ -23,13 +24,12 @@ from core.transaction_state import TransactionOutcome, TransactionStatus
 if TYPE_CHECKING:
     from types import ModuleType
 
-AUDITOR = (
-    Path(__file__).resolve().parents[1]
-    / "learning-examples/token-lifecycles/summarize_trade_evidence.py"
-)
+AUDITOR = Path(__file__).resolve().parents[1] / "src/learning/trade_evidence.py"
 PAYER = str(Pubkey.from_bytes(bytes([1]) * 32))
 OTHER = str(Pubkey.from_bytes(bytes([2]) * 32))
 BLOCKHASH = str(Pubkey.from_bytes(bytes([3]) * 32))
+TOKEN_ACCOUNT = str(Pubkey.from_bytes(bytes([4]) * 32))
+MINT = str(Pubkey.from_bytes(bytes([5]) * 32))
 SENTINEL = "SYNTHETIC_AUDIT_CREDENTIAL_MUST_NOT_APPEAR"
 
 
@@ -91,6 +91,89 @@ def _receipt(signature: str, fee: int = 5_000, *, reverted: bool = False) -> dic
     }
 
 
+def _token_receipt(signature: str) -> dict:
+    result = _receipt(signature)
+    result["transaction"]["message"]["addressTableLookups"] = [
+        {"accountKey": BLOCKHASH, "writableIndexes": [0], "readonlyIndexes": [1]}
+    ]
+    result["meta"].update(
+        {
+            "preBalances": [1_000_000_000, 100_000_000, 0, 1_000_000],
+            "postBalances": [987_955_720, 110_000_000, 2_039_280, 1_000_000],
+            "loadedAddresses": {"writable": [TOKEN_ACCOUNT], "readonly": [MINT]},
+            "postTokenBalances": [
+                {
+                    "accountIndex": 2,
+                    "mint": MINT,
+                    "owner": PAYER,
+                    "programId": str(TOKEN_2022_PROGRAM_ID),
+                    "uiTokenAmount": {
+                        "amount": "25000000",
+                        "decimals": 6,
+                        "uiAmount": 25.0,
+                    },
+                }
+            ],
+        }
+    )
+    return result
+
+
+def _transfer_receipt(signature: str, encoding: str, *, lookup: bool = True) -> dict:
+    """Encode the same unsigned synthetic System transfer in RPC JSON formats."""
+    result = _receipt(signature)
+    program = str(Pubkey.default())
+    keys = [PAYER, program, OTHER] if lookup else [PAYER, OTHER, program]
+    program_index, destination_index = (1, 2) if lookup else (2, 1)
+    message, meta = result["transaction"]["message"], result["meta"]
+    message["accountKeys"] = keys[:2] if lookup else keys
+    message["header"] = {
+        "numRequiredSignatures": 1,
+        "numReadonlySignedAccounts": 0,
+        "numReadonlyUnsignedAccounts": 1,
+    }
+    meta["preBalances"] = [100_000, 0, 0]
+    meta["postBalances"] = [85_000, 0, 0]
+    meta["postBalances"][destination_index] = 10_000
+    if lookup:
+        message["addressTableLookups"] = [
+            {"accountKey": BLOCKHASH, "writableIndexes": [0], "readonlyIndexes": []}
+        ]
+        meta["loadedAddresses"] = {"writable": [OTHER], "readonly": []}
+    # System transfer discriminator (u32=2) and lamports (u64=10_000), base58.
+    message["instructions"] = [
+        {
+            "programIdIndex": program_index,
+            "accounts": [0, destination_index],
+            "data": "3Bxs43ZMjSRQLs6o",
+            "stackHeight": None,
+        }
+    ]
+    if encoding.startswith("raw"):
+        if encoding == "raw_unresolved":
+            del meta["loadedAddresses"]
+        return result
+    message["accountKeys"] = [
+        {"pubkey": key, "signer": index == 0, "writable": index != program_index}
+        for index, key in enumerate(keys)
+    ]
+    del message["header"]
+    del meta["loadedAddresses"]
+    instruction = {"programId": program, "stackHeight": 1}
+    if encoding == "partial":
+        instruction.update(accounts=[PAYER, OTHER], data="3Bxs43ZMjSRQLs6o")
+    else:
+        instruction.update(
+            program="system",
+            parsed={
+                "type": "transfer",
+                "info": {"source": PAYER, "destination": OTHER, "lamports": 10_000},
+            },
+        )
+    message["instructions"] = [instruction]
+    return result
+
+
 def _observe(
     ledger: TransactionLedger,
     signature: str,
@@ -107,15 +190,22 @@ def _transactions(report: dict) -> dict[str, dict]:
     return {row["signature"]: row for row in report["transactions"]}
 
 
-def _cli(path: Path) -> subprocess.CompletedProcess[str]:
+def _cli(path: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(  # noqa: S603 - fixed interpreter and local script; no shell
-        [sys.executable, str(AUDITOR), str(path)],
+        [sys.executable, "-m", "learning.trade_evidence", str(path), *args],
         cwd=path.parent,
         capture_output=True,
         text=True,
         check=False,
         timeout=30,
     )
+
+
+def _fee_blocker_codes(report: dict) -> set[str]:
+    return {
+        blocker["code"]
+        for blocker in report["live_network_fees"]["finalized_total_blockers"]
+    }
 
 
 def test_repeated_observers_and_finalization_count_actual_fees_once(
@@ -160,7 +250,11 @@ def test_repeated_observers_and_finalization_count_actual_fees_once(
     assert fees["finalized_subtotal_lamports"] == 11_000
     assert fees["confirmed_subtotal_lamports"] == 0
     assert fees["complete_finalized_total_lamports"] == 11_000
+    assert not _fee_blocker_codes(report)
     assert SENTINEL not in json.dumps(report)
+    reverted_native = rows[reverted]["economic_receipt"]["native"]
+    assert reverted_native["change_lamports"] == -6_000
+    assert reverted_native["change_excluding_network_fee_lamports"] == 0
 
 
 def test_missing_metadata_and_boolean_fee_are_unknown_but_zero_is_observed(
@@ -194,6 +288,16 @@ def test_missing_metadata_and_boolean_fee_are_unknown_but_zero_is_observed(
     assert report["live_network_fees"]["unknown_count"] == 2
     assert report["live_network_fees"]["known_subtotal_lamports"] == 0
     assert report["live_network_fees"]["complete_finalized_total_lamports"] is None
+    assert _fee_blocker_codes(report) == {
+        "unknown_live_fees",
+        "receipt_integrity_issues",
+    }
+    assert (
+        rows[boolean]["economic_receipt"]["native"][
+            "change_excluding_network_fee_lamports"
+        ]
+        is None
+    )
 
 
 def test_finalized_receipt_without_fee_cannot_promote_confirmed_fee(
@@ -216,11 +320,13 @@ def test_finalized_receipt_without_fee_cannot_promote_confirmed_fee(
     assert report["live_network_fees"]["confirmed_subtotal_lamports"] == 5_000
     assert report["live_network_fees"]["finalized_subtotal_lamports"] == 0
     assert report["live_network_fees"]["complete_finalized_total_lamports"] is None
+    assert _fee_blocker_codes(report) == {"unfinalized_live_fees"}
 
     with TransactionLedger(path) as ledger:
         _observe(ledger, signature, profile, _receipt(signature), "finalized")
     reconciled = auditor.summarize(path)
     assert reconciled["live_network_fees"]["complete_finalized_total_lamports"] == 5_000
+    assert not _fee_blocker_codes(reconciled)
 
 
 @pytest.mark.parametrize("disagreement", ["status", "slot", "payer", "fee", "balances"])
@@ -253,23 +359,31 @@ def test_conflicting_chain_or_ledger_evidence_withholds_fee(
     report = auditor.summarize(path)
     row = _transactions(report)[signature]
     assert row["observed_network_fee_lamports"] is None
+    assert row["economic_receipt"] is None
     assert row["issues"]
     assert report["live_network_fees"]["observed_count"] == 0
     assert report["live_network_fees"]["known_subtotal_lamports"] == 0
     assert report["live_network_fees"]["complete_finalized_total_lamports"] is None
 
 
+@pytest.mark.parametrize("message_field", ["recentBlockhash", "header"])
 def test_newly_available_fields_are_not_conflicts_but_message_changes_are(
-    tmp_path: Path, auditor: ModuleType
+    tmp_path: Path, auditor: ModuleType, message_field: str
 ) -> None:
     path = tmp_path / "ledger.sqlite"
     with TransactionLedger(path) as ledger:
         profile = _profile(ledger)
         signature = _reserve(ledger, 1, profile)
         full = _receipt(signature)
+        full["transaction"]["message"]["header"] = {
+            "numRequiredSignatures": 1,
+            "numReadonlySignedAccounts": 0,
+            "numReadonlyUnsignedAccounts": 0,
+        }
         partial = deepcopy(full)
         del partial["meta"]["preTokenBalances"]
         del partial["transaction"]["message"]["addressTableLookups"]
+        del partial["transaction"]["message"]["header"]
         _observe(ledger, signature, profile, partial)
         _observe(ledger, signature, profile, full, "finalized")
         report = auditor.summarize(path)
@@ -277,12 +391,120 @@ def test_newly_available_fields_are_not_conflicts_but_message_changes_are(
             _transactions(report)[signature]["observed_network_fee_lamports"] == 5_000
         )
         changed = deepcopy(full)
-        changed["transaction"]["message"]["recentBlockhash"] = OTHER
+        if message_field == "header":
+            changed["transaction"]["message"]["header"][
+                "numReadonlyUnsignedAccounts"
+            ] = 1
+        else:
+            changed["transaction"]["message"]["recentBlockhash"] = OTHER
         _observe(ledger, signature, profile, changed, "finalized")
 
     report = auditor.summarize(path)
     assert _transactions(report)[signature]["observed_network_fee_lamports"] is None
+    assert (
+        "conflicting_receipt_" + message_field
+        in _transactions(report)[signature]["issues"]
+    )
     assert report["live_network_fees"]["known_subtotal_lamports"] == 0
+
+
+def test_display_amount_changes_preserve_raw_balance_reconciliation(
+    tmp_path: Path, auditor: ModuleType
+) -> None:
+    path = tmp_path / "ledger.sqlite"
+    with TransactionLedger(path) as ledger:
+        profile = _profile(ledger)
+        signature = _reserve(ledger, 1, profile)
+        result = _token_receipt(signature)
+        meta = result["meta"]
+        meta["preTokenBalances"] = [deepcopy(meta["postTokenBalances"][0])]
+        meta["preTokenBalances"][0]["uiTokenAmount"].update(amount="0", uiAmount=0.0)
+        meta["preBalances"][2] = meta["postBalances"][2]
+        meta["postBalances"][0] = 989_995_000
+        _observe(ledger, signature, profile, result)
+        formatted = deepcopy(result)
+        for field, display_amount in [
+            ("preTokenBalances", "0.000000"),
+            ("postTokenBalances", "25.000000"),
+        ]:
+            amount = formatted["meta"][field][0]["uiTokenAmount"]
+            amount["uiAmount"] = None
+            amount["uiAmountString"] = display_amount
+        _observe(ledger, signature, profile, formatted, "finalized")
+        report = auditor.summarize(path)
+        row = _transactions(report)[signature]
+        assert report["live_network_fees"]["complete_finalized_total_lamports"] == 5_000
+        assert row["fee_commitment"] == "finalized"
+        assert not row["issues"]
+        economic = row["economic_receipt"]
+        assert economic["token_commitment"] == "finalized"  # noqa: S105 - public chain commitment
+        assert economic["tokens"][0]["pre_amount_raw"] == 0
+        assert economic["tokens"][0]["post_amount_raw"] == 25_000_000
+        assert economic["tokens"][0]["change_raw"] == 25_000_000
+
+        changed = deepcopy(formatted)
+        changed["meta"]["postTokenBalances"][0]["uiTokenAmount"]["amount"] = "25000001"
+        _observe(ledger, signature, profile, changed, "finalized")
+    report = auditor.summarize(path)
+    row = _transactions(report)[signature]
+    assert row["observed_network_fee_lamports"] is None
+    assert row["economic_receipt"] is None
+    assert "conflicting_receipt_postTokenBalances" in row["issues"]
+    assert report["live_network_fees"]["complete_finalized_total_lamports"] is None
+
+
+def test_token_balance_order_does_not_hide_fees_or_reassign_amounts(
+    tmp_path: Path, auditor: ModuleType
+) -> None:
+    path = tmp_path / "ledger.sqlite"
+    with TransactionLedger(path) as ledger:
+        profile = _profile(ledger)
+        signature = _reserve(ledger, 1, profile)
+        result = _token_receipt(signature)
+        meta = result["meta"]
+        template = meta["postTokenBalances"][0]
+        for field, amounts in [
+            ("preTokenBalances", ("20000000", "0")),
+            ("postTokenBalances", ("10000000", "25000000")),
+        ]:
+            meta[field] = [
+                {
+                    **template,
+                    "accountIndex": index,
+                    "uiTokenAmount": {"amount": amount, "decimals": 6},
+                }
+                for index, amount in zip((1, 2), amounts, strict=True)
+            ]
+        meta["preBalances"][2] = meta["postBalances"][2]
+        meta["postBalances"][0] = 989_995_000
+        _observe(ledger, signature, profile, result)
+        reordered = deepcopy(result)
+        for field in ("preTokenBalances", "postTokenBalances"):
+            reordered["meta"][field].reverse()
+        _observe(ledger, signature, profile, reordered, "finalized")
+        report = auditor.summarize(path)
+        row = _transactions(report)[signature]
+        assert report["live_network_fees"]["complete_finalized_total_lamports"] == 5_000
+        assert not row["issues"]
+        economic = row["economic_receipt"]
+        assert economic["token_commitment"] == "finalized"  # noqa: S105 - public chain commitment
+        assert {
+            token["account"]: token["change_raw"] for token in economic["tokens"]
+        } == {OTHER: -10_000_000, TOKEN_ACCOUNT: 25_000_000}
+
+        changed = deepcopy(reordered)
+        first, second = changed["meta"]["postTokenBalances"]
+        first["accountIndex"], second["accountIndex"] = (
+            second["accountIndex"],
+            first["accountIndex"],
+        )
+        _observe(ledger, signature, profile, changed, "finalized")
+    report = auditor.summarize(path)
+    row = _transactions(report)[signature]
+    assert row["observed_network_fee_lamports"] is None
+    assert row["economic_receipt"] is None
+    assert "conflicting_receipt_postTokenBalances" in row["issues"]
+    assert report["live_network_fees"]["complete_finalized_total_lamports"] is None
 
 
 @pytest.mark.parametrize(
@@ -358,6 +580,13 @@ def test_invalid_original_profile_is_not_replaced_by_valid_observer(
     assert report["live_network_fees"]["submission_count"] == 0
     assert report["live_network_fees"]["known_subtotal_lamports"] == 0
     assert report["live_network_fees"]["complete_finalized_total_lamports"] is None
+    expected = {
+        "no_attributable_live_submissions",
+        "unattributed_or_invalid_submissions",
+    }
+    if corruption == "profile_hash":
+        expected.add("invalid_evidence_profiles")
+    assert _fee_blocker_codes(report) == expected
 
 
 def test_originally_unattributed_stays_unattributed_despite_live_observer(
@@ -376,10 +605,12 @@ def test_originally_unattributed_stays_unattributed_despite_live_observer(
     assert row["kind"] == "unattributed"
     assert row["submission_profile_id"] is None
     assert row["observed_network_fee_lamports"] == 5_000
+    assert row["economic_receipt"] is None
     assert report["unattributed_submission_count"] == 1
     assert report["live_network_fees"]["submission_count"] == 1
     assert report["live_network_fees"]["known_subtotal_lamports"] == 5_000
     assert report["live_network_fees"]["complete_finalized_total_lamports"] is None
+    assert _fee_blocker_codes(report) == {"unattributed_or_invalid_submissions"}
 
 
 def test_practice_profiles_and_events_never_inflate_live_fees(
@@ -411,7 +642,14 @@ def test_practice_profiles_and_events_never_inflate_live_fees(
     assert report["live_network_fees"]["submission_count"] == 1
     assert report["live_network_fees"]["known_subtotal_lamports"] == 5_000
     assert report["live_network_fees"]["complete_finalized_total_lamports"] == 5_000
+    assert not _fee_blocker_codes(report)
     assert practice_receipt in {row["receipt_id"] for row in report["receipt_issues"]}
+    assert report["live_balance_coverage"]["native_observed_count"] == 1
+    assert all(
+        _transactions(report)[signature]["economic_receipt"] is None
+        for kind, signature in signatures.items()
+        if kind != "live"
+    )
 
 
 @pytest.mark.parametrize("observer_kind", ["absent", "dangling", "corrupt"])
@@ -475,6 +713,110 @@ def test_orphan_receipts_and_untracked_event_signatures_are_exposed(
     assert orphan not in _transactions(report)
     assert report["live_network_fees"]["known_subtotal_lamports"] == 5_000
     assert report["live_network_fees"]["complete_finalized_total_lamports"] is None
+    assert _fee_blocker_codes(report) == {
+        "event_integrity_issues",
+        "receipt_integrity_issues",
+    }
+
+
+@pytest.mark.parametrize(
+    ("unrelated", "expected"),
+    [
+        ("outcome", "orphan_ledger_outcomes"),
+        ("profile", "invalid_evidence_profiles"),
+    ],
+)
+def test_unrelated_integrity_failure_blocks_only_the_complete_fee_total(
+    tmp_path: Path, auditor: ModuleType, unrelated: str, expected: str
+) -> None:
+    path = tmp_path / "ledger.sqlite"
+    with TransactionLedger(path) as ledger:
+        profile = _profile(ledger)
+        unused_profile = _profile(ledger, run="unrelated")
+        signature = _reserve(ledger, 1, profile)
+        ledger.record_outcome(
+            TransactionOutcome(TransactionStatus.SUCCESS, signature, slot=42)
+        )
+        _observe(ledger, signature, profile, _receipt(signature), "finalized")
+    with closing(sqlite3.connect(path)) as connection, connection:
+        if unrelated == "outcome":
+            connection.execute(
+                "INSERT INTO outcomes(signature, status, slot) VALUES (?, 'success', 42)",
+                (_signature(2),),
+            )
+        else:
+            connection.execute(
+                "UPDATE evidence_profiles SET settings_json = '{}' WHERE profile_id = ?",
+                (unused_profile,),
+            )
+    report = auditor.summarize(path)
+    assert _fee_blocker_codes(report) == {expected}
+    fees = report["live_network_fees"]
+    assert fees["complete_finalized_total_lamports"] is None
+    assert fees["known_subtotal_lamports"] == 5_000
+    assert fees["finalized_subtotal_lamports"] == 5_000
+    assert report["orphan_outcomes"] == (
+        [
+            {
+                "signature": _signature(2),
+                "ledger_status": "success",
+                "ledger_slot": 42,
+                "issues": [],
+            }
+        ]
+        if unrelated == "outcome"
+        else []
+    )
+    assert list(_transactions(report)) == [signature]
+
+
+@pytest.mark.parametrize(
+    ("stored", "expected"),
+    [
+        (
+            (_signature(2), SENTINEL, SENTINEL),
+            {
+                "signature": _signature(2),
+                "ledger_status": None,
+                "ledger_slot": None,
+                "issues": ["invalid_ledger_slot", "invalid_ledger_status"],
+            },
+        ),
+        (
+            (SENTINEL, "unknown", None),
+            {
+                "signature": None,
+                "ledger_status": "unknown",
+                "ledger_slot": None,
+                "issues": ["invalid_outcome_signature"],
+            },
+        ),
+    ],
+)
+def test_invalid_orphan_outcomes_withhold_untrusted_fields_not_paid_fees(
+    tmp_path: Path,
+    auditor: ModuleType,
+    stored: tuple[str, str, str | None],
+    expected: dict,
+) -> None:
+    path = tmp_path / "ledger.sqlite"
+    with TransactionLedger(path) as ledger:
+        profile = _profile(ledger)
+        paid = _reserve(ledger, 1, profile)
+        _observe(ledger, paid, profile, _receipt(paid), "finalized")
+    with closing(sqlite3.connect(path)) as connection, connection:
+        connection.execute("PRAGMA ignore_check_constraints=ON")
+        connection.execute(
+            "INSERT INTO outcomes(signature, status, slot, error) VALUES (?, ?, ?, ?)",
+            (*stored, SENTINEL),
+        )
+    report = auditor.summarize(path)
+    assert report["orphan_outcomes"] == [expected]
+    assert list(_transactions(report)) == [paid]
+    assert _fee_blocker_codes(report) == {"orphan_ledger_outcomes"}
+    assert report["live_network_fees"]["known_subtotal_lamports"] == 5_000
+    assert report["live_network_fees"]["complete_finalized_total_lamports"] is None
+    assert SENTINEL not in json.dumps(report, allow_nan=False)
 
 
 def test_tampered_and_dangling_events_are_not_valid_observations(
@@ -541,6 +883,12 @@ def test_cli_keeps_legacy_schema_and_data_unchanged(tmp_path: Path) -> None:
     assert row["submission_state"] is None
     assert row["observed_network_fee_lamports"] is None
     assert report["live_network_fees"]["complete_finalized_total_lamports"] is None
+    assert _fee_blocker_codes(report) == {
+        "no_attributable_live_submissions",
+        "unattributed_or_invalid_submissions",
+        "missing_evidence_tables",
+        "missing_submission_profile_column",
+    }
     assert path.read_bytes() == before_bytes
     with closing(sqlite3.connect(path)) as connection:
         assert {
@@ -555,24 +903,34 @@ def test_cli_missing_file_is_not_created_and_invalid_database_is_an_error(
     tmp_path: Path,
 ) -> None:
     missing = tmp_path / "missing.sqlite"
-    result = _cli(missing)
+    output = tmp_path / "snapshot.json"
+    result = _cli(missing, "--output", str(output))
     assert result.returncode != 0
     assert not missing.exists()
+    assert not output.exists()
     invalid = tmp_path / "invalid.sqlite"
     invalid.write_bytes(b"not a SQLite database")
-    result = _cli(invalid)
+    result = _cli(invalid, "--output", str(output))
     assert result.returncode != 0
     assert invalid.read_bytes() == b"not a SQLite database"
+    assert not output.exists()
     incomplete = tmp_path / "incomplete.sqlite"
     with closing(sqlite3.connect(incomplete)) as connection, connection:
         connection.execute("CREATE TABLE intents (intent_id TEXT)")
-    assert _cli(incomplete).returncode != 0
+    assert _cli(incomplete, "--output", str(output)).returncode != 0
+    assert not output.exists()
 
 
 def test_cli_reads_committed_wal_without_mutating_schema_or_data(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "wal ledger #1.sqlite"
+    output = tmp_path / f"{SENTINEL}.json"
+    linked_output = tmp_path / "snapshot-link.json"
+    linked_output.symlink_to(output)
+    missing_target = tmp_path / "never-created.json"
+    dangling_output = tmp_path / "dangling.json"
+    dangling_output.symlink_to(missing_target)
     with TransactionLedger(path) as ledger:
         ledger.connection.execute("PRAGMA wal_autocheckpoint=0")
         ledger.connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -583,14 +941,32 @@ def test_cli_reads_committed_wal_without_mutating_schema_or_data(
         before_dump = tuple(ledger.connection.iterdump())
         before_database = path.read_bytes()
         before_wal = path.with_name(path.name + "-wal").read_bytes()
-        result = _cli(path)
+        result = _cli(path, "--output", str(output))
         assert result.returncode == 0, result.stderr
-        report = json.loads(result.stdout)
+        report = json.loads(output.read_text(encoding="utf-8"))
         assert (
             _transactions(report)[signature]["observed_network_fee_lamports"] == 5_000
         )
         assert report["live_network_fees"]["complete_finalized_total_lamports"] == 5_000
         assert SENTINEL not in result.stdout
+        saved_bytes = output.read_bytes()
+        assert SENTINEL.encode() not in saved_bytes
+        for refused in (
+            output,
+            path,
+            linked_output,
+            dangling_output,
+            tmp_path / SENTINEL / "snapshot.json",
+        ):
+            rejected = _cli(path, "--output", str(refused))
+            assert rejected.returncode != 0
+            assert rejected.stdout == ""
+            assert SENTINEL not in rejected.stderr
+        assert output.read_bytes() == saved_bytes
+        assert linked_output.is_symlink() and linked_output.readlink() == output
+        assert dangling_output.is_symlink()
+        assert dangling_output.readlink() == missing_target
+        assert not missing_target.exists()
         assert tuple(ledger.connection.iterdump()) == before_dump
         assert path.read_bytes() == before_database
         assert path.with_name(path.name + "-wal").read_bytes() == before_wal
@@ -601,6 +977,8 @@ def test_cli_reads_committed_wal_without_mutating_schema_or_data(
     [
         "signature_mismatch",
         "invalid_signature",
+        "too_many_signatures",
+        "mixed_account_keys",
         "invalid_account",
         "invalid_slot",
         "missing_error",
@@ -618,6 +996,10 @@ def test_hash_valid_but_noncanonical_receipt_cannot_supply_fee(
             result["transaction"]["signatures"] = [_signature(2)]
         elif malformation == "invalid_signature":
             result["transaction"]["signatures"].append("not-a-signature")
+        elif malformation == "too_many_signatures":
+            result["transaction"]["signatures"].extend([_signature(2), _signature(3)])
+        elif malformation == "mixed_account_keys":
+            result["transaction"]["message"]["accountKeys"][1] = {"pubkey": OTHER}
         elif malformation == "invalid_account":
             result["transaction"]["message"]["accountKeys"][1] = "not-a-pubkey"
         elif malformation == "invalid_slot":
@@ -632,6 +1014,116 @@ def test_hash_valid_but_noncanonical_receipt_cannot_supply_fee(
     assert row["observed_network_fee_lamports"] is None
     assert receipt_id in {entry["receipt_id"] for entry in report["receipt_issues"]}
     assert report["live_network_fees"]["known_subtotal_lamports"] == 0
+    assert report["live_network_fees"]["complete_finalized_total_lamports"] is None
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        (None, []),
+        (None, {}),
+        ("numRequiredSignatures", True),
+        ("numReadonlyUnsignedAccounts", -1),
+        ("numReadonlySignedAccounts", 2**8),
+        ("numRequiredSignatures", 2),
+        ("numReadonlySignedAccounts", 1),
+        ("numReadonlyUnsignedAccounts", 2),
+    ],
+)
+def test_invalid_message_header_cannot_supply_receipt_evidence(
+    tmp_path: Path, auditor: ModuleType, field: str | None, value: object
+) -> None:
+    path = tmp_path / "ledger.sqlite"
+    with TransactionLedger(path) as ledger:
+        profile = _profile(ledger)
+        signature = _reserve(ledger, 1, profile)
+        result = _token_receipt(signature)
+        _observe(ledger, signature, profile, result)
+        header = {
+            "numRequiredSignatures": 1,
+            "numReadonlySignedAccounts": 0,
+            "numReadonlyUnsignedAccounts": 0,
+        }
+        result["transaction"]["message"]["header"] = (
+            value if field is None else {**header, field: value}
+        )
+        receipt_id = _observe(ledger, signature, profile, result, "finalized")
+    report = auditor.summarize(path)
+    row = _transactions(report)[signature]
+    assert row["observed_network_fee_lamports"] is None
+    assert row["economic_receipt"] is None
+    assert any(
+        entry["receipt_id"] == receipt_id
+        and "invalid_receipt_payload" in entry["issues"]
+        for entry in report["receipt_issues"]
+    )
+    assert report["live_network_fees"]["complete_finalized_total_lamports"] is None
+
+
+@pytest.mark.parametrize(
+    ("index", "flag", "value"),
+    [
+        (0, "signer", False),
+        (0, "writable", False),
+        (1, "signer", True),
+        (0, "signer", 1),
+        (1, "writable", "false"),
+    ],
+)
+def test_invalid_parsed_account_permissions_withhold_receipt_evidence(
+    tmp_path: Path, auditor: ModuleType, index: int, flag: str, value: object
+) -> None:
+    path = tmp_path / "ledger.sqlite"
+    with TransactionLedger(path) as ledger:
+        profile = _profile(ledger)
+        signature = _reserve(ledger, 1, profile)
+        result = _receipt(signature)
+        keys = [
+            {"pubkey": PAYER, "signer": True, "writable": True},
+            {"pubkey": OTHER, "signer": False, "writable": True},
+        ]
+        result["transaction"]["message"]["accountKeys"] = keys
+        _observe(ledger, signature, profile, result)
+        keys[index][flag] = value
+        receipt_id = _observe(ledger, signature, profile, result, "finalized")
+    report = auditor.summarize(path)
+    row = _transactions(report)[signature]
+    assert row["observed_network_fee_lamports"] is None
+    assert row["economic_receipt"] is None
+    assert any(
+        entry["receipt_id"] == receipt_id
+        and "invalid_receipt_payload" in entry["issues"]
+        for entry in report["receipt_issues"]
+    )
+    assert report["live_network_fees"]["complete_finalized_total_lamports"] is None
+
+
+def test_new_parsed_permissions_are_evidence_but_changed_permissions_conflict(
+    tmp_path: Path, auditor: ModuleType
+) -> None:
+    path = tmp_path / "ledger.sqlite"
+    with TransactionLedger(path) as ledger:
+        profile = _profile(ledger)
+        signature = _reserve(ledger, 1, profile)
+        result = _receipt(signature)
+        keys = [{"pubkey": PAYER}, {"pubkey": OTHER, "writable": None}]
+        result["transaction"]["message"]["accountKeys"] = keys
+        _observe(ledger, signature, profile, result)
+        for index, key in enumerate(keys):
+            key.update(signer=index == 0, writable=True)
+        _observe(ledger, signature, profile, result, "finalized")
+        report = auditor.summarize(path)
+        assert (
+            _transactions(report)[signature]["observed_network_fee_lamports"] == 5_000
+        )
+        assert report["live_network_fees"]["complete_finalized_total_lamports"] == 5_000
+        keys[1]["writable"] = False
+        _observe(ledger, signature, profile, result, "finalized")
+    report = auditor.summarize(path)
+    row = _transactions(report)[signature]
+    assert row["observed_network_fee_lamports"] is None
+    assert row["economic_receipt"] is None
+    assert "conflicting_receipt_accountKeys_1_writable" in row["issues"]
     assert report["live_network_fees"]["complete_finalized_total_lamports"] is None
 
 
@@ -687,6 +1179,15 @@ def test_success_claim_cannot_hide_a_reverted_receipt(
     # A false success claim does not erase the actual network fee of the revert.
     assert report["live_network_fees"]["known_subtotal_lamports"] == 5_000
     assert report["live_network_fees"]["complete_finalized_total_lamports"] is None
+    event = next(row for row in report["events"] if row["event_id"] == event_id)
+    assert event["reported_success"] is True
+    assert event["reported_status"] == "success"
+    assert "event_receipt_status_conflict" in event["issues"]
+    assert event["submission_links"] == [
+        {"signature": signature, "relations": ["signature_reference"]}
+    ]
+    assert _transactions(report)[signature]["event_ids"] == [event_id]
+    assert _transactions(report)[signature]["receipt_status"] == "reverted"
 
 
 def test_uncertain_and_unaccounted_observations_allow_later_success(
@@ -828,6 +1329,14 @@ def test_closure_checks_entry_exit_relationships(
         assert (
             report["live_network_fees"]["complete_finalized_total_lamports"] == 10_000
         )
+        closure = next(row for row in report["events"] if row["event_id"] == event_id)
+        assert closure["profile_id"] == observer
+        assert {
+            link["signature"]: link["relations"] for link in closure["submission_links"]
+        } == {entry: ["position_entry"], exit_signature: ["signature_reference"]}
+        assert _transactions(report)[entry]["event_ids"] == [event_id]
+        assert _transactions(report)[exit_signature]["event_ids"] == [event_id]
+        assert _transactions(report)[entry]["submission_profile_id"] == original
     else:
         assert expected_issue in issues[event_id]
         assert report["live_network_fees"]["complete_finalized_total_lamports"] is None
@@ -872,6 +1381,21 @@ def test_live_claims_cannot_promote_practice_submissions(
             {"result": {"success": False, "status": "failed"}, "position": []},
             "invalid_event_position",
         ),
+        (
+            "chain_outcome",
+            {"signature": _signature(1), "status": "unknown", "slot": True},
+            "invalid_event_slot",
+        ),
+        (
+            "trade_result",
+            {"result": {"success": False, "status": "failed", "slot": SENTINEL}},
+            "invalid_event_slot",
+        ),
+        (
+            "chain_outcome",
+            {"signature": _signature(1), "status": "success", "slot": -1},
+            "invalid_event_slot",
+        ),
     ],
 )
 def test_hash_valid_but_invalid_live_claim_is_reported(
@@ -884,9 +1408,518 @@ def test_hash_valid_but_invalid_live_claim_is_reported(
     path = tmp_path / "ledger.sqlite"
     with TransactionLedger(path) as ledger:
         profile = _profile(ledger)
+        signature = _reserve(ledger, 1, profile)
+        _observe(ledger, signature, profile, _receipt(signature), "finalized")
         event_id = ledger.record_trade_evidence(profile, category, payload)
     report = auditor.summarize(path)
     assert any(
         row["event_id"] == event_id and expected_issue in row["issues"]
         for row in report["event_issues"]
     )
+    assert _transactions(report)[signature]["observed_network_fee_lamports"] == 5_000
+    assert report["live_network_fees"]["complete_finalized_total_lamports"] is None
+    assert SENTINEL not in json.dumps(report)
+
+
+@pytest.mark.parametrize("lookup", [False, True])
+@pytest.mark.parametrize(
+    "encodings",
+    [
+        ("raw", "partial"),
+        ("raw", "parsed"),
+        ("raw_unresolved", "partial"),
+        ("parsed", "raw_unresolved"),
+        ("partial", "parsed"),
+    ],
+)
+def test_equivalent_receipt_encodings_preserve_fees_and_balance_finality(
+    tmp_path: Path, auditor: ModuleType, encodings: tuple[str, str], *, lookup: bool
+) -> None:
+    path = tmp_path / "ledger.sqlite"
+    with TransactionLedger(path) as ledger:
+        profile = _profile(ledger)
+        signature = _reserve(ledger, 1, profile)
+        for encoding, commitment in zip(
+            encodings, ("confirmed", "finalized"), strict=True
+        ):
+            result = _transfer_receipt(signature, encoding, lookup=lookup)
+            _observe(ledger, signature, profile, result, commitment)
+    report = auditor.summarize(path)
+    row = _transactions(report)[signature]
+    assert row["issues"] == []
+    assert row["observed_network_fee_lamports"] == 5_000
+    assert report["live_network_fees"]["complete_finalized_total_lamports"] == 5_000
+    native = row["economic_receipt"]["native"]
+    assert native["change_lamports"] == -15_000
+    assert native["change_excluding_network_fee_lamports"] == -10_000
+    assert native["commitment"] == (
+        "confirmed" if lookup and encodings[1] == "raw_unresolved" else "finalized"
+    )
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        (
+            "raw",
+            "partial",
+            ("instructions", 0, "data"),
+            "3",
+            "conflicting_receipt_instruction_0_data",
+        ),
+        (
+            "raw",
+            "partial",
+            ("instructions", 0, "programId"),
+            MINT,
+            "conflicting_receipt_instruction_0_programId",
+        ),
+        (
+            "raw_unresolved",
+            "partial",
+            ("instructions", 0, "accounts"),
+            [OTHER, PAYER],
+            "conflicting_receipt_instruction_0_accounts",
+        ),
+        (
+            "raw",
+            "parsed",
+            ("instructions",),
+            [],
+            "conflicting_receipt_instructionCount",
+        ),
+        (
+            "raw_unresolved",
+            "parsed",
+            ("accountKeys", 1, "pubkey"),
+            MINT,
+            "conflicting_receipt_staticAccountKeys",
+        ),
+        (
+            "parsed",
+            "parsed",
+            ("instructions", 0, "parsed", "info", "lamports"),
+            20_000,
+            "conflicting_receipt_instruction_0_parsed",
+        ),
+        (
+            "raw",
+            "raw",
+            ("instructions", 0, "accounts"),
+            [2, 0],
+            "conflicting_receipt_instruction_0_accountIndexes",
+        ),
+    ],
+)
+def test_encoding_normalization_preserves_real_instruction_conflicts(
+    tmp_path: Path, auditor: ModuleType, change: tuple
+) -> None:
+    first, second, location, value, expected_issue = change
+    path = tmp_path / "ledger.sqlite"
+    with TransactionLedger(path) as ledger:
+        profile = _profile(ledger)
+        signature = _reserve(ledger, 1, profile)
+        _observe(ledger, signature, profile, _transfer_receipt(signature, first))
+        changed = _transfer_receipt(signature, second)
+        target = changed["transaction"]["message"]
+        for key in location[:-1]:
+            target = target[key]
+        target[location[-1]] = value
+        _observe(ledger, signature, profile, changed, "finalized")
+    report = auditor.summarize(path)
+    row = _transactions(report)[signature]
+    assert row["observed_network_fee_lamports"] is None
+    assert row["economic_receipt"] is None
+    assert expected_issue in row["issues"]
+    assert report["live_network_fees"]["complete_finalized_total_lamports"] is None
+
+
+@pytest.mark.parametrize("account_index", [True, -1, 3, 256])
+def test_invalid_compiled_instruction_indexes_withhold_fees(
+    tmp_path: Path, auditor: ModuleType, account_index: object
+) -> None:
+    path = tmp_path / "ledger.sqlite"
+    with TransactionLedger(path) as ledger:
+        profile = _profile(ledger)
+        signature = _reserve(ledger, 1, profile)
+        result = _transfer_receipt(signature, "raw")
+        result["transaction"]["message"]["instructions"][0]["accounts"] = [
+            account_index
+        ]
+        _observe(ledger, signature, profile, result, "finalized")
+    report = auditor.summarize(path)
+    row = _transactions(report)[signature]
+    assert row["observed_network_fee_lamports"] is None
+    assert row["economic_receipt"] is None
+    assert report["live_network_fees"]["complete_finalized_total_lamports"] is None
+
+
+def test_unresolved_instruction_accounts_remain_unknown_not_invalid(
+    tmp_path: Path, auditor: ModuleType
+) -> None:
+    path = tmp_path / "ledger.sqlite"
+    with TransactionLedger(path) as ledger:
+        profile = _profile(ledger)
+        signature = _reserve(ledger, 1, profile)
+        _observe(
+            ledger,
+            signature,
+            profile,
+            _transfer_receipt(signature, "raw_unresolved"),
+            "finalized",
+        )
+    report = auditor.summarize(path)
+    row = _transactions(report)[signature]
+    assert row["observed_network_fee_lamports"] == 5_000
+    assert row["issues"] == []
+    assert row["economic_receipt"]["native"] is None
+    assert "missing_loaded_addresses" in row["economic_receipt"]["issues"]
+
+
+@pytest.mark.parametrize("encoding", ["raw", "parsed"])
+def test_economic_receipt_resolves_v0_accounts_without_double_counting_fees(
+    tmp_path: Path, auditor: ModuleType, encoding: str
+) -> None:
+    path = tmp_path / "ledger.sqlite"
+    with TransactionLedger(path) as ledger:
+        profile = _profile(ledger)
+        buy = _reserve(ledger, 1, profile)
+        sell = _reserve(ledger, 2, profile)
+        bought = _token_receipt(buy)
+        if encoding == "parsed":
+            bought["transaction"]["message"]["accountKeys"] = [
+                {"pubkey": key} for key in (PAYER, OTHER, TOKEN_ACCOUNT, MINT)
+            ]
+            del bought["meta"]["loadedAddresses"]
+        sold = deepcopy(bought)
+        sold["transaction"]["signatures"] = [sell]
+        sold["meta"].update(
+            {
+                "fee": 6_000,
+                "preBalances": bought["meta"]["postBalances"],
+                "postBalances": [1_000_989_000, 99_000_000, 0, 1_000_000],
+                "preTokenBalances": bought["meta"]["postTokenBalances"],
+                "postTokenBalances": [],
+            }
+        )
+        for signature, receipt in ((buy, bought), (sell, sold)):
+            _observe(ledger, signature, profile, receipt)
+            _observe(ledger, signature, profile, receipt, "finalized")
+
+    rows = _transactions(auditor.summarize(path))
+    entry, exit_receipt = [rows[s]["economic_receipt"] for s in (buy, sell)]
+    assert entry["native"]["change_lamports"] == -12_044_280
+    assert entry["native"]["change_excluding_network_fee_lamports"] == -12_039_280
+    assert exit_receipt["native"]["change_lamports"] == 13_033_280
+    assert exit_receipt["native"]["change_excluding_network_fee_lamports"] == 13_039_280
+    assert (
+        entry["native"]["change_lamports"] + exit_receipt["native"]["change_lamports"]
+        == 989_000
+    )
+    assert entry["tokens"] == [
+        {
+            "account": TOKEN_ACCOUNT,
+            "mint": MINT,
+            "program_id": str(TOKEN_2022_PROGRAM_ID),
+            "decimals": 6,
+            "pre_amount_raw": 0,
+            "post_amount_raw": 25_000_000,
+            "change_raw": 25_000_000,
+        }
+    ]
+    assert exit_receipt["tokens"][0]["pre_amount_raw"] == 25_000_000
+    assert exit_receipt["tokens"][0]["post_amount_raw"] == 0
+    assert exit_receipt["tokens"][0]["change_raw"] == -25_000_000
+
+
+def test_wrapping_sol_does_not_erase_rent_or_turn_principal_into_income(
+    tmp_path: Path, auditor: ModuleType
+) -> None:
+    path = tmp_path / "ledger.sqlite"
+    with TransactionLedger(path) as ledger:
+        profile = _profile(ledger)
+        signature = _reserve(ledger, 1, profile)
+        result = _token_receipt(signature)
+        result["meta"]["postBalances"][1:3] = [100_000_000, 12_039_280]
+        token = result["meta"]["postTokenBalances"][0]
+        token["mint"] = "So11111111111111111111111111111111111111112"
+        token["programId"] = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        token["uiTokenAmount"] = {"amount": "10000000", "decimals": 9}
+        _observe(ledger, signature, profile, result, "finalized")
+    receipt = _transactions(auditor.summarize(path))[signature]["economic_receipt"]
+    assert receipt["native"]["change_lamports"] == -12_044_280
+    assert receipt["native"]["change_excluding_network_fee_lamports"] == -12_039_280
+    assert receipt["tokens"][0]["mint"] == token["mint"]
+    assert receipt["tokens"][0]["change_raw"] == 10_000_000
+
+
+def test_balance_finality_requires_the_balance_fields_not_just_a_finalized_fee(
+    tmp_path: Path, auditor: ModuleType
+) -> None:
+    path = tmp_path / "ledger.sqlite"
+    with TransactionLedger(path) as ledger:
+        profile = _profile(ledger)
+        signature = _reserve(ledger, 1, profile)
+        complete = _token_receipt(signature)
+        _observe(ledger, signature, profile, complete)
+        partial = deepcopy(complete)
+        for field in (
+            "preBalances",
+            "postBalances",
+            "preTokenBalances",
+            "postTokenBalances",
+        ):
+            del partial["meta"][field]
+        _observe(ledger, signature, profile, partial, "finalized")
+        report = auditor.summarize(path)
+        row = _transactions(report)[signature]
+        assert not _fee_blocker_codes(report)
+        assert report["live_network_fees"]["complete_finalized_total_lamports"] == 5_000
+        assert row["fee_commitment"] == "finalized"
+        assert row["economic_receipt"]["native"]["commitment"] == "confirmed"
+        assert row["economic_receipt"]["token_commitment"] == "confirmed"  # noqa: S105 - public chain commitment
+        partial["meta"]["preBalances"] = complete["meta"]["preBalances"]
+        partial["meta"]["postBalances"] = complete["meta"]["postBalances"]
+        _observe(ledger, signature, profile, partial, "finalized")
+        receipt = _transactions(auditor.summarize(path))[signature]["economic_receipt"]
+        assert receipt["native"]["commitment"] == "finalized"
+        assert receipt["token_commitment"] == "confirmed"  # noqa: S105 - public chain commitment
+        _observe(ledger, signature, profile, complete, "finalized")
+    receipt = _transactions(auditor.summarize(path))[signature]["economic_receipt"]
+    assert receipt["token_commitment"] == "finalized"  # noqa: S105 - public chain commitment
+    assert receipt["tokens"][0]["change_raw"] == 25_000_000
+
+
+@pytest.mark.parametrize(
+    "index_fields", [{}, {"accountIndex": "2"}], ids=["missing", "mixed_type"]
+)
+def test_malformed_token_indices_do_not_hide_observed_fees(
+    tmp_path: Path, auditor: ModuleType, index_fields: dict[str, str]
+) -> None:
+    path = tmp_path / "ledger.sqlite"
+    with TransactionLedger(path) as ledger:
+        profile = _profile(ledger)
+        signature = _reserve(ledger, 1, profile)
+        result = _token_receipt(signature)
+        balances = result["meta"]["postTokenBalances"]
+        malformed = deepcopy(balances[0])
+        del malformed["accountIndex"]
+        malformed.update(index_fields)
+        balances.append(malformed)
+        _observe(ledger, signature, profile, result, "finalized")
+    report = auditor.summarize(path)
+    row = _transactions(report)[signature]
+    assert row["observed_network_fee_lamports"] == 5_000
+    assert row["economic_receipt"]["tokens"] is None
+    assert "invalid_or_incomplete_token_balances" in row["economic_receipt"]["issues"]
+    assert report["live_balance_coverage"]["token_unknown_count"] == 1
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [
+        "owner",
+        "before",
+        "after",
+        "stable_identity",
+        "unique_index",
+        "bounded_index",
+        "bounded_amount",
+        "native_balances",
+        "token_balances",
+        "loaded_addresses",
+    ],
+)
+def test_incomplete_balances_never_become_zero_or_hide_observed_fees(
+    tmp_path: Path, auditor: ModuleType, missing: str
+) -> None:
+    path = tmp_path / "ledger.sqlite"
+    with TransactionLedger(path) as ledger:
+        profile = _profile(ledger)
+        signature = _reserve(ledger, 1, profile)
+        result = _token_receipt(signature)
+        meta = result["meta"]
+        token = meta["postTokenBalances"][0]
+        if missing == "owner":
+            del token["owner"]
+        elif missing == "before":
+            meta["preBalances"][2] = 2_039_280
+        elif missing == "after":
+            meta["preBalances"][2] = 2_039_280
+            meta["preTokenBalances"] = meta["postTokenBalances"]
+            meta["postTokenBalances"] = []
+        elif missing == "stable_identity":
+            meta["preTokenBalances"] = [dict(token, owner=OTHER)]
+        elif missing == "unique_index":
+            meta["postTokenBalances"].append(deepcopy(token))
+        elif missing == "bounded_index":
+            token["accountIndex"] = 4
+        elif missing == "bounded_amount":
+            token["uiTokenAmount"]["amount"] = str(2**64)
+        elif missing == "native_balances":
+            del meta["preBalances"]
+        elif missing == "token_balances":
+            del meta["preTokenBalances"]
+        else:
+            del meta["loadedAddresses"]
+        _observe(ledger, signature, profile, result, "finalized")
+    report = auditor.summarize(path)
+    row = _transactions(report)[signature]
+    assert row["observed_network_fee_lamports"] == 5_000
+    assert row["economic_receipt"]["tokens"] is None
+    assert row["economic_receipt"]["token_commitment"] is None
+    assert report["live_balance_coverage"]["token_unknown_count"] == 1
+    assert report["live_balance_coverage"]["native_unknown_count"] == (
+        1 if missing in {"native_balances", "loaded_addresses"} else 0
+    )
+
+
+@pytest.mark.parametrize("owner", [PAYER, OTHER], ids=["signer", "other_owner"])
+def test_reverted_token_movement_is_unknown_without_erasing_the_fee(
+    tmp_path: Path, auditor: ModuleType, owner: str
+) -> None:
+    path = tmp_path / "ledger.sqlite"
+    with TransactionLedger(path) as ledger:
+        profile = _profile(ledger)
+        signature = _reserve(ledger, 1, profile)
+        result = _token_receipt(signature)
+        result["meta"]["err"] = {"InstructionError": [0, {"Custom": 1}]}
+        result["meta"]["postTokenBalances"][0]["owner"] = owner
+        _observe(ledger, signature, profile, result, "finalized")
+    report = auditor.summarize(path)
+    row = _transactions(report)[signature]
+    assert row["receipt_status"] == "reverted"
+    assert row["observed_network_fee_lamports"] == 5_000
+    assert row["economic_receipt"]["tokens"] is None
+    assert report["live_balance_coverage"]["token_unknown_count"] == 1
+    assert report["live_network_fees"]["complete_finalized_total_lamports"] == 5_000
+
+
+def test_decisions_link_attempts_without_spreading_result_claims(
+    tmp_path: Path, auditor: ModuleType
+) -> None:
+    path = tmp_path / "ledger.sqlite"
+    with TransactionLedger(path) as ledger:
+        profile = _profile(ledger)
+        first = _reserve(ledger, 1, profile)
+        ledger.record_outcome(
+            TransactionOutcome(TransactionStatus.REVERTED, first, slot=42)
+        )
+        _observe(ledger, first, profile, _receipt(first, reverted=True), "finalized")
+        second = _signature(2)
+        ledger.record_submission(
+            "intent-1", second, BLOCKHASH, 501, evidence_profile_id=profile
+        )
+        _observe(ledger, second, profile, _receipt(second), "finalized")
+        unrelated = _reserve(ledger, 3, profile)
+        decision = ledger.record_trade_evidence(
+            profile,
+            "decision",
+            {
+                "intent_id": "intent-1",
+                "action": "buy",
+                "gate": {"accept": True, "reason": SENTINEL},
+                "reason": SENTINEL,
+            },
+        )
+        result = ledger.record_trade_evidence(
+            profile,
+            "trade_result",
+            {
+                "intent_id": "intent-1",
+                "signature": second,
+                "result": {
+                    "tx_signature": second,
+                    "success": True,
+                    "status": "success",
+                    "error_message": SENTINEL,
+                },
+            },
+        )
+        unsubmitted = ledger.record_trade_evidence(
+            profile,
+            "decision",
+            {
+                "intent_id": "never-submitted",
+                "action": "skip",
+                "gate": {"accept": False},
+            },
+        )
+        practice = ledger.record_trade_evidence(
+            _profile(ledger, "paper"),
+            "decision",
+            {"intent_id": "intent-1", "action": "buy"},
+        )
+
+    report = auditor.summarize(path)
+    events = {row["event_id"]: row for row in report["events"]}
+    transactions = _transactions(report)
+    assert {
+        link["signature"]: link["relations"]
+        for link in events[decision]["submission_links"]
+    } == {first: ["decision_intent"], second: ["decision_intent"]}
+    assert events[result]["submission_links"] == [
+        {"signature": second, "relations": ["signature_reference"]}
+    ]
+    assert sorted(transactions[first]["event_ids"]) == sorted([decision, practice])
+    assert sorted(transactions[second]["event_ids"]) == sorted(
+        [decision, result, practice]
+    )
+    assert transactions[unrelated]["event_ids"] == []
+    assert events[unsubmitted]["submission_links"] == []
+    assert events[unsubmitted]["gate_accepted"] is False
+    assert events[practice]["kind"] == "paper"
+    assert transactions[first]["kind"] == "live"
+    assert transactions[first]["receipt_status"] == "reverted"
+    assert report["live_network_fees"]["known_subtotal_lamports"] == 10_000
+    assert SENTINEL not in json.dumps(report)
+
+
+@pytest.mark.parametrize(
+    "corruption", ["payload_hash", "json", "profile_hash", "missing_profile"]
+)
+def test_corrupt_observations_cannot_attach_claims_to_a_submission(
+    tmp_path: Path, auditor: ModuleType, corruption: str
+) -> None:
+    path = tmp_path / "ledger.sqlite"
+    with TransactionLedger(path) as ledger:
+        original = _profile(ledger)
+        observer = _profile(ledger, run="observer")
+        signature = _reserve(ledger, 1, original)
+        _observe(ledger, signature, original, _receipt(signature), "finalized")
+        payload = {
+            "action": "buy",
+            "result": {"tx_signature": signature, "success": False, "status": "failed"},
+        }
+        event_id = ledger.record_trade_evidence(observer, "trade_result", payload)
+    with closing(sqlite3.connect(path)) as connection, connection:
+        if corruption in ("payload_hash", "json"):
+            payload["action"] = "sell"
+            payload["private"] = SENTINEL
+            connection.execute(
+                "UPDATE evidence_events SET payload_json = ? WHERE event_id = ?",
+                (
+                    json.dumps(payload)
+                    if corruption == "payload_hash"
+                    else '{"private":"' + SENTINEL,
+                    event_id,
+                ),
+            )
+        elif corruption == "profile_hash":
+            connection.execute(
+                "UPDATE evidence_profiles SET settings_json = '{}' WHERE profile_id = ?",
+                (observer,),
+            )
+        else:
+            connection.execute(
+                "DELETE FROM evidence_profiles WHERE profile_id = ?", (observer,)
+            )
+    report = auditor.summarize(path)
+    event = next(row for row in report["events"] if row["event_id"] == event_id)
+    assert event["issues"]
+    assert event["submission_links"] == []
+    assert event["declared_action"] is None
+    assert event["reported_success"] is None
+    assert _transactions(report)[signature]["event_ids"] == []
+    assert report["live_network_fees"]["known_subtotal_lamports"] == 5_000
+    assert SENTINEL not in json.dumps(report)

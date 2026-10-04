@@ -54,6 +54,8 @@ from core.transaction_ledger import (
 from core.wallet import Wallet
 from interfaces.core import Platform, TokenInfo
 from learning.journal import (
+    PAPER_HORIZONS,
+    PAPER_MARK_MAX_LATENESS_S,
     GateSnapshot,
     JevScorer,
     LessonJournal,
@@ -70,6 +72,8 @@ from monitoring.trade_flow import (
     GeyserTradeStream,
     TradeEvent,
     TradeFlowHub,
+    TradeFlowLossError,
+    TradeQueue,
 )
 from platforms import get_platform_implementations
 from trading.base import TradeResult
@@ -403,9 +407,9 @@ class UniversalTrader:
                 self.platform_implementations.event_parser._idl_parser  # noqa: SLF001
             )
             self.token_listener.trade_hub = self.trade_hub
-        self._gate_queues: dict[str, asyncio.Queue[TradeEvent]] = {}
+        self._gate_queues: dict[str, TradeQueue] = {}
         self._listener_task: asyncio.Task | None = None
-        self._paper_entry_price: dict[tuple[str, int], float] = {}
+        self._paper_tasks: set[asyncio.Task] = set()
         self._buy_attempts = 0
         self._oneshot_found: TokenInfo | None = None
         self._oneshot_event = asyncio.Event()
@@ -1896,32 +1900,12 @@ class UniversalTrader:
                             and token_key_check not in self._unresolved_buys
                             and not self._position_monitor_tasks
                         ):
-                            # Paper fill: dry-run gate blocked the buy (or the
-                            # sell leg). Log it, schedule a +60s re-price as the
-                            # simulated exit outcome, and keep scanning — the
-                            # one-shot exit is for real fills only.
+                            # A blocked attempt is not a fill. Gate observations
+                            # are scheduled separately, with no executable-PnL claim.
                             logger.info(
-                                "Paper fill complete for %s; continuing scan",
+                                "Dry-run attempt complete for %s; continuing scan",
                                 token_info.symbol,
                             )
-                            hub = getattr(self, "trade_hub", None)
-                            entry_price = (
-                                hub.latest_price(token_key_check)
-                                if hub is not None
-                                else None
-                            )
-                            # One entry-price slot per horizon so each
-                            # sampler consumes the same captured price.
-                            for horizon_s in (60, 300, 900):
-                                self._paper_entry_price[
-                                    (token_key_check, horizon_s)
-                                ] = entry_price
-                            for horizon_s in (60, 300, 900):
-                                sampler = asyncio.create_task(
-                                    self._paper_fill_outcome(token_info, horizon_s)
-                                )
-                                self._position_tasks.add(sampler)
-                                sampler.add_done_callback(self._position_tasks.discard)
                             continue
                         if str(token_info.mint) in self._unresolved_buys:
                             await self._await_unresolved_buy_resolution(
@@ -1945,6 +1929,10 @@ class UniversalTrader:
                     if listener_error is not None:
                         hold_positions_after_listener_failure(listener_error)
                 await await_position_monitors()
+                # Stop accepting entries at the existing deadline, but finish
+                # bounded read-only marks before normal resource cleanup.
+                if self.execution_policy.mode is ExecutionMode.DRY_RUN:
+                    await self._drain_paper_marks()
                 if listener_error is not None:
                     raise listener_error
             else:
@@ -2417,101 +2405,133 @@ class UniversalTrader:
                     self._finish_token_reservation(token_info, handled)
                     self.token_queue.task_done()
 
-    _PAPER_EXIT_DELAY_S = 60
-
-    async def _paper_fill_outcome(
-        self, token_info: TokenInfo, horizon_s: int = 60
+    def _schedule_paper_marks(
+        self,
+        token_info: TokenInfo,
+        entry_id: int | None,
+        event: TradeEvent | None,
+        started: float,
     ) -> None:
-        """Simulated exit for a dry-run paper fill: re-read the curve
-        horizon_s seconds after entry and journal the price delta as a
-        per-horizon outcome lesson. Entry price comes from the trade hub
-        (SOL per token at the last decoded trade); the exit from a fresh
-        curve read in the same units. Best-effort: a failed read leaves
-        the outcome open, never fakes it."""
-        mint_key = str(token_info.mint)
-        entry_price = self._paper_entry_price.pop((mint_key, horizon_s), None)
-        if entry_price is None:
-            # Only the first horizon consumes the captured price; later
-            # horizons reuse the same entry price without popping.
-            entry_price = self._paper_entry_price.get((mint_key, 60))
-        if entry_price is None:
-            logger.info("Paper outcome %s: no entry price captured", token_info.symbol)
-            return
+        """Observe an accepted gate decision; do not pretend a blocked buy filled."""
+        if entry_id is None:
+            message = "Paper gate evidence was not saved"
+            raise EvidencePersistenceError(message)
+        entry_price = None
+        if (
+            token_info.platform is Platform.PUMP_FUN
+            and is_sol_paired(token_info.quote_mint)
+            and event is not None
+            and event.mint == str(token_info.mint)
+            and event.virtual_sol_reserves > 0
+            and event.virtual_token_reserves > 0
+        ):
+            entry_price = event.price
+        self.lesson_journal.start_paper_marks(entry_id, entry_price)
+        for horizon in PAPER_HORIZONS:
+            if entry_price is None:
+                self.lesson_journal.finish_paper_mark(
+                    entry_id,
+                    horizon,
+                    elapsed_s=monotonic() - started,
+                    reason="unsupported_or_missing_entry",
+                )
+                continue
+            task = asyncio.create_task(
+                self._paper_mark(token_info, entry_id, horizon, started)
+            )
+            self._paper_tasks.add(task)
+            self._position_tasks.add(task)
+            task.add_done_callback(
+                lambda done, h=horizon: self._paper_mark_finished(
+                    done, entry_id, h, started
+                )
+            )
+
+    def _paper_mark_finished(
+        self, task: asyncio.Task, entry_id: int, horizon_s: int, started: float
+    ) -> None:
+        self._paper_tasks.discard(task)
+        self._position_tasks.discard(task)
         try:
-            await asyncio.sleep(horizon_s)
-            curve_manager = getattr(
-                getattr(self, "platform_implementations", None),
-                "curve_manager",
-                None,
-            )
-            get_state = getattr(curve_manager, "get_sell_state_and_token_program", None)
-            pool_key = token_info.bonding_curve or token_info.pool_state
-            if not callable(get_state):
-                logger.info("Paper outcome %s: no curve re-pricer", token_info.symbol)
-                return
-            if pool_key is None:
-                logger.info("Paper outcome %s: no pool key", token_info.symbol)
-                return
-            state, _ = await get_state(
-                pool_key, token_info.mint, commitment="processed"
-            )
-            real_sol = state.get("real_sol_reserves")
-            real_token = state.get("real_token_reserves")
-            if not real_sol or not real_token:
-                logger.info(
-                    "Paper outcome %s: curve drained or unreadable",
-                    token_info.symbol,
+            if task.cancelled():
+                self.lesson_journal.finish_paper_mark(
+                    entry_id,
+                    horizon_s,
+                    elapsed_s=monotonic() - started,
+                    reason="cancelled",
                 )
-                return
-            # Migration guard: a migrated pool's reserves live in a different
-            # vault (SOL-sized pumpswap liquidity, not curve lamports). Its
-            # price is NOT comparable to the curve entry price - a genuine
-            # migration mid-window produces fake +5000% "outcomes".
-            if state.get("complete") is True:
-                logger.info(
-                    "Paper outcome %s: curve migrated mid-window; "
-                    "outcome not comparable, left open",
-                    token_info.symbol,
-                )
-                return
-            exit_price = (real_sol / 1e9) / (real_token / 1e6)
-            pnl_frac = (exit_price - entry_price) / entry_price
-            if self.lesson_journal is not None:
-                # 0.01 SOL entry convention: outcome in SOL terms. One
-                # outcome lesson per horizon (kind='horizon') so horizon
-                # comparison is a group-by, not an overwrite.
-                self.lesson_journal.record(
-                    LessonObservation(
-                        kind=f"horizon_{horizon_s}s",
-                        mint=mint_key,
-                        symbol=token_info.symbol,
-                        name=token_info.name,
-                        platform=token_info.platform.value,
-                        mayhem=token_info.is_mayhem_mode,
-                        decision="paper_entry",
-                        real_sol=token_info.real_sol_reserves / 1e9
-                        if token_info.real_sol_reserves
-                        else None,
-                    ),
-                    jev=None,
-                )
-                self.lesson_journal.link_outcome_kind(
-                    mint_key,
-                    kind=f"horizon_{horizon_s}s",
-                    pnl_sol=0.01 * pnl_frac,
-                    reason=f"paper_exit_{horizon_s}s",
-                )
-            logger.info(
-                "Paper exit %s: entry %.3e -> exit %.3e (%+.1f%%)",
-                token_info.symbol,
-                entry_price,
-                exit_price,
-                pnl_frac * 100,
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("Paper outcome sampling failed (non-fatal)")
+            elif task.exception() is not None:
+                self._fatal_monitor_errors.put_nowait(task.exception())
+        except Exception as exc:  # noqa: BLE001 - forward persistence failures to shutdown
+            self._fatal_monitor_errors.put_nowait(exc)
+
+    async def _drain_paper_marks(self) -> None:
+        """Finish existing horizons, without accepting entries or increasing caps."""
+        tasks = tuple(getattr(self, "_paper_tasks", ()))
+        if tasks:
+            await asyncio.gather(*tasks)
+
+    async def _paper_mark(
+        self, token_info: TokenInfo, entry_id: int, horizon_s: int, started: float
+    ) -> None:
+        """Record comparable virtual-reserve marks, or an explicit missing outcome."""
+        await asyncio.sleep(max(0.0, started + horizon_s - monotonic()))
+        price = None
+        evidence = None
+        reason = "late"
+        remaining = started + horizon_s + PAPER_MARK_MAX_LATENESS_S - monotonic()
+        if remaining > 0:
+            try:
+                async with asyncio.timeout(remaining):
+                    (
+                        state,
+                        _,
+                    ) = await self.platform_implementations.curve_manager.get_pool_state_and_token_program(
+                        token_info.bonding_curve,
+                        token_info.mint,
+                        commitment="processed",
+                    )
+                evidence = {
+                    key: state.get(key)
+                    for key in (
+                        "virtual_quote_reserves",
+                        "virtual_token_reserves",
+                        "real_quote_reserves",
+                        "real_token_reserves",
+                        "complete",
+                    )
+                }
+                evidence["quote_mint"] = str(state.get("quote_mint"))
+                if state.get("complete") is not False:
+                    reason = "migrated_or_invalid_completion"
+                elif state.get("is_sol_paired") is not True:
+                    reason = "unsupported_quote"
+                else:
+                    candidate = state.get("price_per_token")
+                    if (
+                        not isinstance(candidate, bool)
+                        and isinstance(candidate, int | float)
+                        and isfinite(candidate)
+                        and candidate > 0
+                    ):
+                        price = float(candidate)
+                        reason = "gross_virtual_reserve_mark"
+                    else:
+                        reason = "invalid_price"
+            except Exception as exc:  # noqa: BLE001 - explicit censored read, not success
+                # No retries or transport text that could disclose credentials.
+                reason = f"read_error:{type(exc).__name__}"
+        elapsed = monotonic() - started
+        if elapsed > horizon_s + PAPER_MARK_MAX_LATENESS_S:
+            price, reason = None, "late"
+        self.lesson_journal.finish_paper_mark(
+            entry_id,
+            horizon_s,
+            elapsed_s=elapsed,
+            exit_price=price,
+            reason=reason,
+            exit_state=evidence,
+        )
 
     async def _handle_token(self, token_info: TokenInfo) -> bool:
         """Handle a token, returning true only after resolved handling."""
@@ -2573,6 +2593,8 @@ class UniversalTrader:
                 await asyncio.sleep(self.wait_time_after_creation)
 
             decision = await self._await_entry_gate(token_info)
+            entry_started = monotonic()
+            entry_lesson_id = None
             if self.lesson_journal is not None:
                 jev = None
                 if self.jev_scorer is not None and self.jev_scorer.enabled:
@@ -2585,7 +2607,7 @@ class UniversalTrader:
                             real_sol=decision.real_sol if decision else None,
                         ),
                     )
-                self.lesson_journal.record(
+                entry_lesson_id = self.lesson_journal.record(
                     LessonObservation(
                         kind="gate_skip"
                         if decision and not decision.accept
@@ -2598,6 +2620,7 @@ class UniversalTrader:
                         decision=decision.reason if decision else "entry_gate_disabled",
                         buyers=decision.buyers if decision else None,
                         real_sol=decision.real_sol if decision else None,
+                        raw={"gate": asdict(decision)} if decision else {},
                     ),
                     jev=jev,
                 )
@@ -2613,6 +2636,17 @@ class UniversalTrader:
             )
             if decision is not None and not decision.accept:
                 return True
+
+            if (
+                self.execution_policy.mode is ExecutionMode.DRY_RUN
+                and self.lesson_journal is not None
+            ):
+                self._schedule_paper_marks(
+                    token_info,
+                    entry_lesson_id,
+                    decision.last_event if decision else None,
+                    entry_started,
+                )
 
             if token_quote_mint is None:
                 logger.info(
@@ -2685,7 +2719,7 @@ class UniversalTrader:
         started = monotonic()
         deadline = started + rules.max_wait_ms / 1000
         decision: GateDecision | None = None
-        if rules.min_buyers == 0:
+        if rules.min_buyers == 0 and not queue.loss_reason:
             decision = GateDecision(True, "no_wait", 0, None, 0)
         while decision is None:
             remaining = deadline - monotonic()
@@ -2693,9 +2727,21 @@ class UniversalTrader:
                 decision = gate.timed_out()
                 break
             try:
-                event = await asyncio.wait_for(queue.get(), timeout=remaining)
+                # Keep dequeue and evaluation in one task so history loss cannot race
+                # a wait_for child task that has already removed an older event.
+                async with asyncio.timeout(remaining):
+                    event = await queue.get()
             except TimeoutError:
                 decision = gate.timed_out()
+                break
+            except TradeFlowLossError as exc:
+                decision = GateDecision(
+                    accept=False,
+                    reason=f"trade_stream_{exc.reason}",
+                    buyers=0,
+                    real_sol=None,
+                    slots_waited=0,
+                )
                 break
             decision = gate.observe(event)
         waited_ms = (monotonic() - started) * 1000
@@ -3063,6 +3109,10 @@ class UniversalTrader:
         if hub_queue is not None:
             events = hub_events()
         else:
+
+            def discard_pending_signal() -> None:
+                self._flow_signals.pop(token_key, None)
+
             stream = GeyserTradeStream(
                 endpoint=self.geyser_endpoint,
                 api_token=self.geyser_api_token,
@@ -3070,7 +3120,9 @@ class UniversalTrader:
                 idl_parser=self.platform_implementations.event_parser._idl_parser,  # noqa: SLF001
             )
             events = stream.stream(
-                mint=token_key, bonding_curve=str(self._get_pool_address(token_info))
+                mint=token_key,
+                bonding_curve=str(self._get_pool_address(token_info)),
+                on_disconnect=discard_pending_signal,
             )
         try:
             async for event in events:
@@ -3262,6 +3314,19 @@ class UniversalTrader:
                     self._persist_position(token_info, position)
 
                 flow_signal = self._flow_signals.pop(token_key, None)
+                if (
+                    flow_signal is not None
+                    and (queue := self._gate_queues.get(token_key)) is not None
+                    and queue.loss_reason
+                ):
+                    # Reject a pending signal before latching or pricing an exit.
+                    # An exit already latched before loss still retries normally.
+                    logger.warning(
+                        "Discarded pending flow signal for %s: %s",
+                        token_key,
+                        queue.loss_reason,
+                    )
+                    flow_signal = None
                 if flow_signal is not None:
                     # A fired rule latches until the position closes: a failed
                     # sell on a dead coin gets no further events to re-fire it.

@@ -79,6 +79,8 @@ async def verify(work: Path) -> dict:  # noqa: PLR0915 - one durable lifecycle
     path = work / "ledger.sqlite3"
     journal = work / "positions.json"
     with (
+        patch("learning.journal._DEFAULT_DB", work / "lessons.sqlite3"),
+        patch("trading.universal_trader.JevScorer", return_value=None),
         patch(
             "trading.universal_trader.Wallet",
             return_value=SimpleNamespace(pubkey=receipts.OWNER),
@@ -264,9 +266,8 @@ async def verify(work: Path) -> dict:  # noqa: PLR0915 - one durable lifecycle
         audit_process = await asyncio.create_subprocess_exec(
             sys.executable,
             "-B",
-            str(
-                ROOT / "learning-examples/token-lifecycles/summarize_trade_evidence.py"
-            ),
+            "-m",
+            "learning.trade_evidence",
             str(path),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -280,10 +281,37 @@ async def verify(work: Path) -> dict:  # noqa: PLR0915 - one durable lifecycle
         assert audit["live_network_fees"]["observed_count"] == len(fees)
         assert audit["live_network_fees"]["known_subtotal_lamports"] == 5_000 + SELL_FEE
         assert audit["live_network_fees"]["complete_finalized_total_lamports"] is None
+        assert {
+            blocker["code"]
+            for blocker in audit["live_network_fees"]["finalized_total_blockers"]
+        } == {"unfinalized_live_fees"}
         original = next(
             row for row in audit["transactions"] if row["signature"] == BUY_SIGNATURE
         )
         assert original["submission_profile_id"] == original_profile
+        sold = next(
+            row for row in audit["transactions"] if row["signature"] == SELL_SIGNATURE
+        )
+        native = sold["economic_receipt"]["native"]
+        assert native["change_lamports"] == SELL_PROCEEDS - SELL_FEE
+        assert native["change_excluding_network_fee_lamports"] == SELL_PROCEEDS
+        assert native["commitment"] == "confirmed"
+        assert audit["version"] == 7  # noqa: PLR2004 - public report schema contract
+        events = {event["event_id"]: event for event in audit["events"]}
+        closure = next(
+            event for event in events.values() if event["category"] == "position_closed"
+        )
+        assert {
+            link["signature"]: link["relations"] for link in closure["submission_links"]
+        } == {
+            BUY_SIGNATURE: ["position_entry"],
+            SELL_SIGNATURE: ["signature_reference"],
+        }
+        assert closure["event_id"] in original["event_ids"]
+        assert closure["event_id"] in sold["event_ids"]
+        assert "decision" in {
+            events[event_id]["category"] for event_id in original["event_ids"]
+        }
         assert path.read_bytes() == before
     return {
         "checks": [
@@ -296,6 +324,9 @@ async def verify(work: Path) -> dict:  # noqa: PLR0915 - one durable lifecycle
             "practice_kinds_distinct",
             "read_only_audit_with_committed_wal",
             "lifecycle_claims_reconcile",
+            "observed_native_balance_changes",
+            "linked_lifecycle_observations",
+            "finalized_fee_total_blockers",
         ],
         "live_execution": False,
         "storage": "temporary SQLite and recovery journal",

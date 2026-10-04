@@ -72,6 +72,8 @@ class SubmissionRecord:
     wire_bytes: bytes | None
     receipt_destinations: tuple[str, ...] | None
     evidence_profile_id: str | None = None
+    risk_session_id: str | None = None
+    quote_mint: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -477,12 +479,13 @@ class TransactionLedger:
     ) -> None:
         existing = self._connection.execute(
             """
-            SELECT signer, quote_mint, quote_amount_raw, fee_lamports
+            SELECT risk_session_id, signer, quote_mint, quote_amount_raw, fee_lamports
             FROM risk_reservations WHERE signature = ?
             """,
             (signature,),
         ).fetchone()
         expected = (
+            risk_session_id,
             signer,
             quote_mint,
             str(quote_amount_raw),
@@ -774,6 +777,10 @@ class TransactionLedger:
                 row["receipt_destinations"]
             ),
             evidence_profile_id=row["evidence_profile_id"],
+            risk_session_id=(
+                None if row["risk_session_id"] is None else str(row["risk_session_id"])
+            ),
+            quote_mint=(None if row["quote_mint"] is None else str(row["quote_mint"])),
         )
 
     def get_active_submission_record(self, intent_id: str) -> SubmissionRecord | None:
@@ -794,10 +801,13 @@ class TransactionLedger:
                     s.state,
                     s.wire_bytes,
                     s.receipt_destinations,
-                    s.evidence_profile_id
+                    s.evidence_profile_id,
+                    r.risk_session_id,
+                    r.quote_mint
                 FROM submissions AS s
                 JOIN intents AS i ON i.intent_id = s.intent_id
                 LEFT JOIN outcomes AS o ON o.signature = s.signature
+                LEFT JOIN risk_reservations AS r ON r.signature = s.signature
                 WHERE s.intent_id = ?
                   AND (
                       o.status IS NULL
@@ -838,9 +848,12 @@ class TransactionLedger:
                     s.state,
                     s.wire_bytes,
                     s.receipt_destinations,
-                    s.evidence_profile_id
+                    s.evidence_profile_id,
+                    r.risk_session_id,
+                    r.quote_mint
                 FROM submissions AS s
                 JOIN intents AS i ON i.intent_id = s.intent_id
+                LEFT JOIN risk_reservations AS r ON r.signature = s.signature
                 WHERE s.intent_id = ?
                 ORDER BY s.submitted_at DESC, s.rowid DESC
                 LIMIT 1
