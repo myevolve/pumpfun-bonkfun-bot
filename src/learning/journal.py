@@ -31,7 +31,14 @@ from math import isfinite
 from pathlib import Path
 from typing import Any
 
+from solders.pubkey import Pubkey
 from typesafe_sdk import AsyncTypeSafeClient
+
+from core.pubkeys import (
+    is_sol_paired,
+    normalize_quote_mint,
+    quote_units_per_token,
+)
 
 from utils.logger import get_logger
 from utils.paths import state_path
@@ -62,8 +69,11 @@ CREATE TABLE IF NOT EXISTS lessons (
     jev_liq_trap REAL,                -- P(thin-curve exit trap)
     jev_model TEXT,
     outcome_utc TEXT,                 -- filled when the position closes
-    outcome_pnl_sol REAL,             -- net quote at close, NULL until known
+    outcome_pnl_sol REAL,             -- SOL-only swap spread, NULL for other quotes
     outcome_reason TEXT,
+    outcome_pnl_quote_raw INTEGER,    -- net quote at close, in the position's quote units
+    outcome_quote_mint TEXT,          -- the quote mint those raw units belong to
+    outcome_source TEXT,              -- 'live_close' marks a real position close
     raw TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_lessons_kind ON lessons(kind);
@@ -121,11 +131,20 @@ class LessonJournal:
         # WAL lets the dashboard and report CLI read while the bot writes.
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(_SCHEMA)
-        # Idempotent migration: existing journals lack the battery columns.
+        # Idempotent migration: journals created before these columns existed.
         existing = {r[1] for r in self._conn.execute("PRAGMA table_info(lessons)")}
-        for col in ("jev_dump_risk", "jev_organic", "jev_liq_trap"):
-            if col not in existing:
-                self._conn.execute(f"ALTER TABLE lessons ADD COLUMN {col} REAL")
+        for column, column_type in (
+            ("jev_dump_risk", "REAL"),
+            ("jev_organic", "REAL"),
+            ("jev_liq_trap", "REAL"),
+            ("outcome_pnl_quote_raw", "INTEGER"),
+            ("outcome_quote_mint", "TEXT"),
+            ("outcome_source", "TEXT"),
+        ):
+            if column not in existing:
+                self._conn.execute(
+                    f"ALTER TABLE lessons ADD COLUMN {column} {column_type}"  # noqa: S608 - fixed column names
+                )
         self._conn.commit()
 
     def record(
@@ -170,10 +189,24 @@ class LessonJournal:
     def link_outcome(
         self,
         mint: str,
-        pnl_sol: float | None,
+        pnl_quote_raw: int | None,
+        quote_mint: Pubkey | str | None = None,
         reason: str | None = None,
     ) -> None:
-        """Attach an outcome to the most recent open lesson for this mint."""
+        """Attach a closed position's outcome to the most recent open lesson.
+
+        The difference is denominated in the position's quote asset, not SOL:
+        raw units are stored with their mint and the legacy SOL column is only
+        filled for SOL, so a USDC close can never be reported as SOL. The row
+        is marked ``live_close``; rows without that mark stay ineligible for
+        analysis instead of passing a name filter.
+        """
+        normalized = normalize_quote_mint(quote_mint)
+        pnl_sol = (
+            pnl_quote_raw / quote_units_per_token(normalized)
+            if pnl_quote_raw is not None and is_sol_paired(normalized)
+            else None
+        )
         try:
             row = self._conn.execute(
                 "SELECT id FROM lessons WHERE mint=? AND kind IN"
@@ -185,8 +218,16 @@ class LessonJournal:
                 return
             self._conn.execute(
                 "UPDATE lessons SET outcome_utc=?, outcome_pnl_sol=?,"
-                " outcome_reason=? WHERE id=?",
-                (_utc(), pnl_sol, reason, row[0]),
+                " outcome_reason=?, outcome_pnl_quote_raw=?, outcome_quote_mint=?,"
+                " outcome_source='live_close' WHERE id=?",
+                (
+                    _utc(),
+                    pnl_sol,
+                    reason,
+                    pnl_quote_raw,
+                    str(normalized),
+                    row[0],
+                ),
             )
             self._conn.commit()
         except sqlite3.Error:

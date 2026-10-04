@@ -171,6 +171,17 @@ entry counts, per-horizon missing reasons with next checks, and within-entry
 300s/900s return differences relative to 60s. Repeated mints are not independent
 trials. Improvements/worsenings are descriptive counts, not strategy recommendations.
 
+Live trade outcomes are marked at write time (`outcome_source='live_close'`) and
+only marked rows are eligible; an outcome that is merely "not obviously paper"
+no longer passes a name filter, and pre-marker rows are counted as
+`excluded_unclassified` instead of being silently folded in. Each outcome keeps
+its quote asset: the amount is stored in the position's quote units with its
+mint, and the SOL column is filled only for SOL closes, so the reported
+averages are SOL-denominated and a USDC close can never be read as SOL. The
+amount is swap spread, not fee-inclusive net profit. Report schema version is 2;
+a journal created before the marker reports that it needs one bot start to
+migrate rather than failing to load.
+
 Download the JSON report from the Learning tab, or save a new snapshot from the CLI:
 
 ```bash

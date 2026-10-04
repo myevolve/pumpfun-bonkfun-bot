@@ -151,17 +151,23 @@ def load_report(limit: int = 15, db_path: Path = DB) -> dict:
         return {"error": f"no journal at {db_path}"}
     conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(lessons)")}
+    if "outcome_source" not in columns:
+        conn.close()
+        return {
+            "error": (
+                "journal predates the live-close marker; start the bot once so "
+                "LessonJournal migrates it, then reload"
+            )
+        }
     try:
         conn.execute("BEGIN")
         conn.execute(
             """CREATE TEMP VIEW nonpaper_outcomes AS
-            SELECT * FROM lessons WHERE outcome_pnl_sol IS NOT NULL
-                AND kind NOT LIKE 'horizon_%'
-                AND COALESCE(outcome_reason, '') NOT LIKE 'paper_exit_%'
-                AND COALESCE(outcome_reason, '') != 'invalid_migration_artifact'"""
+            SELECT * FROM lessons WHERE outcome_source = 'live_close'"""
         )
         out: dict = {}
-        out["report_schema_version"] = 1
+        out["report_schema_version"] = 2
         out["snapshot"] = {
             "generated_utc": datetime.now(UTC).isoformat(),
             **dict(
@@ -181,6 +187,12 @@ def load_report(limit: int = 15, db_path: Path = DB) -> dict:
         out["resolved"] = conn.execute(
             "SELECT COUNT(*) FROM nonpaper_outcomes"
         ).fetchone()[0]
+        out["excluded_unclassified"] = conn.execute(
+            """SELECT COUNT(*) FROM lessons WHERE outcome_source IS NULL
+            AND (outcome_utc IS NOT NULL OR outcome_reason IS NOT NULL
+                 OR outcome_pnl_sol IS NOT NULL
+                 OR outcome_pnl_quote_raw IS NOT NULL)"""
+        ).fetchone()[0]
         out["excluded_legacy_paper"] = conn.execute(
             """SELECT COUNT(*) FROM lessons WHERE kind LIKE 'horizon_%'
             OR outcome_reason LIKE 'paper_exit_%'
@@ -189,10 +201,16 @@ def load_report(limit: int = 15, db_path: Path = DB) -> dict:
         out.update(_paper_evidence(conn))
         out["promotion_allowed"] = False
         out["measurement_note"] = (
-            "Legacy paper PnL is excluded: invalid real-reserve pricing. "
-            "New marks are gross marginal returns, not fills or net profit. "
-            "Missing/migrated/cancelled marks remain visible; complete-pair "
-            "selection can bias results. No strategy or model promotion follows."
+            "Only rows marked live_close are eligible; older outcomes without "
+            "that mark stay excluded rather than passing a name filter. "
+            "Averages are SOL-denominated: a close in another quote asset keeps "
+            "its raw units and mint per row and is left out of these "
+            "aggregates. The amount is swap spread, not fee-inclusive net "
+            "profit. Legacy paper PnL is excluded: invalid real-reserve "
+            "pricing. New marks are gross marginal returns, not fills or net "
+            "profit. Missing/migrated/cancelled marks remain visible; "
+            "complete-pair selection can bias results. No strategy or model "
+            "promotion follows."
         )
         out["pnl_by_quality"] = [
             dict(r)
@@ -200,7 +218,8 @@ def load_report(limit: int = 15, db_path: Path = DB) -> dict:
                 "SELECT ROUND(jev_quality, 1) AS q, COUNT(*) AS n,"
                 " ROUND(AVG(outcome_pnl_sol), 8) AS avg_pnl,"
                 " ROUND(SUM(outcome_pnl_sol), 8) AS total_pnl"
-                " FROM nonpaper_outcomes WHERE jev_quality IS NOT NULL"
+                " FROM nonpaper_outcomes"
+                " WHERE jev_quality IS NOT NULL AND outcome_pnl_sol IS NOT NULL"
                 " GROUP BY q ORDER BY q"
             )
         ]
@@ -221,7 +240,9 @@ def load_report(limit: int = 15, db_path: Path = DB) -> dict:
                 " WHEN jev_copycat < 0.2 THEN 'organic(<0.2)'"
                 " ELSE 'mixed' END AS cohort, COUNT(*) AS n,"
                 " ROUND(AVG(outcome_pnl_sol), 8) AS avg_pnl"
-                " FROM nonpaper_outcomes WHERE jev_copycat IS NOT NULL GROUP BY cohort"
+                " FROM nonpaper_outcomes"
+                " WHERE jev_copycat IS NOT NULL AND outcome_pnl_sol IS NOT NULL"
+                " GROUP BY cohort"
             )
         ]
         out["skip_reasons"] = dict(
@@ -234,7 +255,8 @@ def load_report(limit: int = 15, db_path: Path = DB) -> dict:
             dict(r)
             for r in conn.execute(
                 "SELECT utc, kind, symbol, decision, jev_quality, jev_copycat,"
-                " outcome_pnl_sol, outcome_reason FROM lessons"
+                " outcome_pnl_sol, outcome_pnl_quote_raw, outcome_quote_mint,"
+                " outcome_source, outcome_reason FROM lessons"
                 " ORDER BY id DESC LIMIT ?",
                 (limit,),
             )
@@ -253,6 +275,7 @@ def _print_quality_evidence(data: dict) -> None:
     """Descriptive associations only; quality is not a win probability."""
     print("\n--- Live outcome associations by raw Jev quality (not calibration) ---")
     print(f"{'score':>6} {'n':>6} {'avg pnl SOL':>14} {'total':>12}")
+    print("  (SOL-denominated closes only; other quote assets keep raw units)")
     for row in data["pnl_by_quality"]:
         print(
             f"{row['q']:>6} {row['n']:>6} {row['avg_pnl']:>14} {row['total_pnl']:>12}"

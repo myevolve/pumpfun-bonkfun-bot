@@ -3475,7 +3475,7 @@ class UniversalTrader:
                         if self.lesson_journal is not None:
                             self.lesson_journal.link_outcome(
                                 str(token_info.mint),
-                                pnl_sol=(
+                                pnl_quote_raw=(
                                     sell_result.quote_amount_raw
                                     - position.quote_amount_raw
                                 )
@@ -3484,6 +3484,7 @@ class UniversalTrader:
                                     and position.quote_amount_raw is not None
                                 )
                                 else None,
+                                quote_mint=normalize_quote_mint(token_info.quote_mint),
                                 reason=exit_reason.value,
                             )
                         self._record_trade_evidence(

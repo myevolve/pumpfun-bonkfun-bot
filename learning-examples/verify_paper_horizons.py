@@ -234,10 +234,35 @@ async def scenario(path: Path) -> dict:  # noqa: PLR0915 - one end-to-end scenar
         (first,),
     )
     journal._conn.commit()
+
+    # Quote-aware outcome links: a SOL close converts into the SOL column,
+    # another quote asset keeps raw units and its mint and stays out of the
+    # SOL-denominated aggregates.
+    journal.record(
+        LessonObservation(kind="gate_pass", mint="closed-sol", symbol="SOLCLOSE")
+    )
+    journal.record(
+        LessonObservation(kind="gate_pass", mint="closed-usdc", symbol="USDCCLOSE")
+    )
+    journal.link_outcome(
+        "closed-sol", 11_000_000 - 10_000_000, WSOL_MINT, "take_profit"
+    )
+    journal.link_outcome(
+        "closed-usdc", 12_000_000 - 10_000_000, USDC_MINT, "take_profit"
+    )
     journal.close()
     report = load_report(db_path=path)
     assert report["excluded_legacy_paper"] == 1
-    assert report["pnl_by_quality"] == [] and report["resolved"] == 0
+    assert report["pnl_by_quality"] == [] and report["resolved"] == 2
+    # The pre-cutover row above has no source mark, so it is excluded and counted.
+    assert report["excluded_unclassified"] == 1
+    sol_close = next(r for r in report["recent"] if r["symbol"] == "SOLCLOSE")
+    assert sol_close["outcome_pnl_sol"] == 0.001
+    assert sol_close["outcome_quote_mint"] == str(WSOL_MINT)
+    usdc_close = next(r for r in report["recent"] if r["symbol"] == "USDCCLOSE")
+    assert usdc_close["outcome_pnl_sol"] is None
+    assert usdc_close["outcome_pnl_quote_raw"] == 2_000_000
+    assert usdc_close["outcome_quote_mint"] == str(USDC_MINT)
     assert "brier_win" not in report
     assert report["promotion_allowed"] is False
     assert all(
