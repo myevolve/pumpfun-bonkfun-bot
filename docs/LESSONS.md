@@ -182,6 +182,13 @@ amount is swap spread, not fee-inclusive net profit. Report schema version is 2;
 a journal created before the marker reports that it needs one bot start to
 migrate rather than failing to load.
 
+An outcome is attached to the exact lesson row that opened the position (the
+position journals that row's id, so it survives a restart); only a position
+with no recorded id — a legacy journal, or one rebuilt by the recovery path —
+falls back to the newest open lesson for that mint. The emergency and
+pending-sell recovery closes now link outcomes too, so a close is no longer
+missing from the cohort simply because it happened on those paths.
+
 Download the JSON report from the Learning tab, or save a new snapshot from the CLI:
 
 ```bash

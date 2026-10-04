@@ -192,8 +192,13 @@ class LessonJournal:
         pnl_quote_raw: int | None,
         quote_mint: Pubkey | str | None = None,
         reason: str | None = None,
+        entry_id: int | None = None,
     ) -> None:
-        """Attach a closed position's outcome to the most recent open lesson.
+        """Attach a closed position's outcome to the lesson row that opened it.
+
+        ``entry_id`` is the exact decision this position came from; without it
+        the link falls back to the newest open lesson for the mint, which
+        mis-attributes a close when one mint was entered more than once.
 
         The difference is denominated in the position's quote asset, not SOL:
         raw units are stored with their mint and the legacy SOL column is only
@@ -208,12 +213,19 @@ class LessonJournal:
             else None
         )
         try:
-            row = self._conn.execute(
-                "SELECT id FROM lessons WHERE mint=? AND kind IN"
-                " ('gate_pass','paper_fill','buy') AND outcome_utc IS NULL"
-                " ORDER BY id DESC LIMIT 1",
-                (mint,),
-            ).fetchone()
+            if entry_id is None:
+                row = self._conn.execute(
+                    "SELECT id FROM lessons WHERE mint=? AND kind IN"
+                    " ('gate_pass','paper_fill','buy') AND outcome_utc IS NULL"
+                    " ORDER BY id DESC LIMIT 1",
+                    (mint,),
+                ).fetchone()
+            else:
+                row = self._conn.execute(
+                    "SELECT id FROM lessons WHERE id=? AND kind IN"
+                    " ('gate_pass','paper_fill','buy') AND outcome_utc IS NULL",
+                    (entry_id,),
+                ).fetchone()
             if row is None:
                 return
             self._conn.execute(

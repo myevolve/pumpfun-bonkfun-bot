@@ -40,6 +40,7 @@ class Position:
     quote_amount_raw: int | None = None
     buy_fee_lamports: int | None = None
     account_balance_baseline_raw: int | None = None
+    entry_lesson_id: int | None = None  # lesson row this position came from
 
     # Exit conditions
     take_profit_price: float | None = None
@@ -105,6 +106,7 @@ class Position:
                 True,
             ),
             ("pending_exit_fee_lamports", self.pending_exit_fee_lamports, True),
+            ("entry_lesson_id", self.entry_lesson_id, False),
         ):
             if value is not None and (
                 isinstance(value, bool)
@@ -198,6 +200,7 @@ class Position:
         buy_fee_lamports: int | None = None,
         account_balance_baseline_raw: int | None = None,
         position_id: str | None = None,
+        entry_lesson_id: int | None = None,
     ) -> "Position":
         """Create a validated position from a confirmed buy receipt."""
         if take_profit_percentage is not None and (
@@ -255,6 +258,7 @@ class Position:
             quote_amount_raw=quote_amount_raw,
             buy_fee_lamports=buy_fee_lamports,
             account_balance_baseline_raw=account_balance_baseline_raw,
+            entry_lesson_id=entry_lesson_id,
             take_profit_price=take_profit_price,
             take_profit_net_quote_raw=take_profit_net_quote_raw,
             stop_loss_price=stop_loss_price,
@@ -437,6 +441,7 @@ class Position:
             "quote_amount_raw": self.quote_amount_raw,
             "buy_fee_lamports": self.buy_fee_lamports,
             "account_balance_baseline_raw": self.account_balance_baseline_raw,
+            "entry_lesson_id": self.entry_lesson_id,
             "take_profit_price": self.take_profit_price,
             "take_profit_net_quote_raw": self.take_profit_net_quote_raw,
             "charged_exit_fee_lamports": self.charged_exit_fee_lamports,
@@ -490,6 +495,7 @@ class Position:
             quote_amount_raw=raw.get("quote_amount_raw"),
             buy_fee_lamports=raw.get("buy_fee_lamports"),
             account_balance_baseline_raw=raw.get("account_balance_baseline_raw"),
+            entry_lesson_id=raw.get("entry_lesson_id"),
             take_profit_price=raw.get("take_profit_price"),
             take_profit_net_quote_raw=raw.get("take_profit_net_quote_raw"),
             charged_exit_fee_lamports=raw.get("charged_exit_fee_lamports", 0),

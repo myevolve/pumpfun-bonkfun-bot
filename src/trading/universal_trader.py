@@ -1490,6 +1490,30 @@ class UniversalTrader:
         )
         return True
 
+    def _link_lesson_outcome(
+        self,
+        position: Position,
+        *,
+        quote_mint: Pubkey | str | None,
+        sold_quote_raw: int | None,
+        reason: str,
+    ) -> None:
+        """Record a closed position's outcome on the lesson row that opened it."""
+        if self.lesson_journal is None:
+            return
+        pnl_quote_raw = (
+            sold_quote_raw - position.quote_amount_raw
+            if sold_quote_raw is not None and position.quote_amount_raw is not None
+            else None
+        )
+        self.lesson_journal.link_outcome(
+            str(position.mint),
+            pnl_quote_raw,
+            quote_mint=quote_mint,
+            reason=reason,
+            entry_id=position.entry_lesson_id,
+        )
+
     async def _finalize_emergency_exit(
         self,
         token_info: TokenInfo,
@@ -1511,6 +1535,12 @@ class UniversalTrader:
             price=exit_price,
             amount_raw=sold_raw,
             quote_amount_raw=quote_amount_raw,
+        )
+        self._link_lesson_outcome(
+            position,
+            quote_mint=normalize_quote_mint(token_info.quote_mint),
+            sold_quote_raw=quote_amount_raw,
+            reason=ExitReason.MANUAL.value,
         )
         cleanup_raw = (
             sold_raw
@@ -2670,7 +2700,9 @@ class UniversalTrader:
             self._buy_attempts = getattr(self, "_buy_attempts", 0) + 1
             buy_result: TradeResult = await self.buyer.execute(token_info)
             if buy_result.success:
-                await self._handle_successful_buy(token_info, buy_result)
+                await self._handle_successful_buy(
+                    token_info, buy_result, entry_lesson_id=entry_lesson_id
+                )
                 handled = True
             else:
                 handled = await self._handle_failed_buy(token_info, buy_result)
@@ -2774,6 +2806,7 @@ class UniversalTrader:
         buy_result: TradeResult,
         *,
         replace_unresolved: bool = False,
+        entry_lesson_id: int | None = None,
     ) -> None:
         """Journal a confirmed holding before starting any exit monitor."""
         if token_info.slot is not None and buy_result.slot is not None:
@@ -2827,6 +2860,7 @@ class UniversalTrader:
             account_balance_baseline_raw=(buy_result.account_balance_baseline_raw),
             position_id=buy_result.tx_signature
             or f"{token_info.platform.value}:{token_info.mint}",
+            entry_lesson_id=entry_lesson_id,
         )
         token_key = str(token_info.mint)
         unresolved_record = (
@@ -3264,6 +3298,12 @@ class UniversalTrader:
                             amount_raw=position.quantity_raw,
                             quote_amount_raw=quote_raw,
                         )
+                        self._link_lesson_outcome(
+                            position,
+                            quote_mint=normalize_quote_mint(token_info.quote_mint),
+                            sold_quote_raw=quote_raw,
+                            reason=exit_reason.value,
+                        )
                         staged_cleanup = (
                             stage_cleanup_after_sell(
                                 self.solana_client,
@@ -3472,21 +3512,12 @@ class UniversalTrader:
                             )
                             else None
                         )
-                        if self.lesson_journal is not None:
-                            self.lesson_journal.link_outcome(
-                                str(token_info.mint),
-                                pnl_quote_raw=(
-                                    sell_result.quote_amount_raw
-                                    - position.quote_amount_raw
-                                )
-                                if (
-                                    sell_result.quote_amount_raw is not None
-                                    and position.quote_amount_raw is not None
-                                )
-                                else None,
-                                quote_mint=normalize_quote_mint(token_info.quote_mint),
-                                reason=exit_reason.value,
-                            )
+                        self._link_lesson_outcome(
+                            position,
+                            quote_mint=normalize_quote_mint(token_info.quote_mint),
+                            sold_quote_raw=sell_result.quote_amount_raw,
+                            reason=exit_reason.value,
+                        )
                         self._record_trade_evidence(
                             "position_closed",
                             token_info,
