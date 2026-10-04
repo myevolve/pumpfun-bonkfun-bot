@@ -182,6 +182,10 @@ def simulate_configured(  # noqa: C901, PLR0912, PLR0915
             all(left <= right for left, right in pairwise(offsets)),
             "receive_order_ambiguous",
         )
+        _require_tape(
+            all(left.slot <= right.slot for left, right in pairwise(events)),
+            "trade_slot_order_ambiguous",
+        )
         times = [started + offset / 1000 for offset in offsets]
         head_times = [head["received_monotonic"] for head in heads]
         _require_tape(bool(heads), "slot_clock_missing")

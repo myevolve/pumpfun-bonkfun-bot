@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+# ruff: noqa: S101, SLF001 - assertions and direct lifecycle state exercise safety boundaries
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
@@ -7,15 +8,25 @@ from unittest.mock import AsyncMock
 
 import pytest
 from solders.pubkey import Pubkey
-from test_trade_flow import CREATOR, MINT, OTHER, _encode_trade_event, _event
+from test_trade_flow import (
+    CREATOR,
+    MINT,
+    OTHER,
+    PUMP_PROGRAM,
+    _encode_trade_event,
+    _event,
+)
 
 from core.execution_policy import ExecutionPolicy
 from interfaces.core import Platform, TokenInfo
 from monitoring.trade_flow import (
     EntryGate,
+    FlowRules,
     GateRules,
     TradeEvent,
     TradeFlowHub,
+    TradeFlowLossError,
+    TradeQueue,
 )
 from trading.universal_trader import UniversalTrader
 from utils.idl_parser import IDLParser
@@ -48,6 +59,31 @@ def test_gate_accepts_on_first_non_creator_buyer() -> None:
     assert decision.buyers == 1
     assert decision.slots_waited == 1
     assert decision.last_event is not None and decision.last_event.user == OTHER
+
+
+def test_gate_rejects_precreation_and_backwards_slots() -> None:
+    decision = _gate().observe(_event(real=200_000_000, slot=CREATION_SLOT - 1))
+    assert decision is not None and not decision.accept
+    assert decision.reason == "trade_before_creation"
+    assert decision.slots_waited == 0
+    assert decision.buyers == 0 and decision.last_event is None
+
+    first = _event(real=200_000_000, slot=CREATION_SLOT + 2)
+    second_user = str(Pubkey.from_bytes(bytes([3]) * 32))
+    for slot_delta in (1, 2):
+        gate = _gate(min_buyers=2)
+        assert gate.observe(first) is None
+        decision = gate.observe(
+            _event(user=second_user, real=300_000_000, slot=CREATION_SLOT + slot_delta)
+        )
+        assert decision is not None
+        if slot_delta == 1:
+            assert not decision.accept
+            assert decision.reason == "trade_stream_out_of_order"
+            assert decision.last_event is first and decision.buyers == 1
+        else:
+            assert decision.accept
+            assert decision.buyers == 2  # noqa: PLR2004 - two distinct same-slot buyers
 
 
 def test_gate_rejects_creator_sell_and_high_liquidity_and_late_window() -> None:
@@ -164,7 +200,13 @@ async def test_hub_fans_out_only_to_subscribed_mints() -> None:
     )
     hub = TradeFlowHub(parser, queue_size=2)
     assert not hub.active
-    logs = [_encode_trade_event(parser), _encode_trade_event(parser, mint=OTHER)]
+    pump = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+    logs = [
+        f"Program {pump} invoke [1]",
+        _encode_trade_event(parser),
+        _encode_trade_event(parser, mint=OTHER),
+        f"Program {pump} success",
+    ]
     assert (
         hub.publish_logs(logs, slot=1, signature="s") == 0
     )  # nobody listening: no decode
@@ -173,15 +215,17 @@ async def test_hub_fans_out_only_to_subscribed_mints() -> None:
     assert hub.publish_logs(logs, slot=1, signature="s") == 1
     event = queue.get_nowait()
     assert isinstance(event, TradeEvent) and event.mint == MINT
-    hub.publish_logs(logs, slot=2, signature="s")
-    hub.publish_logs(logs, slot=3, signature="s")
-    hub.publish_logs(logs, slot=4, signature="s")
-    assert hub.dropped == 1  # bounded queue
+    hub.publish_logs(logs, slot=2, signature="s2")
+    hub.publish_logs(logs, slot=3, signature="s3")
+    hub.publish_logs(logs, slot=4, signature="s4")
+    assert hub.dropped == 3  # noqa: PLR2004 - two invalidated queued events plus overflow
+    with pytest.raises(TradeFlowLossError):
+        await queue.get()
     hub.unsubscribe(MINT, queue)
     assert not hub.active
 
 
-def _gated_trader(rules: GateRules) -> tuple[UniversalTrader, TokenInfo, asyncio.Queue]:
+def _gated_trader(rules: GateRules) -> tuple[UniversalTrader, TokenInfo, TradeQueue]:
     trader = object.__new__(UniversalTrader)
     trader.execution_policy = ExecutionPolicy()
     trader.gate_rules = rules
@@ -199,7 +243,7 @@ def _gated_trader(rules: GateRules) -> tuple[UniversalTrader, TokenInfo, asyncio
         virtual_quote_reserves=30_000_000_000,
         virtual_token_reserves=1_073_000_000_000_000,
     )
-    queue: asyncio.Queue = asyncio.Queue()
+    queue = TradeQueue()
     trader._gate_queues[MINT] = queue
     return trader, token, queue
 
@@ -259,3 +303,61 @@ async def test_handle_token_skips_buy_when_gate_rejects() -> None:
 
     assert handled is True
     trader.buyer.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("loss_reason", ["overflow", "interrupted", "out_of_order"])
+@pytest.mark.parametrize(
+    ("min_buyers", "wait_before_loss"),
+    [(1, False), (1, True), (0, False)],
+    ids=["already-overflowed", "waiting-reader", "no-wait-gate"],
+)
+async def test_history_loss_rejects_entry_and_disables_flow_exit(
+    min_buyers: int, loss_reason: str, *, wait_before_loss: bool
+) -> None:
+    trader, token, _ = _gated_trader(GateRules(min_buyers=min_buyers))
+    parser = IDLParser(
+        str(Path(__file__).resolve().parents[1] / "idl/pump_fun_idl.json")
+    )
+    hub = TradeFlowHub(parser, queue_size=1 if loss_reason == "overflow" else 2)
+    trader._gate_queues[MINT] = hub.subscribe(MINT)
+    pending = None
+    if wait_before_loss:
+        pending = asyncio.create_task(trader._await_entry_gate(token))
+        await asyncio.sleep(0)
+    for signature, user in (("buyer", OTHER), ("creator-sell", CREATOR)):
+        hub.publish_logs(
+            [
+                f"Program {PUMP_PROGRAM} invoke [1]",
+                _encode_trade_event(
+                    parser,
+                    user=user,
+                    is_buy=user == OTHER,
+                    real_sol_reserves=200_000_000,
+                ),
+                f"Program {PUMP_PROGRAM} success",
+            ],
+            slot=CREATION_SLOT
+            + (0 if loss_reason == "out_of_order" and user == CREATOR else 1),
+            signature=signature,
+        )
+    if loss_reason == "interrupted":
+        hub.stream_interrupted()
+    before = (token.virtual_quote_reserves, token.virtual_token_reserves)
+    decision = await asyncio.wait_for(
+        pending if pending is not None else trader._await_entry_gate(token), 1
+    )
+    assert decision is not None and not decision.accept
+    assert decision.reason == f"trade_stream_{loss_reason}"
+    assert decision.last_event is None
+    assert (token.virtual_quote_reserves, token.virtual_token_reserves) == before
+
+    trader.flow_rules = FlowRules()
+    trader._flow_signals = {}
+    trader._flow_latched = set()
+    trader._flow_wakeups = {MINT: asyncio.Event()}
+    position = SimpleNamespace(entry_price=1.0, is_active=True)
+    await asyncio.wait_for(trader._consume_trade_flow(token, position), 1)
+    assert position.is_active
+    assert trader._flow_signals == {}
+    assert not trader._flow_wakeups[MINT].is_set()

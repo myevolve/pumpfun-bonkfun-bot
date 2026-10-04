@@ -266,3 +266,18 @@ def test_configured_exit_requires_observed_time_and_ignores_future_trades() -> N
     net_checked = module.simulate_configured(gross_signal, heads, lock, snapshot)
     assert net_checked["status"] == "conditionally_priced"
     assert net_checked["trigger"] == "max_hold_time"
+
+    same_slot = {
+        **coin,
+        "trades": [[slot, *coin["trades"][0][1:]] for slot in (0, 2, 2)],
+        "trade_received_ms": [250, 800, 1200],
+        "trade_real_token_reserves": [793000000000000] * 3,
+    }
+    assert (
+        module.simulate_configured(same_slot, heads, lock, snapshot)["status"]
+        == "conditionally_priced"
+    )
+    same_slot["trades"][-1][0] = 1
+    reordered = module.simulate_configured(same_slot, heads, lock, snapshot)
+    assert reordered["status"] == "unpriced" and reordered["net_lamports"] is None
+    assert "trade_slot_order_ambiguous" in reordered["reason"]

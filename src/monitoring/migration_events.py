@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from utils.logger import get_logger
+from utils.program_logs import attribute_program_logs
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -73,7 +74,7 @@ class MigrationEvent:
     bonding_curve: str | None
 
 
-def decode_migration_events(
+def decode_migration_events(  # noqa: C901, PLR0912 - validate both protocols at one boundary
     logs: list[str],
     *,
     slot: int,
@@ -85,14 +86,16 @@ def decode_migration_events(
 
     A graduation tx emits a pump.fun ``CompleteEvent`` (mint just filled its
     curve) and a PumpSwap ``CreatePoolEvent`` (the migration pool it now trades
-    on); both are matched by discriminator prefix. Malformed payloads are
-    skipped: a bad log line must never kill the stream that decoded it.
+    on); both must match their discriminator and successful emitting program.
+    Failed ancestors invalidate their events; ambiguous stacks reject the batch.
+    Malformed payloads are skipped without killing the stream.
     """
     sources = {
         pump_parser.get_event_discriminators()["CompleteEvent"]: (
             pump_parser,
             "CompleteEvent",
             "complete",
+            _PUMP_PROGRAM,
         ),
         # The pAMM-path completion event carries the pool directly (and the
         # migration fee), enabling a pool-bearing complete branch with no
@@ -101,28 +104,37 @@ def decode_migration_events(
             pump_parser,
             "CompletePumpAmmMigrationEvent",
             "pool_created",
+            _PUMP_PROGRAM,
         ),
         pamm_parser.get_event_discriminators()["CreatePoolEvent"]: (
             pamm_parser,
             "CreatePoolEvent",
             "pool_created",
+            _PAMM_PROGRAM,
         ),
     }
     # Only SOL-quoted events are tradeable by this scanner; a USDC-quoted
     # pool's 6-decimal amounts treated as lamports would read 1000x large.
     sol_quote = "So11111111111111111111111111111111111111112"
     events: list[MigrationEvent] = []
-    for log in logs:
-        if not log.startswith(_PROGRAM_DATA):
+    try:
+        entries = attribute_program_logs(logs)
+    except ValueError as exc:
+        logger.debug("Rejected migration log attribution in %s: %s", signature, exc)
+        return []
+    for _, program, log, committed in entries:
+        if not committed or not log.startswith(_PROGRAM_DATA):
             continue
         try:
-            data = base64.b64decode(log[len(_PROGRAM_DATA) :])
+            data = base64.b64decode(log[len(_PROGRAM_DATA) :], validate=True)
         except ValueError:
             continue
         source = sources.get(data[:8])
         if source is None:
             continue
-        parser, name, kind = source
+        parser, name, kind, expected_program = source
+        if program != expected_program:
+            continue
         decoded = parser.decode_event_data(data, name)
         if not decoded:
             continue

@@ -38,6 +38,7 @@ from monitoring.trade_flow import MAYHEM_SOL_VAULT
 from platforms.pumpfun.event_parser import PumpFunEventParser
 from src.geyser.generated import geyser_pb2, geyser_pb2_grpc
 from utils.idl_parser import IDLParser
+from utils.program_logs import attribute_program_logs
 
 # Standalone src imports, protocol bounds and offline assertions are intentional.
 # ruff: noqa: E402, PLR2004, S101
@@ -53,49 +54,6 @@ TERMINAL_RESERVE = 65536
 
 class StorageCeiling(RuntimeError):  # noqa: N818 - existing evidence-ceiling sentinel
     """Stop rather than silently discard evidence or evict deduplication keys."""
-
-
-def attributed_logs(logs: list[str]) -> tuple[list[tuple[int, str, str, bool]], bool]:  # noqa: C901, PLR0912
-    """Bind data to runtime frames; failed CPI events cannot update state.
-
-    Indices are original log offsets, not discriminator counts. Ambiguous or
-    truncated stacks refuse the transaction rather than trusting forged data.
-    """
-    stack: list[tuple[str, list[int]]] = []
-    entries: list[list] = []
-    creation_hint = False
-    for index, log in enumerate(logs):
-        parts = log.split()
-        if len(parts) >= 3 and parts[0] == "Program" and parts[2] == "invoke":
-            if len(parts) != 4 or parts[3] != f"[{len(stack) + 1}]":
-                raise ValueError("ambiguous_invocation_depth")
-            stack.append((parts[1], []))
-        elif (
-            len(parts) >= 3
-            and parts[0] == "Program"
-            and (parts[2] == "success" or parts[2].startswith("failed"))
-        ):
-            if not stack or stack[-1][0] != parts[1]:
-                raise ValueError("unmatched_program_completion")
-            _, indices = stack.pop()
-            if parts[2].startswith("failed"):
-                for offset in indices:
-                    entries[offset][3] = False
-            if stack:
-                stack[-1][1].extend(indices)
-        elif stack:
-            if stack[-1][0] == PUMP_PROGRAM and log.startswith(
-                "Program log: Instruction: Create"
-            ):
-                creation_hint = True
-            if log.startswith(PROGRAM_DATA):
-                stack[-1][1].append(len(entries))
-                entries.append([index, stack[-1][0], log[len(PROGRAM_DATA) :], True])
-        elif log.startswith(PROGRAM_DATA):
-            raise ValueError("unbound_program_data")
-    if stack:
-        raise ValueError("truncated_program_stack")
-    return [tuple(entry) for entry in entries], creation_hint
 
 
 class Recorder:
@@ -325,11 +283,16 @@ class Recorder:
         refusal = None
         decode_refused = False
         try:
-            entries, bound_hint = attributed_logs(logs)
-            creation_hint |= bound_hint
-            for index, program, encoded, committed in entries:
+            entries = attribute_program_logs(logs)
+            for index, program, log, committed in entries:
                 if program not in (PUMP_PROGRAM, PUMP_AMM_PROGRAM):
                     continue
+                creation_hint |= program == PUMP_PROGRAM and log.startswith(
+                    "Program log: Instruction: Create"
+                )
+                if not log.startswith(PROGRAM_DATA):
+                    continue
+                encoded = log[len(PROGRAM_DATA) :]
                 try:
                     data = base64.b64decode(encoded, validate=True)
                     decoder = self.decoders.get((program, data[:8]))
@@ -1311,7 +1274,7 @@ def self_check() -> None:  # noqa: PLR0915 - one offline evidence check
         "Program data: ZA==",
         f"Program {PUMP_PROGRAM} success",
     ]
-    entries, _ = attributed_logs(logs)
+    entries = attribute_program_logs(logs)
     assert [(i, p, ok) for i, p, _, ok in entries] == [
         (1, PUMP_PROGRAM, True),
         (3, "foreign", True),

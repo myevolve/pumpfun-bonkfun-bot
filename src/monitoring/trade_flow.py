@@ -16,29 +16,34 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
-from collections import deque
+from collections import OrderedDict, deque
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import base58
 import grpc
+from solders.pubkey import Pubkey
 
+from core.pubkeys import is_sol_paired
 from geyser.generated import geyser_pb2, geyser_pb2_grpc
 from monitoring.migration_events import decode_migration_events
 from utils.logger import get_logger
+from utils.program_logs import attribute_program_logs
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
 
     from monitoring.migration_events import MigrationHub
     from utils.idl_parser import IDLParser
 logger = get_logger(__name__)
 
 _PROGRAM_DATA = "Program data: "
+_PUMP_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 # Mayhem's ["sol-vault"] PDA, not a distinct human buyer.
 MAYHEM_SOL_VAULT = "BwWK17cbHxwWBKZkUYvzxLcNQ1YVyaFezduWbtm2de6s"
 _TOKEN_DECIMALS = 6
 _LAMPORTS_PER_SOL = 1_000_000_000
+_MAX_RECENT_TRANSACTIONS = 4096
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,7 +72,7 @@ class TradeEvent:
         )
 
 
-def decode_trade_events(
+def decode_trade_events(  # noqa: C901 - keep attribution and wire validation together
     logs: list[str],
     *,
     slot: int,
@@ -78,16 +83,28 @@ def decode_trade_events(
 ) -> list[TradeEvent]:
     """Decode every ``TradeEvent`` in one transaction's logs, optionally for one mint.
 
-    Only SOL-denominated flow is supported. Non-SOL coins' zero legacy
-    ``sol_*`` reserves are rejected instead of being scaled as lamports.
+    Only SOL-denominated flow is supported. Modern events require an explicit
+    SOL quote and complete canonical quantities; zero is never a legacy fallback.
+    Events predating quote fields retain their legacy SOL-only interpretation.
+    Payloads must belong to a successful pump.fun invocation, including all
+    ancestors. Missing or ambiguous runtime frames reject the whole log batch.
     """
     trade_disc = idl_parser.get_event_discriminators()["TradeEvent"]
     events: list[TradeEvent] = []
-    for log in logs:
-        if not log.startswith(_PROGRAM_DATA):
+    try:
+        entries = attribute_program_logs(logs)
+    except ValueError as exc:
+        logger.debug("Rejected TradeEvent log attribution in %s: %s", signature, exc)
+        return []
+    for _, program, log, committed in entries:
+        if (
+            not committed
+            or program != _PUMP_PROGRAM
+            or not log.startswith(_PROGRAM_DATA)
+        ):
             continue
         try:
-            data = base64.b64decode(log[len(_PROGRAM_DATA) :])
+            data = base64.b64decode(log[len(_PROGRAM_DATA) :], validate=True)
         except ValueError:
             continue
         if data[:8] != trade_disc:
@@ -101,10 +118,27 @@ def decode_trade_events(
                 continue
             if mints is not None and f["mint"] not in mints:
                 continue
-            if (
-                int(f["virtual_sol_reserves"]) <= 0
-                or int(f["virtual_token_reserves"]) <= 0
+            canonical_quote = "quote_mint" in f or f.get("ix_name") in {
+                "buy_v2",
+                "sell_v2",
+                "buy_exact_quote_in_v2",
+            }
+            if canonical_quote and not is_sol_paired(
+                Pubkey.from_string(f["quote_mint"])
             ):
+                continue
+            sol_amount = int(f["quote_amount" if canonical_quote else "sol_amount"])
+            virtual_sol_reserves = int(
+                f[
+                    "virtual_quote_reserves"
+                    if canonical_quote
+                    else "virtual_sol_reserves"
+                ]
+            )
+            real_sol_reserves = int(
+                f["real_quote_reserves" if canonical_quote else "real_sol_reserves"]
+            )
+            if virtual_sol_reserves <= 0 or int(f["virtual_token_reserves"]) <= 0:
                 raise ValueError("non-positive virtual reserves")
             events.append(
                 TradeEvent(
@@ -112,11 +146,11 @@ def decode_trade_events(
                     user=f["user"],
                     creator=f["creator"],
                     is_buy=bool(f["is_buy"]),
-                    sol_amount=int(f["sol_amount"]),
+                    sol_amount=sol_amount,
                     token_amount=int(f["token_amount"]),
-                    virtual_sol_reserves=int(f["virtual_sol_reserves"]),
+                    virtual_sol_reserves=virtual_sol_reserves,
                     virtual_token_reserves=int(f["virtual_token_reserves"]),
-                    real_sol_reserves=int(f["real_sol_reserves"]),
+                    real_sol_reserves=real_sol_reserves,
                     real_token_reserves=int(f.get("real_token_reserves", 0)),
                     slot=slot,
                     signature=signature,
@@ -124,7 +158,7 @@ def decode_trade_events(
                 )
             )
         except (KeyError, TypeError, ValueError) as exc:
-            # Non-SOL-quoted coins legitimately carry zero sol_* reserves.
+            # Missing modern quantities must not silently reuse legacy values.
             logger.debug("Skipped TradeEvent in %s: %s", signature, exc)
     return events
 
@@ -258,13 +292,79 @@ class FlowMonitor:
         return None
 
 
+def _remember_transaction(recent: OrderedDict[str, None], signature: str) -> None:
+    """Remember an admitted batch without unbounded signature retention."""
+    # ponytail: process-local FIFO; durable identities if restart-safe delivery is needed.
+    recent[signature] = None
+    if len(recent) > _MAX_RECENT_TRANSACTIONS:
+        recent.popitem(last=False)
+
+
+_LossReason = Literal["overflow", "interrupted", "out_of_order"]
+
+
+class TradeFlowLossError(ConnectionError):
+    """A subscription lost trade history and cannot support flow decisions."""
+
+    def __init__(self, reason: _LossReason) -> None:
+        self.reason = reason
+        super().__init__(f"Trade subscription history lost: {reason}")
+
+
+class TradeQueue(asyncio.Queue[TradeEvent]):
+    """A bounded trade queue whose readers all fail once history is lost."""
+
+    def __init__(self, maxsize: int = 0) -> None:
+        super().__init__(maxsize=maxsize)
+        self.loss_reason: _LossReason | None = None
+        self._last_slot: int | None = None
+        self._readable = asyncio.Event()
+
+    def put_nowait(self, item: TradeEvent) -> None:
+        if self.loss_reason:
+            raise TradeFlowLossError(self.loss_reason)
+        if self._last_slot is not None and item.slot < self._last_slot:
+            raise TradeFlowLossError("out_of_order")
+        super().put_nowait(item)
+        self._last_slot = item.slot
+        self._readable.set()
+
+    def get_nowait(self) -> TradeEvent:
+        if self.loss_reason:
+            raise TradeFlowLossError(self.loss_reason)
+        event = super().get_nowait()
+        if self.empty():
+            self._readable.clear()
+        return event
+
+    async def get(self) -> TradeEvent:
+        while True:
+            await self._readable.wait()
+            try:
+                return self.get_nowait()
+            except asyncio.QueueEmpty:
+                continue  # Another reader consumed the last item after wakeup.
+
+    def invalidate(self, reason: _LossReason) -> int:
+        """Discard unconsumed history and wake every reader with a sticky failure."""
+        if self.loss_reason is None:
+            self.loss_reason = reason
+        discarded = self.qsize()
+        while not self.empty():
+            super().get_nowait()
+            self.task_done()
+        self._readable.set()
+        return discarded
+
+
 class TradeFlowHub:
     """Fan out TradeEvents from one program-wide stream to per-mint subscribers.
 
     The token listener already receives every pump.fun transaction; decoding
     trades from that stream costs nothing extra and avoids a second Geyser
     subscription per held coin (providers cap concurrent streams). Decoding
-    only happens while at least one mint is subscribed.
+    only happens while at least one mint is subscribed. Recently admitted
+    transaction signatures survive listener reconnects for this hub's lifetime.
     """
 
     def __init__(
@@ -276,9 +376,10 @@ class TradeFlowHub:
     ) -> None:
         self.idl_parser = idl_parser
         self.queue_size = queue_size
-        self._subscribers: dict[str, list[asyncio.Queue[TradeEvent]]] = {}
+        self._subscribers: dict[str, list[TradeQueue]] = {}
+        self._recent_transactions: OrderedDict[str, None] = OrderedDict()
+        self._interrupted = False
         self.dropped = 0
-        self._latest_events: dict[str, TradeEvent] = {}
         self.migration_hub = migration_hub
         # Strong refs: the loop holds only weak refs to tasks.
         self._migration_tasks: set[asyncio.Task[None]] = set()
@@ -289,12 +390,15 @@ class TradeFlowHub:
             self.migration_hub is not None and self.migration_hub.active
         )
 
-    def subscribe(self, mint: str) -> asyncio.Queue[TradeEvent]:
-        queue: asyncio.Queue[TradeEvent] = asyncio.Queue(maxsize=self.queue_size)
+    def subscribe(self, mint: str) -> TradeQueue:
+        queue = TradeQueue(maxsize=self.queue_size)
+        if self._interrupted:
+            queue.invalidate("interrupted")
+            return queue
         self._subscribers.setdefault(mint, []).append(queue)
         return queue
 
-    def unsubscribe(self, mint: str, queue: asyncio.Queue[TradeEvent]) -> None:
+    def unsubscribe(self, mint: str, queue: TradeQueue) -> None:
         queues = self._subscribers.get(mint)
         if not queues:
             return
@@ -303,35 +407,58 @@ class TradeFlowHub:
         if not queues:
             del self._subscribers[mint]
 
+    def stream_interrupted(self) -> None:
+        """Invalidate history before teardown; reject subscriptions during the gap."""
+        self._interrupted = True
+        for queues in self._subscribers.values():
+            for queue in queues:
+                self.dropped += queue.invalidate("interrupted")
+        self._subscribers.clear()
+
+    def stream_resumed(self) -> None:
+        """Allow new subscriptions after acknowledgement; never revive old queues."""
+        self._interrupted = False
+
     def publish_logs(self, logs: list[str], *, slot: int, signature: str) -> int:
-        """Decode and deliver every subscribed mint's trades from one transaction."""
+        """Deliver each recent transaction once, preserving all of its events."""
+        if self._interrupted or not signature or signature in self._recent_transactions:
+            return 0
         delivered = 0
         if self._subscribers:
-            for event in decode_trade_events(
+            events = decode_trade_events(
                 logs,
                 slot=slot,
                 signature=signature,
                 idl_parser=self.idl_parser,
                 mints=set(self._subscribers),
-            ):
-                self._latest_events[event.mint] = event
-                for queue in self._subscribers.get(event.mint, ()):
+            )
+            if events:
+                _remember_transaction(self._recent_transactions, signature)
+            for event in events:
+                # Failed subscriptions are removed without skipping healthy siblings.
+                for queue in reversed(self._subscribers.get(event.mint, ())):
                     try:
                         queue.put_nowait(event)
                         delivered += 1
-                    except asyncio.QueueFull:
-                        self.dropped += 1
-        return delivered + self._publish_migrations(
-            logs, slot=slot, signature=signature
-        )
-
-    def latest_price(self, mint: str) -> float | None:
-        """Most recent SOL-per-token price from decoded trades, if any.
-        Derived from the event's own reserves; None before the first trade."""
-        event = self._latest_events.get(mint)
-        if event is None or event.real_token_reserves <= 0:
-            return None
-        return (event.real_sol_reserves / 1e9) / (event.real_token_reserves / 1e6)
+                    except (asyncio.QueueFull, TradeFlowLossError) as exc:
+                        reason = (
+                            exc.reason
+                            if isinstance(exc, TradeFlowLossError)
+                            else "overflow"
+                        )
+                        discarded = queue.invalidate(reason) + 1
+                        self.dropped += discarded
+                        self.unsubscribe(event.mint, queue)
+                        logger.warning(
+                            "Trade subscription loss for %s (%s): discarded %d events",
+                            event.mint,
+                            reason,
+                            discarded,
+                        )
+        migrations = self._publish_migrations(logs, slot=slot, signature=signature)
+        if migrations:
+            _remember_transaction(self._recent_transactions, signature)
+        return delivered + migrations
 
     def _publish_migrations(self, logs: list[str], *, slot: int, signature: str) -> int:
         """Decode and schedule migration-event fan-out; contained, never raises."""
@@ -440,6 +567,14 @@ class EntryGate:
     def observe(self, event: TradeEvent) -> GateDecision | None:
         if event.mint != self.mint:
             return None
+        if event.slot < self.creation_slot:
+            return self._decision(
+                accept=False, reason="trade_before_creation", event=self.last_event
+            )
+        if self.last_event is not None and event.slot < self.last_event.slot:
+            return self._decision(
+                accept=False, reason="trade_stream_out_of_order", event=self.last_event
+            )
         self.last_event = event
         rules = self.rules
         if event.slot - self.creation_slot > rules.max_wait_slots:
@@ -512,16 +647,23 @@ class GeyserTradeStream:
         return request
 
     async def stream(
-        self, *, mint: str, bonding_curve: str
+        self,
+        *,
+        mint: str,
+        bonding_curve: str,
+        on_disconnect: Callable[[], None] | None = None,
     ) -> AsyncIterator[TradeEvent]:
         """Stream trades touching ``bonding_curve`` until cancelled or the stream ends.
 
         Raises on connection or stream failure; the caller decides whether to
         fall back to polling. No reconnect here: a held coin's life is shorter
-        than a backoff schedule.
+        than a backoff schedule. Recent signatures are deduplicated per stream.
+        ``on_disconnect`` invalidates pending decisions before asynchronous cleanup.
         """
         channel = grpc.aio.secure_channel(self.endpoint, self._credentials())
         call = None
+        recent_transactions: OrderedDict[str, None] = OrderedDict()
+        last_slot: int | None = None
         try:
             stub = geyser_pb2_grpc.GeyserStub(channel)
             call = stub.Subscribe(iter([self._request(bonding_curve)]))
@@ -535,16 +677,28 @@ class GeyserTradeStream:
                 if info.meta.HasField("err"):
                     continue
                 signature = base58.b58encode(bytes(info.signature)).decode()
-                for event in decode_trade_events(
+                if not signature or signature in recent_transactions:
+                    continue
+                events = decode_trade_events(
                     list(info.meta.log_messages),
                     slot=update.transaction.slot,
                     signature=signature,
                     idl_parser=self.idl_parser,
                     mint=mint,
-                ):
+                )
+                if events:
+                    if last_slot is not None and update.transaction.slot < last_slot:
+                        raise TradeFlowLossError("out_of_order")
+                    last_slot = update.transaction.slot
+                    _remember_transaction(recent_transactions, signature)
+                for event in events:
                     yield event
             raise ConnectionError("Geyser trade stream ended")
         finally:
-            if call is not None:
-                call.cancel()
-            await channel.close()
+            try:
+                if on_disconnect is not None:
+                    on_disconnect()
+            finally:
+                if call is not None:
+                    call.cancel()
+                await channel.close()

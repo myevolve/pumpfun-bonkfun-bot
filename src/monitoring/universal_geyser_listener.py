@@ -131,6 +131,8 @@ class UniversalGeyserListener(BaseTokenListener):
     ) -> None:
         """Listen for successful creations on an acknowledged Geyser stream."""
         if not self.platform_parsers:
+            if self.trade_hub is not None:
+                self.trade_hub.stream_interrupted()
             logger.error("No platform parsers available. Cannot listen for tokens.")
             return
 
@@ -154,6 +156,8 @@ class UniversalGeyserListener(BaseTokenListener):
                     ) from exc
 
                 reconnect_attempt = 0
+                if self.trade_hub is not None:
+                    self.trade_hub.stream_resumed()
                 logger.info("Connected to Geyser endpoint: %s", self.geyser_endpoint)
                 logger.info(
                     "Monitoring platforms: %s",
@@ -188,6 +192,8 @@ class UniversalGeyserListener(BaseTokenListener):
                     logger.error("Geyser RPC error: %s", exc.details())
                 reconnect_attempt += 1
             finally:
+                if self.trade_hub is not None:
+                    self.trade_hub.stream_interrupted()
                 if call is not None:
                     call.cancel()
                 if channel is not None:
@@ -199,7 +205,7 @@ class UniversalGeyserListener(BaseTokenListener):
         """Normalize one Geyser transaction and return all valid creations."""
         try:
             event = normalize_geyser_update(update, commitment="processed")
-            if event is None:
+            if event is None or event.transaction_error is not None:
                 return []
             tokens = parse_normalized_event(event, self.platform_parsers)
             hub = self.trade_hub

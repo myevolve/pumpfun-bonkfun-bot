@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# ruff: noqa: S101 - regression assertions
+
 import base64
 import json
 from pathlib import Path
@@ -261,6 +263,49 @@ def test_create_event_under_foreign_program_invocation_is_rejected() -> None:
     )
 
     assert token is None
+
+
+def test_reverted_and_ambiguous_create_frames_cannot_supply_fast_path_state() -> None:
+    parser = _real_parser()
+    event_log = _fixture_create_event_log(parser)
+    pump = str(PumpFunAddresses.PROGRAM)
+    foreign = str(Pubkey.new_unique())
+    create = ["Program log: Instruction: CreateV2", event_log]
+    cases = [
+        [f"Program {pump} invoke [1]", *create],
+        [f"Program {pump} invoke [2]", *create, f"Program {pump} success"],
+        [f"Program {pump} invoke [1]", *create, f"Program {foreign} success"],
+        [f"Program {pump} invoke [1]", *create, f"Program {pump} failed: error"],
+        [
+            f"Program {foreign} invoke [1]",
+            f"Program {pump} invoke [2]",
+            *create,
+            f"Program {pump} success",
+            f"Program {foreign} failed: error",
+        ],
+    ]
+    for logs in cases:
+        assert (
+            parser.parse_token_creation_from_logs(logs, signature="untrusted") is None
+        )
+
+
+def test_foreign_instruction_hint_cannot_veto_a_committed_create_event() -> None:
+    parser = _real_parser()
+    event_log = _fixture_create_event_log(parser)
+    pump = str(PumpFunAddresses.PROGRAM)
+    foreign = str(Pubkey.new_unique())
+    logs = [
+        f"Program {foreign} invoke [1]",
+        "Program log: Instruction: CreateTokenAccount",
+        f"Program {pump} invoke [2]",
+        "Program log: Instruction: CreateV2",
+        event_log,
+        f"Program {pump} success",
+        f"Program {foreign} success",
+    ]
+    token = parser.parse_token_creation_from_logs(logs, signature="valid")
+    assert token is not None and token.state_from_event
 
 
 @pytest.mark.parametrize(

@@ -1,8 +1,11 @@
+# ruff: noqa: S101 - regression assertions
+
 import asyncio
-import base58
 import base64
 import struct
 from pathlib import Path
+
+import base58
 
 from monitoring.migration_events import (
     MigrationEvent,
@@ -17,6 +20,8 @@ MINT = "67xAZNxvBtfR6YXFyvVSkRiziKVmXUWvCBvhT9Aupump"
 SOL_MINT = "So11111111111111111111111111111111111111112"
 OTHER = "dw3EJbG7Wk3RvbcASWQGKcmbaXvBn2v1uDhUfPQyY5Y"
 IDL_DIR = Path(__file__).resolve().parents[1] / "idl"
+PUMP_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+PAMM_PROGRAM = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"
 _SLOT = 444_044_178
 _BASE_AMOUNT_IN = 1_000
 _QUOTE_AMOUNT_IN = 2_000
@@ -31,6 +36,10 @@ def _parsers() -> tuple[IDLParser, IDLParser]:
         IDLParser(str(IDL_DIR / "pump_fun_idl.json")),
         IDLParser(str(IDL_DIR / "pump_swap_idl.json")),
     )
+
+
+def _framed(program: str, *logs: str) -> list[str]:
+    return [f"Program {program} invoke [1]", *logs, f"Program {program} success"]
 
 
 def _key(seed: int) -> str:
@@ -84,17 +93,14 @@ def _pool_log(pamm_parser: IDLParser, *, mint: str = MINT) -> str:
     return "Program data: " + base64.b64encode(payload).decode()
 
 
-
-
 def test_decode_complete_and_pool_created() -> None:
     pump, pamm = _parsers()
-    logs = [
-        "Program 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P invoke [1]",
+    logs = _framed(
+        PUMP_PROGRAM,
         _complete_log(pump),
         "Program data: bm90LWFuLWV2ZW50",  # valid b64, wrong disc
         "Program data: !!!not-base64!!!",
-        _pool_log(pamm),
-    ]
+    ) + _framed(PAMM_PROGRAM, _pool_log(pamm))
     events = decode_migration_events(
         logs,
         slot=_SLOT,
@@ -125,20 +131,38 @@ def test_decode_complete_and_pool_created() -> None:
 def test_malformed_payloads_are_skipped() -> None:
     pump, pamm = _parsers()
     disc = pump.get_event_discriminators()["CompleteEvent"]
-    logs = [
-        "Program data: " + base64.b64encode(disc + b"\x01\x02").decode(),  # truncated
+    logs = _framed(
+        PUMP_PROGRAM,
+        "Program data: " + base64.b64encode(disc + b"\x01\x02").decode(),
         _complete_log(pump),
-    ]
+    )
     events = decode_migration_events(
         logs, slot=1, signature="s", pump_parser=pump, pamm_parser=pamm
     )
     assert [e.kind for e in events] == ["complete"]
 
 
+def test_canonical_payloads_from_wrong_emitters_are_rejected() -> None:
+    pump, pamm = _parsers()
+    logs = (
+        _framed(OTHER, _complete_log(pump), _pool_log(pamm))
+        + _framed(PUMP_PROGRAM, _pool_log(pamm))
+        + _framed(PAMM_PROGRAM, _complete_log(pump))
+    )
+    assert (
+        decode_migration_events(
+            logs, slot=1, signature="forged", pump_parser=pump, pamm_parser=pamm
+        )
+        == []
+    )
+
+
 def _hub_and_events() -> tuple[MigrationHub, list[str]]:
     pump, pamm = _parsers()
     hub = MigrationHub(pump_parser=pump, pamm_parser=pamm)
-    logs = [_complete_log(pump), _pool_log(pamm, mint=OTHER)]
+    logs = _framed(PUMP_PROGRAM, _complete_log(pump)) + _framed(
+        PAMM_PROGRAM, _pool_log(pamm, mint=OTHER)
+    )
     return hub, decode_migration_events(
         logs, slot=7, signature="s", pump_parser=pump, pamm_parser=pamm
     )
@@ -191,10 +215,13 @@ def test_publish_logs_with_migration_hub_delivers_without_trade_subs() -> None:
     hub.subscribe(cb)
     trade_hub = TradeFlowHub(pump, migration_hub=hub)
     assert trade_hub.active
-    logs = [_complete_log(pump), _pool_log(pamm, mint=OTHER)]
+    logs = _framed(PUMP_PROGRAM, _complete_log(pump)) + _framed(
+        PAMM_PROGRAM, _pool_log(pamm, mint=OTHER)
+    )
 
     async def run() -> int:
         count = trade_hub.publish_logs(logs, slot=9, signature="s")
+        assert trade_hub.publish_logs(logs, slot=10, signature="s") == 0
         await asyncio.sleep(0)  # let the scheduled fan-out task run
         return count
 
@@ -210,12 +237,12 @@ def test_publish_logs_without_migration_hub_is_unchanged() -> None:
     assert not hub.active
 
     # No subscribers, no migration hub: same early-zero behavior.
-    logs = [_complete_log(pump)]
+    logs = _framed(PUMP_PROGRAM, _complete_log(pump))
     assert hub.publish_logs(logs, slot=1, signature="s") == 0
 
     # Trade subscriber path: decode + deliver as before.
     queue = hub.subscribe(MINT)
-    logs.append(_encode_trade_event(pump))
+    logs.insert(-1, _encode_trade_event(pump))
     delivered = hub.publish_logs(logs, slot=2, signature="s")
     assert delivered == 1
     event = queue.get_nowait()

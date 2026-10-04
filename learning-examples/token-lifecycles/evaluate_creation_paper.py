@@ -145,6 +145,7 @@ def sources() -> dict[str, str]:
         ROOT / p
         for p in (
             "src/utils/idl_parser.py",
+            "src/utils/program_logs.py",
             "src/monitoring/event_normalization.py",
             "src/monitoring/parser_dispatch.py",
             "src/platforms/pumpfun/event_parser.py",

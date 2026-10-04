@@ -26,6 +26,7 @@ from platforms.pumpfun.address_provider import (
 )
 from utils.idl_parser import IDLParser
 from utils.logger import get_logger
+from utils.program_logs import attribute_program_logs
 
 logger = get_logger(__name__)
 
@@ -278,54 +279,27 @@ class PumpFunEventParser(EventParser):
         ):
             return None
 
-        # Skip swaps as the first condition may pass them
-        if any("Program log: Instruction: CreateTokenAccount" in log for log in logs):
-            return None
-
         logger.info(f"🔍 Parsing token creation from logs for signature: {signature}")
 
         # Program data is trusted only while the runtime invocation stack says
         # pump.fun owns the active frame. A discriminator alone is forgeable.
         try:
-            create_instruction_found = False
-            program_data_entries: list[tuple[int, str]] = []
-            program_stack: list[str] = []
+            entries = attribute_program_logs(logs)
             pump_program = str(self.get_program_id())
-
-            for i, log in enumerate(logs):
-                parts = log.split()
-                if len(parts) >= 3 and parts[0] == "Program" and parts[2] == "invoke":
-                    program_stack.append(parts[1])
-                    continue
-
-                current_program = program_stack[-1] if program_stack else None
-                if (
-                    "Program log: Instruction: Create" in log
-                    or "Program log: Instruction: Create_v2" in log
-                ) and current_program == pump_program:
-                    create_instruction_found = True
-                    instruction_type = "Create_v2" if "Create_v2" in log else "Create"
-                    logger.info(
-                        f"📝 Found {instruction_type} instruction at log index {i}"
-                    )
-                elif (
-                    log.startswith("Program data: ") and current_program == pump_program
-                ):
-                    encoded_data = log.split("Program data: ", 1)[1].strip()
-                    program_data_entries.append((i, encoded_data))
-                    logger.info(
-                        f"📊 Found Program data at log index {i}, length: {len(encoded_data)}"
-                    )
-
-                if (
-                    len(parts) >= 3
-                    and parts[0] == "Program"
-                    and (parts[2] == "success" or parts[2].startswith("failed"))
-                ):
-                    completed_program = parts[1]
-                    if program_stack and program_stack[-1] == completed_program:
-                        program_stack.pop()
-
+            create_instruction_found = any(
+                committed
+                and program == pump_program
+                and log.startswith("Program log: Instruction: Create")
+                and not log.startswith("Program log: Instruction: CreateTokenAccount")
+                for _, program, log, committed in entries
+            )
+            program_data_entries = [
+                (index, log.removeprefix("Program data: "))
+                for index, program, log, committed in entries
+                if committed
+                and program == pump_program
+                and log.startswith("Program data: ")
+            ]
             if not create_instruction_found:
                 logger.info("❌ No Create or Create_v2 instruction found in logs")
                 return None
@@ -1020,25 +994,6 @@ class PumpFunEventParser(EventParser):
         except Exception as e:
             logger.debug(f"Failed to parse bonding curve state: {e}")
             return None
-
-    def _get_is_mayhem_mode_from_curve(self, bonding_curve_address: Pubkey) -> bool:
-        """Determine if a token is in mayhem mode based on bonding curve state.
-
-        Note: This would require an RPC call to fetch the bonding curve account.
-        For now, we return False as a default since the event parser doesn't have
-        access to an RPC client. The mayhem mode flag will be set by traders
-        when they fetch bonding curve state for other operations.
-
-        Args:
-            bonding_curve_address: Address of the bonding curve
-
-        Returns:
-            True if mayhem mode, False otherwise (or if parsing fails)
-        """
-        # Since event parser doesn't have RPC client access, we cannot fetch
-        # and parse bonding curve state here. Mayhem mode will be set later
-        # when traders fetch the bonding curve state.
-        return False
 
     @property
     def verbose(self) -> bool:

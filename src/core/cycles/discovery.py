@@ -32,7 +32,12 @@ from dataclasses import dataclass
 
 from core.cycles.core import AMM, SOL, CycleError
 from core.cycles.pool import Pool
-from monitoring.trade_flow import TradeEvent, TradeFlowHub
+from monitoring.trade_flow import (
+    TradeEvent,
+    TradeFlowHub,
+    TradeFlowLossError,
+    TradeQueue,
+)
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -125,14 +130,14 @@ class CycleDiscovery:
         self._buffer: dict[str, deque[TradeEvent]] = {}
         self._pools: dict[str, dict[str, Pool]] = {}
         self._curves: dict[str, tuple[str, str]] = {}
-        self._queues: dict[str, asyncio.Queue[TradeEvent]] = {}
+        self._queues: dict[str, TradeQueue] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._candidates: list[CycleCandidate] = []
         self._emitted: dict[tuple[CycleLeg, CycleLeg, int], int] = {}
 
     def track(
         self, mint: str, bonding_curve: str, *, program: str = PUMP_PROGRAM
-    ) -> asyncio.Queue[TradeEvent]:
+    ) -> TradeQueue:
         """Subscribe to a mint's trades and start its consumer task.
 
         Requires a running event loop. Returns the hub queue so callers can
@@ -176,7 +181,15 @@ class CycleDiscovery:
     def discover(self) -> list[CycleCandidate]:
         """Drain pending candidates; dedup state survives the drain."""
         pending, self._candidates = self._candidates, []
-        return pending
+        # Loss can precede the consumer task's cleanup in this event-loop turn.
+        return [
+            candidate
+            for candidate in pending
+            if all(
+                (queue := self._queues.get(mint)) is not None and not queue.loss_reason
+                for mint in candidate.mints
+            )
+        ]
 
     def ingest(self, event: TradeEvent) -> None:
         """Evaluate one trade event; contained — never raises."""
@@ -186,23 +199,35 @@ class CycleDiscovery:
             self.errors += 1
             logger.exception("cycle discovery failed on %s", event.signature)
 
-    async def _consume(self, _mint: str, queue: asyncio.Queue[TradeEvent]) -> None:
-        """Per-mint consumer: hub queue -> ingest, event-driven, no polling."""
-        while True:
-            event = await queue.get()
-            self.ingest(event)
+    async def _consume(self, mint: str, queue: TradeQueue) -> None:
+        """Stop this mint on lost history; never evaluate a partial stream."""
+        try:
+            while True:
+                event = await queue.get()
+                self.ingest(event)
+        except TradeFlowLossError as exc:
+            self.errors += 1
+            logger.warning("Cycle discovery stopped for %s: %s", mint, exc)
+            self._tasks.pop(mint, None)  # Do not cancel this task during its cleanup.
+            self.untrack(mint)
 
     def _on_event(self, event: TradeEvent) -> None:
         mint = event.mint
         buffer = self._buffer.get(mint)
-        if buffer is None:
+        if buffer is None or self._queues[mint].loss_reason:
+            return
+        queue = self._queues[mint]
+        if buffer and event.slot < buffer[-1].slot:
+            self.hub.dropped += queue.invalidate("out_of_order")
             return
         buffer.append(event)
         curve = self._curves.get(mint)
         pools = self._pools.get(mint)
-        if curve is None or not pools:
-            return
-        if event.real_sol_reserves < self.target_sol_lamports:
+        if (
+            curve is None
+            or not pools
+            or event.real_sol_reserves < self.target_sol_lamports
+        ):
             return
         best = self._best_cycle(mint, curve, list(pools.values()), event)
         if best is None:
