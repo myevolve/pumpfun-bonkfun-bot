@@ -60,6 +60,7 @@ jobs:
           uv run learning-examples/verify_pump_fee_schedule.py
           uv run learning-examples/verify_tx_status_checks.py
           uv run learning-examples/verify_tp_sl_exit_price.py
+          uv run learning-examples/verify_paper_horizons.py
 
       - name: Run tests
         run: uv run pytest -q

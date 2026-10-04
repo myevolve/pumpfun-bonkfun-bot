@@ -1,13 +1,214 @@
 # Paper-Trading Lessons — living document
 
-Updated: 2026-09-30. Source artifacts: `state/paper-trading/*.json`,
+Source artifacts: `state/paper-trading/*.json`,
 `.state/learning/lessons.sqlite3`, `learning-examples/token-lifecycles/README.md`.
-Every claim here is grounded in a sealed artifact or a commit; anything
-uncertain is marked. Update this file when the evidence changes.
+The correction below supersedes the legacy journal-derived claims later in this
+document. Those passages are retained as research history, not promotion evidence.
+
+## Superseding audit: measurement integrity
+
+The old paper journal cannot establish either profitability or the absence of an
+edge. Both entry `TradeFlowHub.latest_price` and exit `_paper_fill_outcome` divided
+**real** quote inventory by real token inventory. Pump's marginal price uses
+**virtual** reserves. These are different quantities, not interchangeable price
+feeds. Multiplying their ratio change by a hardcoded 0.01 SOL also omitted fees,
+price impact, executable size and fills. A large return alone does not prove
+migration; the earlier profit-threshold quarantine was not a valid classifier.
+
+At a read-only audit snapshot the journal contained 43,231 lessons: 1,374 gate
+passes, 274 `horizon_60s`, 142 `horizon_300s`, and **no `horizon_900s`** rows.
+The corrected report excluded 1,330 legacy paper rows and found **zero eligible
+live outcomes**. Counts describe that snapshot, not a frozen or completed cohort.
+Historical raw entry/exit reserves were not retained, so do not reconstruct prices
+or reverse the earlier quarantine by guessing.
+
+The replacement is a diagnostic, not a new trading strategy:
+
+- Every accepted dry-run gate plans 60/300/900-second marks in `paper_marks`,
+  keyed by the exact parent lesson ID, retaining pre-decision features and scores.
+  Its baseline is the accepted SOL `TradeEvent.price`; exits use the existing
+  production curve decoder's `price_per_token`. Raw exit reserves and completion
+  state are retained. No inferred or cross-mint entry baseline.
+- Missing entry state, non-SOL quotes, completed curves, read errors, cancellation
+  and observations over five seconds late are censored, never zero-profit fills.
+  The read is bounded by that observation window with no sampler-level retry.
+  An abrupt process death leaves unresolved pending rows; pending does not prove
+  a worker is alive. RPC context slots are not exposed by this read API, so these
+  marks do not attest bank freshness or execution.
+- Normal dry-run session expiry stops accepting entries and drains the existing
+  finite mark tasks before closing resources. This fixes the 600-second session
+  cancelling the 900-second arm. External termination still censors or leaves
+  pending work; no session, spend, fee or retry configuration was raised.
+- CLI and dashboard use one read-only report. All planned, marked, censored and
+  pending denominators remain visible. Horizon means use the **same completed
+  three-arm entry IDs**, not independently successful samples or mint-only joins.
+  Complete-case selection can still bias results; no optimal horizon is asserted.
+- Raw Jev quality is a rubric score, not `P(win)`. The clipped-quality Brier
+  calculation and automatic predictive verdicts were removed. No normalization,
+  ordinal association or text-classification benchmark supplies trading calibration.
+- The old threshold miner was removed: its 126 one-variable threshold/direction
+  candidates were not “all hypotheses”; no training-positive candidate meant no
+  held-out candidate test. Its labels used the invalid proxy above.
+- Event authenticity is enforced before decoding: a matching discriminator alone
+  is not provenance. `utils.program_logs.attribute_program_logs` validates the
+  complete runtime invocation stack, binds each payload to its emitting program,
+  and invalidates failed CPI descendants. A caught CPI failure preserves unrelated
+  successful siblings; a top-level failure invalidates the entire transaction.
+  Trade, migration, creation and lifecycle recording now share this boundary.
+  Missing, mismatched or truncated frames cannot supply event-derived gate/exit
+  state or a trusted creation fast-path baseline. The Geyser listener rejects
+  failed transaction metadata before creation parsing or trade fan-out, even when
+  individual invocation logs say `success`. Provider transaction success checks
+  remain required at every ingress; processed logs still do not establish finality.
+- Live trade flow normalizes current `quote_amount`, `virtual_quote_reserves`
+  and `real_quote_reserves` into its SOL-denominated internal fields only after
+  verifying native SOL or WSOL identity. Non-SOL events are rejected even if
+  their legacy `sol_*` fields are positive. Canonical zero amounts and real
+  reserves stay zero; non-positive virtual reserves remain invalid.
+  A modern quote field or v2 trade instruction name requires the complete quote
+  suffix; missing quantities cannot fall back to stale legacy values. Older
+  SOL-only events retain their legacy interpretation. This fixes gate liquidity,
+  flow-exit quantities and paper entry prices at their shared decoder, without
+  extra RPC or changing strategy settings. Retained captures and stored marks
+  are not recomputed.
+- Repeated transaction delivery cannot inflate flow while its signature remains
+  in the bounded cache. The hub retains the last 4,096 distinct signatures with
+  relevant decoded trades or migrations across listener reconnects; standalone
+  Geyser streams retain the same bound for one stream invocation. Every event
+  in the first admitted batch remains eligible for delivery, including identical payloads at
+  different log positions. Replays do not refresh retention or repeat migration
+  callbacks. Missing signatures are rejected; wholly invalid batches do not
+  reserve a signature. Overflow does not trigger replay retries.
+  An offline reproduction previously counted one 3-SOL sell twice and fired a
+  false net-outflow exit; the repeated notification now delivers no second trade.
+  First admission wins: this is not fork reconciliation or durable exactly-once
+  delivery. Eviction and process/stream restarts can admit an old signature again.
+- Local trade-queue overflow permanently invalidates only that subscription.
+  The buffered trades plus the overflowing trade are counted as discarded;
+  all blocked readers wake with `TradeFlowLossError(reason="overflow")`, and the hub removes
+  the queue from fan-out. Healthy subscribers keep receiving events.
+  Entry gates reject known loss as `trade_stream_overflow`, including no-wait
+  gates. Held positions stop consuming that flow and use existing price polling;
+  a cached signal cannot latch or price an exit after its queue loses history.
+  Already latched exits retain their retry cap, and pending transactions still
+  reconcile. Cycle discovery rejects affected pending candidates immediately,
+  before its consumer task untracks the mint. No automatic resubscription or
+  reset is added.
+  Offline reproduction previously accepted a gate after losing a creator sell
+  and fired a net-outflow exit after losing a buy; both now stop at the loss
+  boundary.
+  Geyser EOF, transport failure, failed handshakes and cancellation invalidate
+  every trade subscription on that stream before channel cleanup or backoff.
+  Subscriptions requested during the interruption fail too. A fresh subscription
+  acknowledgement permits new queues; old queues stay failed, and the bounded
+  signature cache survives reconnects. Gates report `trade_stream_interrupted`;
+  discovery discards affected candidates and held positions use existing polling.
+  Standalone Geyser exit streams clear pending signals before asynchronous
+  cleanup, without clearing already-latched exits.
+  Offline reproduction previously accepted a buffered trade after EOF and left
+  a standalone exit signal available during and after cleanup; neither survives
+  the interruption now. Reconnect, exit, fee and request limits are unchanged.
+  These checks detect explicit local loss and stream termination, not silent
+  upstream omissions, rejected individual frames, fork changes, or finality.
+- Backwards trade slots invalidate the affected subscription with
+  `TradeFlowLossError(reason="out_of_order")`. The checkpoint survives queue
+  draining; discarded buffered events cannot still trigger a gate or exit.
+  Other mints remain independent, known signature replays are ignored before
+  ordering checks, and distinct same-slot trades remain eligible.
+  Entry gates reject pre-creation trades as `trade_before_creation` and reject
+  backwards inputs as `trade_stream_out_of_order`, without replacing the last
+  trusted event or counting another buyer. Direct cycle-discovery ingestion
+  also quarantines the mint and its pending candidates before consumer cleanup.
+  Standalone Geyser exits clear pending signals on regression before channel
+  cleanup; already-latched exits retain their existing behavior.
+  Configured replay marks non-monotonic trade-slot tapes `unpriced` with
+  `trade_slot_order_ambiguous`, even when receive times increase.
+  Offline reproduction previously accepted a negative-slot-wait gate, accepted
+  another gate on a backwards slot, fired a trailing stop on older reserves,
+  and emitted an older discovery candidate. All four now reject that state.
+  This checks relative ordering within a subscription, not absolute freshness
+  of its first event, intra-slot transaction order, forks, or finality. No
+  timing, amount, fee, retry, request, provider, or commitment limits changed;
+  no live capture or funded run was performed.
+
+Offline reproductions previously delivered a foreign-program TradeEvent, a
+rolled-back trade, an unclosed invocation, and a metadata-failed transaction to
+subscribed queues. The corrected paths deliver none, while regression coverage
+retains successful sibling trades and valid creation/migration events. No extra
+RPC is added.
+The lifecycle replay source closure now includes `src/utils/program_logs.py`;
+old captures and source locks remain unchanged and require their original sealed
+code, not re-labelling under the new decoder.
+
+Offline reproduction now checks unchanged virtual price gives **0%** return,
+same-mint entries cannot cross-link, all three horizons complete, and six different
+censored cohorts stay in the denominator. Historical values are excluded, not
+deleted. Commands:
+
+```bash
+uv run --offline --no-sync learning-examples/verify_paper_horizons.py
+uv run --offline --no-sync pytest -q tests/test_trade_flow.py
+uv run --offline --no-sync python -m learning.report --limit 0
+```
+
+For economic hypotheses, reuse `evaluate_online_paper.py` / `run_paper_trader.py`
+and `verify_online_paper.py`: they already model integer curve quotes, fees,
+price impact, bounded cash and an explicit no-trade choice. Their costs/fills
+remain assumptions, not receipts. Keep immutable source locks and entry-time
+chronological train/test splits. New acquisition remains provider-only on the
+approved London runner, with existing venue, freshness and request boundaries;
+the historical runner's public-provider default is not the current authorization.
+No new funded run, service access or capture was launched for this audit.
+
+The unresolved research question is whether a predeclared policy beats no trade
+after costs on fresh held-out data. The legacy journal cannot answer it.
+
+## Operator workflow and customer-value hypothesis
+
+The Learning tab and `learning.report` expose the same evidence: planned and
+complete paired entry counts, distinct paired mints, overlapping pending/censored
+entry counts, per-horizon missing reasons with next checks, and within-entry
+300s/900s return differences relative to 60s. Repeated mints are not independent
+trials. Improvements/worsenings are descriptive counts, not strategy recommendations.
+
+Download the JSON report from the Learning tab, or save a new snapshot from the CLI:
+
+```bash
+uv run --offline --no-sync python -m learning.report --limit 0 --output evidence.json
+```
+
+CLI export refuses to overwrite an existing file and returns nonzero for a missing
+journal or failed export. Export includes a report schema version, generation time,
+lesson watermark, coverage and exclusions. It is a summary of a consistent database
+read, **not** a frozen dataset, replay package, proof of market freshness, execution
+authorization or certification of profit. No wallet, signer or network is needed.
+
+The narrow customer-value hypothesis is helping Solana strategy researchers and
+bot operators avoid false-positive results and diagnose missing evidence without
+hand-written SQL. Across the existing workflow:
+
+| Area | Existing capability / current boundary |
+|---|---|
+| Discovery | Geyser events; current marks do not attest RPC context-slot freshness. |
+| Pricing | Canonical virtual-reserve marks; separate fee/impact paper engine for economics. |
+| Evaluation | Exact paired cohorts and failure-inclusive counts; no automatic promotion. |
+| Execution | Explicit authorization, expected wallet, durable state and bounded budgets remain intact. |
+| Operations | Shared CLI/UI evidence, missing-cause diagnosis and portable report snapshots. |
+
+Defensibility, if earned, comes from a permissioned, point-in-time corpus that keeps
+failed opportunities, reproducible cost/latency assumptions, and customers' use of
+that evidence in their review workflow. An AI score, another dashboard, public chain
+data alone, or more unvalidated indicators is not a demonstrated moat.
+
+Demand is **unvalidated**. Before building billing, multi-tenant hosting or promising
+alpha, ask prospective operators to bring a recent misleading result: measure the
+time and RPC spend required to diagnose it using this workflow, and seek an explicit
+paid-pilot commitment. No customer interviews, revenue or willingness-to-pay claim
+is implied by the implementation.
 
 ## What the market taught us (negative results, held-out)
 
-1. **No post-creation entry signal has positive held-out expectancy.**
+1. **The tested post-creation signals lost held-out in the recorded study.**
    31,104 policies tested (gates: mayhem/min-buyers/liquidity/creator-holding;
    exits: trail/stop/TP/hold) across slots 1-10 — best in-sample policies
    lose -0.5% to -3.3% per trade out-of-sample. Entering at curve milestone
@@ -15,9 +216,8 @@ uncertain is marked. Update this file when the evidence changes.
 
 2. **Post-graduation dumps are manufactured.** Curve bought out in <=10
    trades, 50-100 SOL sniped at pool creation, pool drained within 25 min
-   (Sep 2026 live tape). The 0.7-0.9 Jev-scored paper fills that died inside
-   60s (avg -0.0055 SOL, n=10, 2026-09-30) are consistent with this — a high
-   launch-quality rating does not survive the first minute.
+   (Sep 2026 live tape). The later Jev paper-journal losses are invalid price
+   proxies and cannot independently corroborate that on-chain observation.
 
 3. **Follower/copier models lose.** A locked cohort of 17 wallets lost
    -3.12% per follower trade at +2 slots held-out. Copying actor receipts
@@ -26,9 +226,9 @@ uncertain is marked. Update this file when the evidence changes.
 
 4. **Mayhem coin flow is time-clustered.** Gate accepts: 23 in a 10-min
    window (15:40 UTC Sep 29), then 0 accepts for 2+ hour stretches. Any
-   sampling or reporting that assumes steady-state will mislead. Paper-run
-   restarts on the 600s one-shot budget are normal and must not be counted
-   as crashes.
+   sampling or reporting that assumes steady-state will mislead. A 600-second
+   discovery budget is not sufficient for completing a 900-second observation;
+   drain existing marks rather than silently dropping that arm.
 
 ## What the engineering taught us (every one was a live failure first)
 
@@ -59,16 +259,16 @@ uncertain is marked. Update this file when the evidence changes.
    and startup queues and BUYS them (bot_runner preflight hard-codes
    durable_state ok). The dashboard gate now includes it.
 
-7. **Jev quality scores arrive on a 0-1 scale** (SDK Score normalization),
-   regardless of the "0-4" wording in the question. Bucket on
-   ROUND(quality,1); thresholds HI_MIN=0.6, LO_MAX=0.4 (fix 1903944).
+7. **A quality rubric is not a win probability.** Keep the raw returned score;
+   do not clip it into a probability or assert calibration from its numeric range.
+   Earlier 0–1 normalization claims did not establish a valid `P(win)` mapping.
 
 8. **Jev latency is ~0.9-6s per call.** Fine for per-decision annotation;
    disqualifying for a <1.5s snipe gate. Never put it in the hot path.
 
-9. **Dry-run evidence discipline works.** The journal caught every issue
-   above because decisions, fills, and outcomes land in SQLite with Jev
-   annotations — no memory, no vibes.
+9. **Journaling is necessary but not sufficient evidence discipline.** Durable
+   rows can preserve incorrect price models. Retain quote provenance and planned
+   denominators, and reproduce the arithmetic before interpreting outcomes.
 
 ## Jev-vs-gate correlation (2026-09-30, n=5,864 scored lessons)
 
@@ -150,6 +350,9 @@ independent jevbench calibration study.
    outcome) triples and computes Brier/ECE/reliability, then Platt-scales
    thresholds to YOUR venue. Our journal already logs the triples; what's
    missing is Brier/ECE reporting and per-bucket reliability curves.
+   **Superseded (see the audit above):** that gap was closed by *removing*
+   calibration — raw Jev quality is a rubric score, not P(win), so Brier/ECE
+   against it is meaningless. Do not re-add it while Jev stays an observer.
    jevbench: Jev's ECE is 0.10-0.13 on public datasets - good but not
    perfect; treat probabilities as features, verify on your own tape.
 4. **Independent benchmark (jevbench, n=500):** Jev accuracy 76-95%
@@ -165,9 +368,11 @@ independent jevbench calibration study.
    projects" and every live desk is days old. Our n=290 zero-correlation
    finding is consistent with the field's public state.
 
-## The Jev promotion rule (unchanged until evidence says otherwise)
+## Historical Jev promotion analysis (withdrawn as evidence)
 
-## The Jev promotion rule (unchanged until evidence says otherwise)
+The following figures used invalid paper labels and, for Brier, an invalid
+probability interpretation. They are retained to explain earlier decisions, not
+as findings about predictive power. Jev remains outside the trading decision.
 
 Jev enters the live entry gate only when `pnl_by_quality` shows high
 scores (>=0.6) systematically outperforming low scores (<=0.4) on a
@@ -222,15 +427,15 @@ hypothesis holds in non-mayhem coins too.
     keeper also checks log staleness - if the newest run log grew in the
     last 5 minutes but contains no non-httpx lines, kill and restart.
     (2026-09-30 12:54 incident, keeper.log)
+    Note: the keeper itself is not checked into this repo — verify where it
+    lives before relying on this mitigation after a restart.
 
-## Current system (as of this document)
+## Operational status
 
-- Paper bot alive under keeper (auto-restarts on 600s budget), instrumented
-  sampler, WAL journal. Dashboard 🧠 Learning tab + `learning.report` CLI
-  render the evidence live.
-- Journal scale: ~5k-6k lessons/day, ~90% Jev-scored.
-- Wallet 9MFfWXdT…: 0.562180 SOL, zero real transactions — every submission
-  still blocked at the dry-run gate.
+Liveness and wallet balances are point-in-time observations, not durable research
+claims. This audit did not read wallet secrets, restart a collector, or authorize
+trading. Observe current process, ledger and wallet state under the repository's
+safety rules before any separately authorized run.
 
 ## Latency: mobile host vs GCP (2026-10-01, sealed 4572e45f)
 
@@ -243,19 +448,16 @@ us-central1, Cloud Run us-east1 (Chainstack node is us-east, 64.31.55.5).
 | Geyser TCP | 54 / 324 ms | 32 / 37 | **21 / 168** |
 | Jev API | 195 / 738 ms | 159 / 220 | 181 / 247 |
 
-Verdict: the mobile host has 2x median latency and 10x variance — the
-variance is what kills a 1.5s gate window (a 978ms p95 spike eats the
-whole budget randomly). If a strategy is ever promoted, deploy to
-Cloud Run us-east1 first. The paper/learning pipeline is
-latency-insensitive (60s-delayed outcomes) and ran fine from mobile.
+These are historical RPC health-request and TCP-connect timings, not measured
+Geyser event arrival, slot-consistent bank readiness or transaction inclusion.
+They do not establish an optimal execution region. The paper path is not
+latency-insensitive: arrival, pre-entry scoring and delayed reads can change its
+sample. Follow the current London-runner policy for any new latency acquisition.
 
-## Horizon question answered (2026-10-01, n=123 paired fills)
+## Historical horizon conclusion (withdrawn)
 
-Multi-horizon outcomes (+60s/+300s/+900s per fill) test whether the 40%
-instant-dump coins recover with time. **They do not**: of 59 full-losses
-at 60s, only 2 improve by 300s (300s avg -0.0099 = nearly another full
-loss); only 11% of fills do better at 300s than 60s; win rate drops
-19% -> 15%. Bonding-curve math keeps price above zero but the *flow*
-keeps selling. **Exit timing is not the problem - +60s is the
-least-bad horizon, and the substrate's loss is structural.** The
-horizon rows stay in the journal; longer horizons just confirm.
+The earlier 123-pair comparison covered 60 and 300 seconds, not 900 seconds, and
+both prices used the invalid real-inventory ratio. Its claims that losses were
+structural and 60 seconds was optimal are unsupported. The new paired diagnostic
+above answers coverage and gross price-mark questions only; a profitable exit
+policy still requires executable, costed, fresh held-out evidence.

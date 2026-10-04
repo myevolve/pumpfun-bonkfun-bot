@@ -27,6 +27,7 @@ import os
 import sqlite3
 import time
 from dataclasses import dataclass, field
+from math import isfinite
 from pathlib import Path
 from typing import Any
 
@@ -37,7 +38,8 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 _DEFAULT_DB = Path(".state/learning/lessons.sqlite3")
-_MIN_BRIER_N = 10  # Brier needs at least this many resolved outcomes
+PAPER_HORIZONS = (60, 300, 900)
+PAPER_MARK_MAX_LATENESS_S = 5.0
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS lessons (
@@ -66,6 +68,18 @@ CREATE TABLE IF NOT EXISTS lessons (
 CREATE INDEX IF NOT EXISTS idx_lessons_kind ON lessons(kind);
 CREATE INDEX IF NOT EXISTS idx_lessons_mint ON lessons(mint);
 CREATE INDEX IF NOT EXISTS idx_lessons_pending ON lessons(outcome_utc) WHERE outcome_utc IS NULL;
+CREATE TABLE IF NOT EXISTS paper_marks (
+    entry_id INTEGER NOT NULL REFERENCES lessons(id),
+    horizon_s INTEGER NOT NULL CHECK(horizon_s IN (60, 300, 900)),
+    scheduled_utc TEXT NOT NULL,
+    entry_price REAL,
+    exit_price REAL,
+    elapsed_s REAL,
+    outcome_utc TEXT,
+    reason TEXT,
+    exit_state TEXT,
+    PRIMARY KEY (entry_id, horizon_s)
+);
 """
 
 
@@ -117,10 +131,10 @@ class LessonJournal:
         self,
         obs: LessonObservation,
         jev: dict[str, Any] | None = None,
-    ) -> None:
-        """Append one observation. Jev answers, when present, are columns."""
+    ) -> int | None:
+        """Append one observation, returning its identity for exact outcome links."""
         try:
-            self._conn.execute(
+            cursor = self._conn.execute(
                 "INSERT INTO lessons (utc, kind, mint, symbol, name, platform,"
                 " mayhem, decision, buyers, real_sol, jev_quality, jev_copycat,"
                 " jev_dump_risk, jev_organic, jev_liq_trap,"
@@ -148,6 +162,9 @@ class LessonJournal:
             self._conn.commit()
         except sqlite3.Error:
             logger.exception("Lesson journal write failed (non-fatal)")
+            return None
+        else:
+            return cursor.lastrowid
 
     def link_outcome(
         self,
@@ -174,77 +191,75 @@ class LessonJournal:
         except sqlite3.Error:
             logger.exception("Lesson outcome link failed (non-fatal)")
 
-    def link_outcome_kind(
-        self,
-        mint: str,
-        *,
-        kind: str,
-        pnl_sol: float | None,
-        reason: str | None = None,
-    ) -> None:
-        """Attach an outcome to the most recent open lesson of a given kind
-        (used by the multi-horizon outcome samplers)."""
-        try:
-            row = self._conn.execute(
-                "SELECT id FROM lessons WHERE mint=? AND kind=?"
-                " AND outcome_utc IS NULL ORDER BY id DESC LIMIT 1",
-                (mint, kind),
-            ).fetchone()
-            if row is None:
-                return
-            self._conn.execute(
-                "UPDATE lessons SET outcome_utc=?, outcome_pnl_sol=?,"
-                " outcome_reason=? WHERE id=?",
-                (_utc(), pnl_sol, reason, row[0]),
+    def start_paper_marks(self, entry_id: int, entry_price: float | None) -> None:
+        """Persist the complete planned cohort before any asynchronous reads.
+
+        Prices are gross marginal SOL/token marks, never executable or net PnL.
+        Gate features remain on the exact parent lesson, not a mint-only join.
+        """
+        if entry_price is not None and (
+            isinstance(entry_price, bool)
+            or not isfinite(entry_price)
+            or entry_price <= 0
+        ):
+            raise ValueError("Paper entry price must be finite and positive")  # noqa: TRY003
+        parent = self._conn.execute(
+            "SELECT id FROM lessons WHERE id=? AND kind='gate_pass'", (entry_id,)
+        ).fetchone()
+        if parent is None:
+            raise ValueError("Paper marks require a gate-pass lesson")  # noqa: TRY003
+        with self._conn:
+            self._conn.executemany(
+                "INSERT INTO paper_marks"
+                " (entry_id, horizon_s, scheduled_utc, entry_price) VALUES (?,?,?,?)",
+                [
+                    (entry_id, horizon, _utc(), entry_price)
+                    for horizon in PAPER_HORIZONS
+                ],
             )
-            self._conn.commit()
-        except sqlite3.Error:
-            logger.exception("Horizon outcome link failed (non-fatal)")
 
-    def stats(self) -> dict[str, Any]:
-        """Summary for the dashboard: counts and Jev-vs-outcome agreement."""
-        cur = self._conn
-        out: dict[str, Any] = {}
-        out["total"] = cur.execute("SELECT COUNT(*) FROM lessons").fetchone()[0]
-        out["by_kind"] = dict(
-            cur.execute("SELECT kind, COUNT(*) FROM lessons GROUP BY kind").fetchall()
-        )
-        resolved = cur.execute(
-            "SELECT COUNT(*) FROM lessons WHERE outcome_pnl_sol IS NOT NULL"
-        ).fetchone()[0]
-        out["resolved_outcomes"] = resolved
-        if resolved:
-            # Does a higher Jev quality score predict better PnL? Buckets on
-            # the observed 0-1 scale (ROUND to 0.1), not the old INT cast.
-            out["pnl_by_quality"] = [
-                list(r)
-                for r in cur.execute(
-                    "SELECT ROUND(jev_quality, 1),"
-                    " ROUND(AVG(outcome_pnl_sol),8), COUNT(*)"
-                    " FROM lessons WHERE outcome_pnl_sol IS NOT NULL"
-                    " AND jev_quality IS NOT NULL GROUP BY 1 ORDER BY 1"
-                ).fetchall()
-            ]
-            out["brier_win"] = self._brier(cur)
-            out["win_rate"] = cur.execute(
-                "SELECT AVG(CASE WHEN outcome_pnl_sol > 0 THEN 1.0 ELSE 0.0 END)"
-                " FROM lessons WHERE outcome_pnl_sol IS NOT NULL"
-            ).fetchone()[0]
-        return out
-
-    @staticmethod
-    def _brier(cur: sqlite3.Cursor) -> float | None:
-        """Brier score for 'win' as the outcome and jev_quality as the
-        forecast, capped to [0,1]. 0 = perfect calibration. Mirrors the
-        buberlo/jev-trader calibration loop (state, decision, outcome)."""
-        rows = cur.execute(
-            "SELECT jev_quality, outcome_pnl_sol FROM lessons"
-            " WHERE outcome_pnl_sol IS NOT NULL AND jev_quality IS NOT NULL"
-        ).fetchall()
-        if len(rows) < _MIN_BRIER_N:
-            return None
-        b = sum((max(0.0, min(1.0, q)) - (1.0 if p > 0 else 0.0)) ** 2 for q, p in rows)
-        return round(b / len(rows), 6)
+    def finish_paper_mark(  # noqa: PLR0913 - explicit stored observation fields
+        self,
+        entry_id: int,
+        horizon_s: int,
+        *,
+        elapsed_s: float,
+        reason: str,
+        exit_price: float | None = None,
+        exit_state: dict[str, Any] | None = None,
+    ) -> None:
+        """Finish once; missing observations remain censored, not zero returns."""
+        if not isfinite(elapsed_s) or elapsed_s < 0:
+            raise ValueError("Paper elapsed time must be finite and nonnegative")  # noqa: TRY003
+        if exit_price is not None and (
+            isinstance(exit_price, bool) or not isfinite(exit_price) or exit_price <= 0
+        ):
+            raise ValueError("Paper exit price must be finite and positive")  # noqa: TRY003
+        if exit_price is not None and not (
+            horizon_s <= elapsed_s <= horizon_s + PAPER_MARK_MAX_LATENESS_S
+        ):
+            raise ValueError("Paper mark missed its observation window")  # noqa: TRY003
+        planned = self._conn.execute(
+            "SELECT entry_price FROM paper_marks WHERE entry_id=? AND horizon_s=?",
+            (entry_id, horizon_s),
+        ).fetchone()
+        if planned is None or (exit_price is not None and planned[0] is None):
+            raise ValueError("Paper mark requires its planned entry baseline")  # noqa: TRY003
+        with self._conn:
+            self._conn.execute(
+                "UPDATE paper_marks SET exit_price=?, elapsed_s=?, outcome_utc=?,"
+                " reason=?, exit_state=? WHERE entry_id=? AND horizon_s=?"
+                " AND outcome_utc IS NULL",
+                (
+                    exit_price,
+                    elapsed_s,
+                    _utc(),
+                    reason,
+                    json.dumps(exit_state, allow_nan=False) if exit_state else None,
+                    entry_id,
+                    horizon_s,
+                ),
+            )
 
     def close(self) -> None:
         self._conn.close()
