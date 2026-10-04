@@ -22,10 +22,11 @@ from dotenv import dotenv_values
 
 from config_loader import load_bot_config, validate_platform_listener_combination
 from interfaces.core import Platform
+from utils.paths import state_path
 
 # Same repo-root convention as utils/idl_manager.py (two levels up from src/).
 IDL_DIR = Path(__file__).resolve().parents[1] / "idl"
-LEDGER_DIR = Path(".state") / "transaction-ledgers"
+LEDGER_DIR = state_path("transaction-ledgers")
 
 RPC_TIMEOUT_SECONDS = 5.0
 GEYSER_TIMEOUT_SECONDS = 5.0

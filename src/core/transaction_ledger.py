@@ -14,12 +14,13 @@ from solders.pubkey import Pubkey
 
 from core.execution_policy import TradeLimitExceeded
 from core.transaction_state import TransactionOutcome, TransactionStatus
+from utils.paths import state_path
 
 
 def default_transaction_ledger_path(wallet: str | Pubkey) -> Path:
     """Return the wallet-wide ledger shared by every trading platform."""
     canonical_wallet = str(Pubkey.from_string(str(wallet)))
-    return Path(".state") / "transaction-ledgers" / f"{canonical_wallet}.sqlite3"
+    return state_path("transaction-ledgers", f"{canonical_wallet}.sqlite3")
 
 
 _LEGACY_PLATFORM_LEDGER_SUFFIXES = ("pump_fun", "lets_bonk")

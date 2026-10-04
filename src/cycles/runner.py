@@ -58,6 +58,7 @@ from monitoring.trade_flow import TradeFlowHub
 from monitoring.universal_geyser_listener import UniversalGeyserListener
 from utils.idl_parser import IDLParser
 from utils.logger import get_logger
+from utils.paths import state_path
 
 logger = get_logger(__name__)
 
@@ -681,7 +682,7 @@ async def run_session(
     policy.require_submission()
 
     ledger = TransactionLedger(
-        Path(".state/transaction-ledgers") / f"{policy.expected_wallet}.sqlite3"
+        state_path("transaction-ledgers", f"{policy.expected_wallet}.sqlite3")
     )
     client = SolanaClient(rpc, execution_policy=policy, ledger=ledger)
 
@@ -748,7 +749,7 @@ async def run_session(
                 # observed state. Curve-side observation only (no venue
                 # evaluation yet - letsbonk migrations are rare and the
                 # Raydium discovery path is exercised by the event mode).
-                letsbonk_watch_path = Path(".state/letsbonk-watch.json")
+                letsbonk_watch_path = state_path("letsbonk-watch.json")
                 if letsbonk_watch_path.exists():
                     try:
                         letsbonk_watch: dict[str, int] = {
@@ -1215,7 +1216,7 @@ async def run_event_session(
     # each mint's status and evaluates divergence on the flip. The set
     # persists to disk so graduations minutes/hours later are caught by a
     # LATER session, not just the one that saw the creation.
-    letsbonk_watch_path = Path(".state/letsbonk-watch.json")
+    letsbonk_watch_path = state_path("letsbonk-watch.json")
     letsbonk_watch: dict[str, int] = {}
     if letsbonk_watch_path.exists():
         try:

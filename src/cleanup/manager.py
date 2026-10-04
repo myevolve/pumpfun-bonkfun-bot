@@ -25,6 +25,7 @@ from core.pubkeys import WSOL_MINT, SystemAddresses
 from core.wallet import Wallet
 from utils.durable_file import atomic_write_text
 from utils.logger import get_logger
+from utils.paths import state_path
 
 logger = get_logger(__name__)
 
@@ -106,7 +107,7 @@ class AccountCleanupManager:
         self._journal_path = (
             Path(journal_path)
             if journal_path is not None
-            else Path(".state") / "cleanup" / f"{self.wallet.pubkey}.json"
+            else state_path("cleanup", f"{self.wallet.pubkey}.json")
         )
         with self._journal_lock():
             self._journal_entries, migrated = self._load_journal()

@@ -19,6 +19,7 @@ from core.transaction_ledger import TransactionLedger
 from interfaces.core import Platform, TokenInfo
 from trading.position import Position
 from trading.universal_trader import UniversalTrader
+from utils import paths
 
 
 def live_config() -> dict:
@@ -139,6 +140,7 @@ def test_status_reads_validated_recovery_journal_without_live_authorization(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(paths, "STATE_DIR", tmp_path / ".state")
     wallet = Pubkey.new_unique()
     mint = Pubkey.new_unique()
     token = TokenInfo(
@@ -260,7 +262,7 @@ def test_status_reads_validated_recovery_journal_without_live_authorization(
         "submission_count": 1,
     }
     assert status["transaction_ledger_path"] == str(
-        Path(".state") / "transaction-ledgers" / f"{wallet}.sqlite3"
+        tmp_path / ".state" / "transaction-ledgers" / f"{wallet}.sqlite3"
     )
     assert status["active_submissions"] == [
         {

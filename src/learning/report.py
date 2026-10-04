@@ -15,8 +15,9 @@ import sqlite3
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from utils.paths import state_path
 
-DB = Path(".state/learning/lessons.sqlite3")
+DB = state_path("learning", "lessons.sqlite3")
 
 _MIN_COHORT_N = 10  # descriptive correlations only, not a significance threshold
 

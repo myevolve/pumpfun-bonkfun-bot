@@ -508,3 +508,10 @@ interface pump.fun maintains.
   means updating `PLATFORM_LISTENER_COMPATIBILITY` there too.
 - Bots with `separate_process: true` run in their own process. One log file per
   bot instance.
+- **Durable state is anchored to the project root, not the working directory.**
+  Every ledger, position journal, cleanup journal, lesson DB and UI config
+  path resolves through `utils.paths.state_path()` (`.state` under the
+  project root). Launching the same wallet from another directory used to
+  open a second ledger, position journal and cleanup journal: each instance
+  then reported empty session totals and could submit while believing it was
+  alone. Tests isolate state by patching `utils.paths.STATE_DIR`.

@@ -34,10 +34,11 @@ from typing import Any
 from typesafe_sdk import AsyncTypeSafeClient
 
 from utils.logger import get_logger
+from utils.paths import state_path
 
 logger = get_logger(__name__)
 
-_DEFAULT_DB = Path(".state/learning/lessons.sqlite3")
+_DEFAULT_DB = state_path("learning", "lessons.sqlite3")
 PAPER_HORIZONS = (60, 300, 900)
 PAPER_MARK_MAX_LATENESS_S = 5.0
 

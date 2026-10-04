@@ -21,6 +21,7 @@ from core.transaction_ledger import (
     resolve_transaction_ledger_path,
 )
 from core.transaction_state import TransactionOutcome, TransactionStatus
+from utils import paths
 
 
 def _record_submission(
@@ -873,12 +874,18 @@ def test_wallet_ledger_path_is_shared_when_no_legacy_ledgers_exist(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(paths, "STATE_DIR", tmp_path / ".state")
     monkeypatch.chdir(tmp_path)
     wallet = "11111111111111111111111111111111"
 
-    assert resolve_transaction_ledger_path(wallet) == (
-        Path(".state") / "transaction-ledgers" / f"{wallet}.sqlite3"
-    )
+    resolved = resolve_transaction_ledger_path(wallet)
+    assert resolved == tmp_path / ".state" / "transaction-ledgers" / f"{wallet}.sqlite3"
+
+    # The same wallet must never resolve to a second ledger from another
+    # working directory, or a restart silently starts with empty risk totals.
+    (tmp_path / "elsewhere").mkdir()
+    monkeypatch.chdir(tmp_path / "elsewhere")
+    assert resolve_transaction_ledger_path(wallet) == resolved
 
 
 def test_evidence_profiles_are_classified_and_content_addressed(tmp_path: Path) -> None:

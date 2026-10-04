@@ -25,22 +25,23 @@ import yaml
 import dashboard_theme
 from learning import trade_evidence
 from learning.report import load_report
+from utils.paths import STATE_DIR, state_path
 
 st.set_page_config(page_title="PumpFun Terminal", page_icon="🎯", layout="wide")
 dashboard_theme.inject()
 
 # ─── Paths ───────────────────────────────────────────────────────────────────
 
-CONFIG_PATH = Path(".state/configs/live-readiness.yaml")
-PAPER_CFG_PATH = Path(".state/configs/paper-trade-dash.yaml")
-CREDS_PATH = Path(".state/wallets/live-readiness.secrets")
-LEDGER_DIR = Path(".state/transaction-ledgers")
+CONFIG_PATH = state_path("configs", "live-readiness.yaml")
+PAPER_CFG_PATH = state_path("configs", "paper-trade-dash.yaml")
+CREDS_PATH = state_path("wallets", "live-readiness.secrets")
+LEDGER_DIR = state_path("transaction-ledgers")
 TRADES_DIR = Path("trades")
 LOGS_DIR = Path("logs")
-WATCH_PATH = Path(".state/letsbonk-watch.json")
-RUN_LOGS = Path(".state")
+WATCH_PATH = state_path("letsbonk-watch.json")
+RUN_LOGS = STATE_DIR
 
-LIVE_CFG_PATH = Path(".state/configs/live-trade-ui.yaml")
+LIVE_CFG_PATH = state_path("configs", "live-trade-ui.yaml")
 PAPER_LOG = RUN_LOGS / "paper-trade-ui.log"
 LIVE_LOG = RUN_LOGS / "live-trade-ui.log"
 SCANNER_LOG = RUN_LOGS / "scanner-ui.log"
@@ -208,7 +209,7 @@ def load_positions() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-LESSON_DB = Path(".state/learning/lessons.sqlite3")
+LESSON_DB = state_path("learning", "lessons.sqlite3")
 
 
 @st.cache_data(ttl=10)

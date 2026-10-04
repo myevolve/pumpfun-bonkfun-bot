@@ -81,6 +81,7 @@ from trading.platform_aware import PlatformAwareBuyer, PlatformAwareSeller
 from trading.position import ExitReason, Position
 from utils.durable_file import atomic_write_text
 from utils.logger import get_logger
+from utils.paths import state_path
 
 # Try to use uvloop on Unix or winloop on Windows for better performance
 # Fall back to standard asyncio if not available
@@ -456,7 +457,7 @@ class UniversalTrader:
         # Learning (optional): per-transaction lesson journal with optional
         # Jev scoring. Both fail open (disabled) without configuration.
         self.lesson_journal = LessonJournal()
-        self.jev_scorer = JevScorer(env_file=Path(".state/configs/typesafe.env"))
+        self.jev_scorer = JevScorer(env_file=state_path("configs", "typesafe.env"))
 
         # State tracking
         self.traded_mints: set[Pubkey] = set()
@@ -480,9 +481,9 @@ class UniversalTrader:
         self._journal_path = (
             Path(position_journal_path)
             if position_journal_path is not None
-            else Path(".state")
-            / "positions"
-            / f"{self.wallet.pubkey}-{self.platform.value}.json"
+            else state_path(
+                "positions", f"{self.wallet.pubkey}-{self.platform.value}.json"
+            )
         )
         self._journal_lock_handle = None
         try:

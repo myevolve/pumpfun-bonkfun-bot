@@ -69,6 +69,7 @@ from trading.universal_trader import (
     UniversalTrader,
 )
 from utils.logger import setup_file_logging
+from utils.paths import state_path
 
 PROCESS_POLL_INTERVAL_SECONDS = 0.2
 PROCESS_SHUTDOWN_GRACE_SECONDS = 5.0
@@ -116,8 +117,8 @@ def read_bot_status(  # noqa: C901, PLR0912, PLR0915
     if policy.expected_wallet is None:
         raise ValueError("Status requires execution.expected_wallet")
     platform = get_platform_from_config(cfg)
-    journal_path = (
-        Path(".state") / "positions" / f"{policy.expected_wallet}-{platform.value}.json"
+    journal_path = state_path(
+        "positions", f"{policy.expected_wallet}-{platform.value}.json"
     )
     ledger_path = resolve_transaction_ledger_path(policy.expected_wallet)
     base_status: dict[str, object] = {
@@ -135,7 +136,7 @@ def read_bot_status(  # noqa: C901, PLR0912, PLR0915
         "active_submissions": [],
         "pending_cleanups": [],
     }
-    cleanup_journal = Path(".state") / "cleanup" / f"{policy.expected_wallet}.json"
+    cleanup_journal = state_path("cleanup", f"{policy.expected_wallet}.json")
     if cleanup_journal.exists():
         cleanup_payload = json.loads(cleanup_journal.read_text(encoding="utf-8"))
         if (
