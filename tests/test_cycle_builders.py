@@ -9,6 +9,7 @@ counts against the vendored IDLs.
 import base64
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from solders.pubkey import Pubkey
@@ -27,7 +28,13 @@ from cycles.builders import (
     curve_token_info,
     pamm_fee_recipients,
 )
-from cycles.runner import _pamm_virtual_quote_reserves, build_cycle_instructions
+from cycles.runner import (
+    _pamm_virtual_quote_reserves,
+    build_cycle_instructions,
+    cycle_fee_lamports,
+    evaluate_pool_pair_cycle,
+)
+from core.cycles.core import SOL
 from platforms.pumpfun.pumpswap import (
     PUMP_SWAP_GLOBAL_CONFIG_DISCRIMINATOR,
     PumpSwapAddresses,
@@ -305,3 +312,38 @@ def test_pamm_virtual_quote_reserves_reads_this_pool_not_a_constant() -> None:
     }
     assert _pamm_virtual_quote_reserves(truncated) is None
     assert _pamm_virtual_quote_reserves(None) is None
+
+
+def test_pool_pair_candidate_is_net_of_the_wire_fee() -> None:
+    """A gross spread the transaction fee consumes is not an opportunity.
+
+    The scanner submits with 180k CU and a 500k micro-lamport priority, so the
+    same wire costs ~95,000 lamports: a +10,000 spread is -85,000 net.
+    """
+    amount = 10_000_000
+    fee = cycle_fee_lamports({})
+    assert fee > 10_000
+
+    cheap = SimpleNamespace(
+        program="pool-a",
+        address="synthetic-a",
+        quote=lambda mint, _value: 1_000 if mint == SOL else 0,
+    )
+
+    def rich(bias: int) -> SimpleNamespace:
+        return SimpleNamespace(
+            program="pool-b",
+            address="synthetic-b",
+            quote=lambda mint, _value: amount + bias if mint != SOL else 0,
+        )
+
+    sub_fee, _ = evaluate_pool_pair_cycle(
+        cheap, rich(10_000), "synthetic-token", amount, fee_lamports=fee
+    )
+    assert sub_fee is None
+
+    profitable, margin = evaluate_pool_pair_cycle(
+        cheap, rich(fee + 5_000), "synthetic-token", amount, fee_lamports=fee
+    )
+    assert profitable is not None
+    assert margin == 5_000

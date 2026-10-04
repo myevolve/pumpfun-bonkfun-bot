@@ -69,6 +69,33 @@ _PAMM_MIN_ACCOUNT_SIZE = 261  # i128 virtual_quote_reserves @245 ends at 261
 _BPS = 10_000
 _LAMPORTS_PER_SOL = 1_000_000_000
 
+_CYCLE_COMPUTE_UNIT_LIMIT = 180_000
+_CYCLE_PRIORITY_FEE_MICROLAMPORTS = 500_000
+
+
+def cycle_fee_inputs(cfg: dict) -> tuple[int, int]:
+    """The (priority fee, compute unit limit) this runner submits with."""
+    priority_fees = cfg.get("priority_fees") or {}
+    priority_fee = priority_fees.get("fixed_amount")
+    if (
+        isinstance(priority_fee, bool)
+        or not isinstance(priority_fee, int)
+        or priority_fee <= 0
+    ):
+        priority_fee = _CYCLE_PRIORITY_FEE_MICROLAMPORTS
+    return priority_fee, _CYCLE_COMPUTE_UNIT_LIMIT
+
+
+def cycle_fee_lamports(cfg: dict) -> int:
+    """The network fee a cycle wire actually pays, from the shared estimator.
+
+    A candidate quoted without it is not net: at these settings a
+    +10,000-lamport spread is -85,000 once the transaction is paid, and a
+    fee that cannot be priced must not be treated as free.
+    """
+    priority_fee, compute_unit_limit = cycle_fee_inputs(cfg)
+    return estimate_transaction_fee_lamports(priority_fee, compute_unit_limit)
+
 
 def _derive_pamm_pool(mint: str) -> str:
     """Canonical PumpSwap migration pool for a mint: deterministic PDA,
@@ -379,6 +406,8 @@ async def evaluate_cycle(
     amount_lamports: int,
     curve_fee_bps: int,
     amm_fee_bps: int,
+    *,
+    fee_lamports: int,
 ) -> tuple[CycleCandidate | None, float]:
     """Evaluate the curve↔AMM cycle in both directions; return best candidate."""
     vsol = curve_state["virtual_sol_reserves"]
@@ -407,8 +436,10 @@ async def evaluate_cycle(
     curve_out_d2 = curve_sell_out(vsol, vtoken, amm_tokens, curve_fee_bps)
 
     best_out = max(amm_out_d1, curve_out_d2)
-    if best_out <= amount_lamports:
-        return None, best_out - amount_lamports
+    # Net gate: a gross spread that the transaction fee consumes is not an
+    # opportunity, so the candidate is dropped rather than reported.
+    if best_out - fee_lamports <= amount_lamports:
+        return None, best_out - amount_lamports - fee_lamports
 
     if amm_out_d1 >= curve_out_d2:
         buy_leg = CycleLeg(
@@ -454,7 +485,7 @@ async def evaluate_cycle(
         expected_out_raw=best_out,
         created_slot=0,
     )
-    return candidate, best_out - amount_lamports
+    return candidate, best_out - amount_lamports - fee_lamports
 
 
 def evaluate_pamm_cycle(
@@ -463,6 +494,8 @@ def evaluate_pamm_cycle(
     mint: str,
     amount_lamports: int,
     curve_fee_bps: int,
+    *,
+    fee_lamports: int,
 ) -> tuple[CycleCandidate | None, int]:
     """Evaluate the curve↔PumpSwap cycle. Sell side uses the official
     SDK-equivalent quote; buy side is the gross CPMM step (fees on PumpSwap
@@ -534,12 +567,13 @@ def evaluate_pamm_cycle(
     )
     curve_out_d2 = curve_sell_out(vsol, vtoken, pamm_tokens, curve_fee_bps)
 
-    # All-in gate: subtract the tx cost floor so min_profit compares a
-    # REAL net margin (audited floor ~58,000 lamports at 0.01 SOL buys).
-    _TX_FEE_LAMPORTS = 33_000  # 5,000 base + 28,000 priority budget
-    best_out = max(pamm_out_d1, curve_out_d2) - _TX_FEE_LAMPORTS
-    if best_out <= amount_lamports:
-        return None, best_out - amount_lamports
+    # All-in gate: the margin carries the transaction's own fee, priced with
+    # the same estimator and limits this runner submits with, so a candidate is
+    # never reported gross while expected_out_raw stays the pool output.
+    best_out = max(pamm_out_d1, curve_out_d2)
+    net_out = best_out - fee_lamports
+    if net_out <= amount_lamports:
+        return None, net_out - amount_lamports
 
     if pamm_out_d1 >= curve_out_d2:
         buy_leg = CycleLeg(
@@ -585,7 +619,7 @@ def evaluate_pamm_cycle(
         expected_out_raw=best_out,
         created_slot=0,
     )
-    return candidate, best_out - amount_lamports
+    return candidate, net_out - amount_lamports
 
 
 def evaluate_pool_pair_cycle(
@@ -593,11 +627,14 @@ def evaluate_pool_pair_cycle(
     sell_pool: Pool,
     mint: str,
     amount_lamports: int,
+    *,
+    fee_lamports: int,
 ) -> tuple[CycleCandidate | None, int]:
     """Evaluate a SOL→mint→SOL cycle across two venue pools for the same
     mint: buy on the cheaper, sell into the richer. Both directions tried;
     fees come from each pool's own on-chain rate fields."""
     outs: list[tuple[int, CycleLeg, CycleLeg, str]] = []
+    best_net: int | None = None
     for buy, sell, tag in (
         (buy_pool, sell_pool, f"{buy_pool.program[:6]}→{sell_pool.program[:6]}"),
         (sell_pool, buy_pool, f"{sell_pool.program[:6]}→{buy_pool.program[:6]}"),
@@ -606,7 +643,12 @@ def evaluate_pool_pair_cycle(
         if tokens <= 0:
             continue
         back = sell.quote(mint, tokens)
-        if back <= amount_lamports:
+        net = back - amount_lamports - fee_lamports
+        if best_net is None or net > best_net:
+            # Keep the best net even when it fails the gate, so the reported
+            # margin is a real number instead of a sentinel.
+            best_net = net
+        if net <= 0:
             continue
         outs.append(
             (
@@ -631,7 +673,7 @@ def evaluate_pool_pair_cycle(
             )
         )
     if not outs:
-        return None, -amount_lamports
+        return None, -amount_lamports if best_net is None else best_net
     back, buy_leg, sell_leg, _tag = max(outs, key=lambda o: o[0])
     candidate = CycleCandidate(
         mints=(mint,),
@@ -642,7 +684,7 @@ def evaluate_pool_pair_cycle(
         expected_out_raw=back,
         created_slot=0,
     )
-    return candidate, back - amount_lamports
+    return candidate, back - amount_lamports - fee_lamports
 
 
 _fee_snapshot_cache: tuple[float, object] | None = None
@@ -874,6 +916,7 @@ async def run_session(
                                         venue_pools[j],
                                         lb_mint,
                                         amount_lamports,
+                                        fee_lamports=cycle_fee_lamports(cfg),
                                     )
                                     if pair_cand is None:
                                         continue
@@ -918,6 +961,7 @@ async def run_session(
                                 mint,
                                 amount_lamports,
                                 curve_fee_bps,
+                                fee_lamports=cycle_fee_lamports(cfg),
                             )
                     except Exception as exc:
                         logger.debug(f"pAMM cycle eval failed {mint[:12]}: {exc}")
@@ -952,6 +996,7 @@ async def run_session(
                                     amount_lamports,
                                     curve_fee_bps,
                                     amm_fee_bps,
+                                    fee_lamports=cycle_fee_lamports(cfg),
                                 )
                         except Exception as exc:
                             logger.debug(f"AMM pool eval failed {mint[:12]}: {exc}")
@@ -991,6 +1036,7 @@ async def run_session(
                                     venue_pools[j],
                                     mint,
                                     amount_lamports,
+                                    fee_lamports=cycle_fee_lamports(cfg),
                                 )
                                 if pair_candidate is not None and (
                                     candidate is None or pair_margin > margin
@@ -1016,14 +1062,8 @@ async def run_session(
                         f"Cycle candidate {mint[:12]}: margin={margin} lamports, "
                         f"expected_out={candidate.expected_out_raw}"
                     )
-                    compute_unit_limit = 180_000
-                    priority_fees = cfg.get("priority_fees") or {}
-                    priority_fee = priority_fees.get("fixed_amount")
-                    if not isinstance(priority_fee, int) or priority_fee <= 0:
-                        priority_fee = 500_000
-                    fee_lamports = estimate_transaction_fee_lamports(
-                        priority_fee, compute_unit_limit
-                    )
+                    priority_fee, compute_unit_limit = cycle_fee_inputs(cfg)
+                    fee_lamports = cycle_fee_lamports(cfg)
                     try:
                         if candidate.sell_leg.program == _PAMM_PROGRAM:
                             if not pamm_state:
@@ -1300,6 +1340,7 @@ async def run_event_session(
                     mint,
                     amount_lamports,
                     curve_fee_bps,
+                    fee_lamports=cycle_fee_lamports(cfg),
                 )
             except Exception as exc:
                 logger.debug(f"pAMM event eval failed {mint[:12]}: {exc}")
@@ -1364,7 +1405,11 @@ async def run_event_session(
                             trade_rate=pamm_trade_rate,
                         )
                         pair_candidate, pair_margin = evaluate_pool_pair_cycle(
-                            venue_pool, pamm_pool, mint, amount_lamports
+                            venue_pool,
+                            pamm_pool,
+                            mint,
+                            amount_lamports,
+                            fee_lamports=cycle_fee_lamports(cfg),
                         )
                         if pair_candidate is not None and (margin < pair_margin):
                             candidate, margin = (
@@ -1407,6 +1452,7 @@ async def run_event_session(
                                 amount_lamports,
                                 curve_fee_bps,
                                 amm_fee_bps,
+                                fee_lamports=cycle_fee_lamports(cfg),
                             )
                 except Exception as exc:
                     logger.debug(f"Raydium fallback failed {mint[:12]}: {exc}")
@@ -1545,6 +1591,7 @@ async def run_event_session(
                                                 venue_pools[j],
                                                 lb_mint,
                                                 amount_lamports,
+                                                fee_lamports=cycle_fee_lamports(cfg),
                                             )
                                         )
                                         if pair_cand is None:

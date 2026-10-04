@@ -341,9 +341,11 @@ What is proven (2026-09-24): detection catches 12 graduations in 10 minutes; the
 are Token-2022, and a hardcoded SPL program reverts with `IncorrectProgramId`);
 the pAMM sell wire is the audited builder; fees come from the attested fee
 program (curve 125 bps = proto 95 + creator 30; PumpSwap tiers by market cap),
-and the profit gate subtracts the on-chain fee floor plus the transaction budget
-(~58,000 lamports at 0.01 SOL buys) — a `min_profit` below that floor accepts
-certain-loss trades. CPMM pools quote with the pinned Raydium CPMM config
+and every route's margin is quoted net: the transaction fee comes from the
+shared estimator with the same compute limit and priority fee the scanner
+would submit with (~95,000 lamports at 180k CU and a 500k micro-lamport
+priority), so a gross spread the fee consumes is not reported as a candidate.
+CPMM pools quote with the pinned Raydium CPMM config
 offsets (trade fee @12, creator @108, fee flags from the pool state; `config+8`
 is bump/index, not a rate).
 
