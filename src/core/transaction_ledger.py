@@ -915,6 +915,39 @@ class TransactionLedger:
             for row in rows
         ]
 
+    def list_provisional_outcomes(self, signer: str) -> list[dict[str, str]]:
+        """Return terminal outcomes for a signer that are not yet finalized.
+
+        These trades landed on a supermajority vote but can still be dropped
+        by a fork, so an operator has to see them next to unresolved work.
+        """
+        if not signer:
+            raise ValueError("signer is required")
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT s.intent_id, s.signature, o.status, o.commitment, o.slot
+                FROM submissions AS s
+                JOIN intents AS i ON i.intent_id = s.intent_id
+                JOIN outcomes AS o ON o.signature = s.signature
+                WHERE i.signer = ?
+                  AND o.status IN ('success', 'reverted')
+                  AND COALESCE(o.commitment, '') != 'finalized'
+                ORDER BY s.submitted_at ASC, s.rowid ASC
+                """,
+                (signer,),
+            ).fetchall()
+        return [
+            {
+                "intent_id": str(row["intent_id"]),
+                "signature": str(row["signature"]),
+                "status": str(row["status"]),
+                "commitment": str(row["commitment"] or ""),
+                "slot": "" if row["slot"] is None else str(row["slot"]),
+            }
+            for row in rows
+        ]
+
     def get_receipt_destinations(self, signature: str) -> tuple[str, ...] | None:
         """Return exact native-quote receipt destinations for a submission."""
         if not signature:
@@ -1338,7 +1371,13 @@ class TransactionLedger:
         *,
         allow_prepared: bool = False,
     ) -> None:
-        """Atomically record evidence without replacing a final status."""
+        """Atomically record evidence without replacing a final status.
+
+        A weaker observation can never overwrite a stronger one. Finality may
+        supersede a confirmed result of the same status (promotion) or replace
+        it outright when the fork dropped the transaction, because that is the
+        only moment the earlier answer can still be corrected.
+        """
         if not isinstance(allow_prepared, bool):
             raise TypeError("allow_prepared must be a boolean")
         values = (
@@ -1456,7 +1495,11 @@ class TransactionLedger:
                         )
                     self._connection.commit()
                     return
-                if existing_status is not TransactionStatus.UNKNOWN:
+                if (
+                    existing_status is not TransactionStatus.UNKNOWN
+                    and _commitment_rank(existing["commitment"])
+                    >= _commitment_rank(outcome.commitment)
+                ):
                     raise LedgerConflict(
                         f"final outcome for {outcome.signature!r} cannot be replaced"
                     )
@@ -1465,7 +1508,7 @@ class TransactionLedger:
                     UPDATE outcomes
                     SET status = ?, error = ?, slot = ?, commitment = ?,
                         observed_at = CURRENT_TIMESTAMP
-                    WHERE signature = ? AND status = 'unknown'
+                    WHERE signature = ? AND status = ?
                     """,
                     (
                         outcome.status.value,
@@ -1473,6 +1516,7 @@ class TransactionLedger:
                         outcome.slot,
                         outcome.commitment,
                         outcome.signature,
+                        existing_status.value,
                     ),
                 )
                 if cursor.rowcount != 1:

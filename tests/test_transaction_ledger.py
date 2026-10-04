@@ -646,6 +646,9 @@ def test_finalized_promotes_a_confirmed_outcome_without_replacing_it(
             TransactionStatus.SUCCESS, "sig-1", slot=42, commitment="confirmed"
         )
         ledger.record_outcome(confirmed)
+        provisional = ledger.list_provisional_outcomes("wallet")
+        assert [row["signature"] for row in provisional] == ["sig-1"]
+        assert provisional[0]["commitment"] == "confirmed"
         ledger.record_outcome(
             TransactionOutcome(
                 TransactionStatus.SUCCESS, "sig-1", slot=42, commitment="finalized"
@@ -653,6 +656,7 @@ def test_finalized_promotes_a_confirmed_outcome_without_replacing_it(
         )
 
         assert ledger.get_outcome("sig-1").commitment == "finalized"
+        assert ledger.list_provisional_outcomes("wallet") == []
 
         # A later weaker observation never demotes the stored strength.
         ledger.record_outcome(confirmed)
@@ -665,6 +669,23 @@ def test_finalized_promotes_a_confirmed_outcome_without_replacing_it(
                     TransactionStatus.REVERTED, "sig-1", slot=42, commitment="finalized"
                 )
             )
+
+        # A finalized failure supersedes a weaker confirmation: this is the one
+        # moment a fork can still be corrected rather than silently lost.
+        _record_submission(ledger, intent="buy-2", signature="sig-2")
+        ledger.record_outcome(
+            TransactionOutcome(
+                TransactionStatus.SUCCESS, "sig-2", slot=42, commitment="confirmed"
+            )
+        )
+        ledger.record_outcome(
+            TransactionOutcome(
+                TransactionStatus.REVERTED, "sig-2", slot=42, commitment="finalized"
+            )
+        )
+        corrected = ledger.get_outcome("sig-2")
+        assert corrected.status is TransactionStatus.REVERTED
+        assert corrected.finalized is True
 
 
 def test_releasing_never_submitted_wire_releases_session_budget(

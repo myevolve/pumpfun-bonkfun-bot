@@ -134,6 +134,7 @@ def read_bot_status(  # noqa: C901, PLR0912, PLR0915
         "pending_token_count": 0,
         "pending_tokens": [],
         "active_submissions": [],
+        "provisional_outcomes": [],
         "pending_cleanups": [],
     }
     cleanup_journal = state_path("cleanup", f"{policy.expected_wallet}.json")
@@ -170,6 +171,9 @@ def read_bot_status(  # noqa: C901, PLR0912, PLR0915
                     policy.expected_wallet,
                 )
                 base_status["active_submissions"] = ledger.list_nonterminal_submissions(
+                    policy.expected_wallet
+                )
+                base_status["provisional_outcomes"] = ledger.list_provisional_outcomes(
                     policy.expected_wallet
                 )
         base_status["risk_session"] = {

@@ -33,3 +33,12 @@ class TransactionOutcome:
     def succeeded(self) -> bool:
         """Whether on-chain execution was positively verified as successful."""
         return self.status is TransactionStatus.SUCCESS
+
+    @property
+    def finalized(self) -> bool:
+        """Whether the status was observed at the strongest commitment.
+
+        A success seen only on a supermajority vote can still be dropped by a
+        fork, so callers that own inventory treat it as provisional.
+        """
+        return self.commitment == "finalized"
