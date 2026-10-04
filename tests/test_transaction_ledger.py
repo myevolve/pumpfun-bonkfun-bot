@@ -598,6 +598,43 @@ def test_new_session_id_explicitly_resets_cumulative_budget(tmp_path: Path) -> N
         ).quote_amount_raw_by_mint == {"SOL": 100}
 
 
+def test_reservation_cannot_be_claimed_by_another_risk_session(tmp_path: Path) -> None:
+    """A wire stays bound to the session that reserved it: another session must
+    not adopt the reservation, or it could transmit the wire while its own
+    totals omit it."""
+    with TransactionLedger(tmp_path / "ledger.sqlite") as ledger:
+        _reserve_risk_submission(
+            ledger,
+            intent="buy-1",
+            signature="sig-1",
+            quote_amount_raw=100,
+            fee_lamports=25,
+        )
+
+        with pytest.raises(LedgerConflict, match="bound to different data"):
+            _reserve_risk_submission(
+                ledger,
+                intent="buy-1",
+                signature="sig-1",
+                quote_amount_raw=100,
+                fee_lamports=25,
+                session_id="2026-05-02-live",
+            )
+
+        assert (
+            ledger.get_session_risk_totals("2026-05-01-live", "wallet").submission_count
+            == 1
+        )
+        assert (
+            ledger.get_session_risk_totals("2026-05-02-live", "wallet").submission_count
+            == 0
+        )
+        record = ledger.get_active_submission_record("buy-1")
+        assert record is not None
+        assert record.risk_session_id == "2026-05-01-live"
+        assert record.quote_mint == "SOL"
+
+
 def test_releasing_never_submitted_wire_releases_session_budget(
     tmp_path: Path,
 ) -> None:

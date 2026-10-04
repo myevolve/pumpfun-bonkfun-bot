@@ -1,6 +1,12 @@
 # Pump.fun Live Dynamic Fees Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Status: EXECUTED (2026-10-01).** Do not re-implement task-by-task. The plan's
+> checkboxes were never ticked, but the work shipped: `src/platforms/pumpfun/fee_schedule.py`,
+> `tests/test_pumpfun_fee_schedule.py`, `tests/test_pumpfun_curve_fees.py` and
+> `learning-examples/verify_pump_fee_schedule.py` all exist and CI runs the
+> verifier suite (`.github/workflows/ci.yml`). The boxes are historical
+> tracking, not a work queue; see the agent guide for the current verifier
+> commands.
 
 **Goal:** Enable fail-closed live Pump.fun bonding-curve quotes and trades for WSOL and USDC using an attested dynamic fee schedule.
 

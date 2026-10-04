@@ -64,6 +64,7 @@ logger = get_logger(__name__)
 RAYDIUM_API = "https://api-v3.raydium.io"
 _PUMP_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 _PAMM_PROGRAM = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"
+_PAMM_MIN_ACCOUNT_SIZE = 261  # i128 virtual_quote_reserves @245 ends at 261
 _BPS = 10_000
 _LAMPORTS_PER_SOL = 1_000_000_000
 
@@ -230,7 +231,7 @@ async def read_pamm_pool_state(
     if account is None or account["owner"] != _PAMM_PROGRAM:
         return None
     raw = base64.b64decode(account["data"][0], validate=True)
-    if len(raw) < 261:
+    if len(raw) < _PAMM_MIN_ACCOUNT_SIZE:
         return None
     base_vault = str(Pubkey.from_bytes(raw[139:171]))
     quote_vault = str(Pubkey.from_bytes(raw[171:203]))
@@ -265,6 +266,21 @@ async def read_pamm_pool_state(
         "is_cashback_coin": raw[244] == 1,
         "needs_extension": len(raw) < 300,  # noqa: PLR2004 - current Pool layout
     }
+
+
+def _pamm_virtual_quote_reserves(account: dict | None) -> int | None:
+    """Read this pool's own i128 virtual quote reserves (pool+245, 261 bytes).
+
+    Replaces a 17.585 SOL constant taken from a single observed pool: quoting
+    every migration against it mispriced divergence for any pool with
+    different virtual reserves (AGENTS.md documents the ~10.6% error).
+    """
+    if account is None or account.get("owner") != _PAMM_PROGRAM:
+        return None
+    raw = base64.b64decode(account["data"][0], validate=True)
+    if len(raw) < _PAMM_MIN_ACCOUNT_SIZE:
+        return None
+    return int.from_bytes(raw[245:261], "little", signed=True)
 
 
 async def _pamm_fee_recipients(
@@ -1295,8 +1311,17 @@ async def run_event_session(
             try:
                 records = await discover_pools_for_mint(session, mint)
                 summary["http_requests"] = summary.get("http_requests", 0) + 1
+                # Seeded events carry vault amounts only. The pAMM leg must
+                # quote this pool's own virtual reserves, so read them here
+                # rather than assuming another pool's value.
+                pamm_bank = await _fetch_accounts(session, rpc, [event.pool])
+                summary["http_requests"] = summary.get("http_requests", 0) + 1
+                virtual_quote = _pamm_virtual_quote_reserves(pamm_bank.get(event.pool))
                 for record in records:
                     try:
+                        if virtual_quote is None or virtual_quote < 0:
+                            logger.debug(f"pAMM virtual reserves unusable {mint[:12]}")
+                            continue
                         pool_addr = record["id"]
                         bank = await _fetch_accounts(session, rpc, [pool_addr])
                         summary["http_requests"] = summary.get("http_requests", 0) + 1
@@ -1333,8 +1358,7 @@ async def run_event_session(
                             vaults=(event.pool, event.pool),
                             reserves=(
                                 event.pool_base_amount,
-                                event.pool_quote_amount
-                                + 17_585_000_000,  # ponytail: canonical virtual quote; read from pool decode at execution
+                                event.pool_quote_amount + virtual_quote,
                             ),
                             trade_rate=pamm_trade_rate,
                         )

@@ -6,6 +6,7 @@ pAMM+curve state and assert program IDs, IDL discriminators, and account
 counts against the vendored IDLs.
 """
 
+import base64
 import json
 from pathlib import Path
 
@@ -26,7 +27,7 @@ from cycles.builders import (
     curve_token_info,
     pamm_fee_recipients,
 )
-from cycles.runner import build_cycle_instructions
+from cycles.runner import _pamm_virtual_quote_reserves, build_cycle_instructions
 from platforms.pumpfun.pumpswap import (
     PUMP_SWAP_GLOBAL_CONFIG_DISCRIMINATOR,
     PumpSwapAddresses,
@@ -256,8 +257,8 @@ def test_fee_budget_uses_estimator() -> None:
     # 5,000 lamports signature + 180,000 CU at 500,000 µlam/CU.
     assert estimate_transaction_fee_lamports(500_000, 180_000) == 95_000
 
-def test_pamm_fee_recipients_decoding() -> None:
 
+def test_pamm_fee_recipients_decoding() -> None:
     protocol = tuple(Pubkey.new_unique() for _ in range(8))
     reserved = tuple(Pubkey.new_unique() for _ in range(8))
     buyback = tuple(Pubkey.new_unique() for _ in range(8))
@@ -285,3 +286,22 @@ def test_pamm_fee_recipients_decoding() -> None:
         buyback[0],
     )
 
+
+def test_pamm_virtual_quote_reserves_reads_this_pool_not_a_constant() -> None:
+    """Each pool must be quoted over its own virtual reserves: a constant taken
+    from one observed pool mispriced every other migration by ~10%."""
+    raw = bytearray(301)
+    raw[245:261] = (7_654_321_000).to_bytes(16, "little", signed=True)
+    account = {
+        "owner": str(PAMM_PROGRAM),
+        "data": [base64.b64encode(bytes(raw)).decode(), "base64"],
+    }
+
+    assert _pamm_virtual_quote_reserves(account) == 7_654_321_000
+    assert _pamm_virtual_quote_reserves({**account, "owner": "not-pamm"}) is None
+    truncated = {
+        **account,
+        "data": [base64.b64encode(bytes(raw[:200])).decode(), "base64"],
+    }
+    assert _pamm_virtual_quote_reserves(truncated) is None
+    assert _pamm_virtual_quote_reserves(None) is None

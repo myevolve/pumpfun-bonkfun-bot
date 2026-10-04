@@ -271,6 +271,22 @@ with `BuybackFeeRecipientMissing` (6062) printed as confirmed buys.
   error first — keep that ordering, and never widen the monitor's catch to
   `Exception`: a mismatch or a bad price must fail immediately.
 
+- **A wire handed to TPU is never "never sent".** `build_and_send_transaction`
+  QUIC/UDP-broadcasts to current leaders *before* the rate-limited HTTP send, so
+  a cancellation, rate-limiter failure or HTTP preflight rejection can follow a
+  real delivery. Only a wire no leader accepted may be released (and only then
+  may `PreflightRejected` be raised, letting the caller rebuild a wire); after
+  any delivery the signature stays reserved as `unknown` and callers reconcile
+  by signature. Releasing a delivered wire deletes its risk reservation, so the
+  next attempt signs a second buy/sell for the same intent under a session cap
+  that no longer counts the first.
+- **A prepared replay is bound to its risk session.** `risk_reservations` are
+  immutable per signature (`record_submission` raises `LedgerConflict` if
+  another session tries to claim one), and `_validate_prepared_replay_policy`
+  refuses a wire whose `risk_session_id` differs from the authorized session or
+  whose session already exceeds its caps. Restarting into a new `risk_session_id`
+  must never silently transmit an old session's reserved wire.
+
 ### Verifying the tp/sl exit path (issue #189)
 
 ```bash

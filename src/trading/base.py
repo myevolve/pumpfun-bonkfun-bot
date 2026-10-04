@@ -245,17 +245,15 @@ def create_pump_fun_token_info(
         associated_bonding_curve: Associated bonding curve address
         user: User/trader address
         creator: Creator address (defaults to user if not provided)
-        creator_vault: Creator vault address (will be derived if not provided)
+        creator_vault: Creator vault address; left None here and derived by the
+            platform address provider (see platform_aware's pump.fun path)
         **kwargs: Additional fields for TokenInfo
 
     Returns:
         Enhanced TokenInfo configured for pump.fun
     """
-    # Derive creator vault if not provided (import here to avoid circular imports)
-    if creator_vault is None and creator:
-        # We can't import PumpAddresses here, so this will need to be handled elsewhere
-        # For now, leave it as None and let the platform implementation handle it
-        pass
+    # The creator vault is derived downstream (PumpAddresses import would be
+    # circular here); passing it through is the caller's only job at this layer.
 
     return TokenInfo(
         name=name,

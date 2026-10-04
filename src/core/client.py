@@ -326,9 +326,14 @@ class SolanaClient:
         """Close the client connection and stop the blockhash updater."""
         if self._tpu is not None:
             await self._tpu.stop()
-        if self._blockhash_updater_task:
+        updater = self._blockhash_updater_task
+        self._blockhash_updater_task = None
+        if updater is not None:
+            # The updater loops forever: awaiting it would hang shutdown, so the
+            # RPC session never closes and the ledger/journal locks stay held.
+            updater.cancel()
             try:
-                await self._blockhash_updater_task
+                await updater
             except asyncio.CancelledError:
                 pass
 
@@ -626,8 +631,8 @@ class SolanaClient:
         if cancellation is not None:
             raise cancellation
 
-    def _validate_prepared_replay_policy(self, record: Any) -> None:
-        """Revalidate current wallet and budget policy against exact stored wire."""
+    async def _validate_prepared_replay_policy(self, record: Any) -> None:
+        """Revalidate current wallet, budget, and risk-session policy."""
         if record.quote_amount_raw is None or record.fee_lamports is None:
             raise ExecutionBlocked(
                 "Prepared transaction is missing durable budget metadata"
@@ -650,6 +655,37 @@ class SolanaClient:
             record.quote_amount_raw,
             record.fee_lamports,
         )
+        # This process transmits the wire, so it must count against the risk
+        # session authorized right now, not the one that reserved it.
+        (
+            risk_session_id,
+            max_session_quote_raw,
+            max_session_fee_lamports,
+        ) = self.execution_policy.session_risk_limits()
+        if record.risk_session_id != risk_session_id:
+            raise ExecutionBlocked(  # noqa: TRY003
+                "Prepared transaction belongs to risk session "
+                f"{record.risk_session_id!r}, not the authorized session "
+                f"{risk_session_id!r}"
+            )
+        if self.ledger is None:
+            raise ExecutionBlocked(  # noqa: TRY003
+                "Prepared replay requires a durable ledger"
+            )
+        totals = await asyncio.to_thread(
+            self.ledger.get_session_risk_totals,
+            risk_session_id,
+            record.signer,
+        )
+        reserved_quote = totals.quote_amount_raw_by_mint.get(record.quote_mint, 0)
+        if (
+            reserved_quote > max_session_quote_raw
+            or totals.fee_lamports > max_session_fee_lamports
+        ):
+            raise ExecutionBlocked(  # noqa: TRY003
+                "Authorized risk session is already over its limits; the "
+                "prepared wire is not replayed"
+            )
 
     async def _resubmit_prepared_wire(
         self,
@@ -770,7 +806,7 @@ class SolanaClient:
                     signature,
                     "exact prepared wire expired without terminal on-chain evidence",
                 )
-            self._validate_prepared_replay_policy(record)
+            await self._validate_prepared_replay_policy(record)
             return await self._resubmit_prepared_wire(
                 signature,
                 record.wire_bytes,
@@ -1097,20 +1133,27 @@ class SolanaClient:
             # (tpuQuic) ahead of the rate-limited HTTP RPC send. Never fatal;
             # validators deduplicate by signature if both channels land.
             self._start_tpu_refresher()
+            quic_delivered = udp_delivered = 0
             if self._tpu is not None:
-                delivered = await self._tpu.send_quic(wire_bytes)
-                if delivered:
-                    logger.info(f"TPU QUIC submission sent to {delivered} leader(s)")
+                quic_delivered = await self._tpu.send_quic(wire_bytes)
+                if quic_delivered:
+                    logger.info(
+                        f"TPU QUIC submission sent to {quic_delivered} leader(s)"
+                    )
                 udp_delivered = self._tpu.send(wire_bytes)
                 if udp_delivered:
                     logger.info(f"TPU UDP submission sent to {udp_delivered} leader(s)")
-            send_started = False
+            # A leader that accepted the wire can still land it, so from here
+            # the transaction may be on chain. It is never released as "never
+            # sent"; callers must reconcile it by signature instead.
+            tpu_delivered = bool(quic_delivered or udp_delivered)
+            network_send_started = tpu_delivered
             try:
                 await asyncio.wait_for(
                     self._rate_limiter.acquire(),
                     timeout=DEFAULT_RPC_DEADLINE_SECONDS,
                 )
-                send_started = True
+                network_send_started = True
                 response = await asyncio.wait_for(
                     client.send_transaction(transaction, tx_opts),
                     timeout=DEFAULT_RPC_DEADLINE_SECONDS,
@@ -1123,7 +1166,7 @@ class SolanaClient:
                     ) from exc
                 await self._mark_submission_after_send(signature_text)
             except asyncio.CancelledError:
-                if not send_started:
+                if not network_send_started:
                     released = await asyncio.shield(
                         asyncio.to_thread(
                             self.ledger.release_prepared_submission,
@@ -1142,7 +1185,10 @@ class SolanaClient:
                     )
                 raise
             except RPCException as exc:
-                if is_preflight_rejection(exc):
+                # A preflight rejection only proves the wire never left when no
+                # TPU leader accepted it first; otherwise the outcome is
+                # ambiguous and the signature stays reserved.
+                if is_preflight_rejection(exc) and not tpu_delivered:
                     released = await asyncio.shield(
                         asyncio.to_thread(
                             self.ledger.release_prepared_submission,
@@ -1161,7 +1207,7 @@ class SolanaClient:
             except EvidencePersistenceError:
                 raise
             except BaseException as exc:
-                if not send_started:
+                if not network_send_started:
                     released = await asyncio.shield(
                         asyncio.to_thread(
                             self.ledger.release_prepared_submission,

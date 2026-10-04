@@ -23,6 +23,8 @@ from solders.instruction import Instruction
 from solders.keypair import Keypair
 from solders.message import Message
 from solders.pubkey import Pubkey
+from solders.rpc.errors import SendTransactionPreflightFailureMessage
+from solders.rpc.responses import RpcSimulateTransactionResult
 from solders.signature import Signature
 from solders.transaction import Transaction
 from spl.token.instructions import get_associated_token_address
@@ -370,6 +372,121 @@ async def test_preflight_rejection_releases_wire_instead_of_recording_unknown(
         )
 
 
+def _fake_tpu(*, quic_delivered: int = 0, udp_delivered: int = 0) -> SimpleNamespace:
+    """TPU stub reporting delivered leader counts without touching the network."""
+    return SimpleNamespace(
+        start=lambda: None,
+        send_quic=AsyncMock(return_value=quic_delivered),
+        send=lambda _wire: udp_delivered,
+        stop=AsyncMock(),
+    )
+
+
+def _record_prepared_wire(  # noqa: PLR0913
+    ledger: TransactionLedger,
+    intent_id: str,
+    signer: Keypair,
+    message: Message,
+    transaction: Transaction,
+    *,
+    session_id: str = "test-session",
+    receipt_destinations: tuple[str, ...] | None = None,
+) -> None:
+    """Reserve an exact wire the way the live path does, bound to its session."""
+    message_hash = hashlib.sha256(bytes(message)).hexdigest()
+    ledger.record_intent(intent_id, str(signer.pubkey()), 10, 5_000, message_hash)
+    ledger.record_submission(
+        intent_id,
+        str(transaction.signatures[0]),
+        str(transaction.message.recent_blockhash),
+        100,
+        wire_bytes=bytes(transaction),
+        state="prepared",
+        receipt_destinations=receipt_destinations,
+        quote_mint=str(WSOL_MINT),
+        risk_session_id=session_id,
+        max_session_quote_raw=10_000_000,
+        max_session_fee_lamports=10_000_000,
+        intent_message_hash=message_hash,
+    )
+
+
+@pytest.mark.parametrize("failure", ["rate_limiter", "preflight"])
+@pytest.mark.asyncio
+async def test_tpu_delivered_wire_is_never_released_as_never_sent(
+    tmp_path: Path, failure: str
+) -> None:
+    """A wire handed to TPU leaders can still land on a validator. Releasing it
+    deletes the signature and its risk reservation, so the next attempt signs a
+    second buy/sell for the same intent and the session cap stops counting it."""
+    preflight_rejection = RPCException(
+        SendTransactionPreflightFailureMessage(
+            "Transaction simulation failed: Error processing Instruction 2: "
+            "custom program error: 0x1773",
+            RpcSimulateTransactionResult(err=None, logs=None),
+        )
+    )
+    rpc = SimpleNamespace(
+        send_transaction=AsyncMock(
+            side_effect=preflight_rejection if failure == "preflight" else None
+        )
+    )
+    client, ledger, signer = _live_client(tmp_path, rpc)
+    client._tpu = _fake_tpu(quic_delivered=1)
+    if failure == "rate_limiter":
+        client._rate_limiter.acquire = AsyncMock(side_effect=TimeoutError())
+
+    with pytest.raises(client_module.TransactionSubmissionUnknown):
+        await client.build_and_send_transaction(
+            [_instruction()],
+            signer,
+            quote_amount_raw=10,
+            fee_lamports=5_000,
+            intent_id="tpu-delivered",
+            quote_mint=WSOL_MINT,
+        )
+
+    record = ledger.get_active_submission_record("tpu-delivered")
+    assert record is not None
+    assert ledger.get_outcome(record.signature).status is TransactionStatus.UNKNOWN
+    totals = ledger.get_session_risk_totals("test-session", str(signer.pubkey()))
+    assert totals.submission_count == 1
+
+
+@pytest.mark.asyncio
+async def test_undelivered_preflight_rejection_still_releases_the_wire(
+    tmp_path: Path,
+) -> None:
+    """No TPU leader took the wire, so 'never left' still holds and the caller
+    may build a fresh wire for the same intent."""
+    rpc = SimpleNamespace(
+        send_transaction=AsyncMock(
+            side_effect=RPCException(
+                SendTransactionPreflightFailureMessage(
+                    "Transaction simulation failed",
+                    RpcSimulateTransactionResult(err=None, logs=None),
+                )
+            )
+        )
+    )
+    client, ledger, signer = _live_client(tmp_path, rpc)
+    client._tpu = _fake_tpu()
+
+    with pytest.raises(client_module.PreflightRejected):
+        await client.build_and_send_transaction(
+            [_instruction()],
+            signer,
+            quote_amount_raw=10,
+            fee_lamports=5_000,
+            intent_id="no-tpu-delivery",
+            quote_mint=WSOL_MINT,
+        )
+
+    assert ledger.get_active_submission_record("no-tpu-delivery") is None
+    totals = ledger.get_session_risk_totals("test-session", str(signer.pubkey()))
+    assert totals.submission_count == 0
+
+
 def test_preflight_rejection_detected_from_message_text_too() -> None:
     assert client_module.is_preflight_rejection(
         RPCException("SendTransactionPreflightFailureMessage { message: ... }")
@@ -421,21 +538,7 @@ async def test_prepared_wire_rpc_error_raises_signature_bearing_unknown(
     message = Message([instruction], signer.pubkey())
     transaction = Transaction([signer], message, Hash.default())
     signature = str(transaction.signatures[0])
-    ledger.record_intent(
-        "prepared-rpc-error",
-        str(signer.pubkey()),
-        10,
-        5_000,
-        hashlib.sha256(bytes(message)).hexdigest(),
-    )
-    ledger.record_submission(
-        "prepared-rpc-error",
-        signature,
-        str(Hash.default()),
-        100,
-        wire_bytes=bytes(transaction),
-        state="prepared",
-    )
+    _record_prepared_wire(ledger, "prepared-rpc-error", signer, message, transaction)
 
     with pytest.raises(_unknown_error_type()) as caught:
         await client.build_and_send_transaction(
@@ -461,20 +564,8 @@ async def test_prepared_malformed_response_is_signature_bearing_unknown(
     message = Message([instruction], signer.pubkey())
     transaction = Transaction([signer], message, Hash.default())
     signature = str(transaction.signatures[0])
-    ledger.record_intent(
-        "prepared-malformed-response",
-        str(signer.pubkey()),
-        10,
-        5_000,
-        hashlib.sha256(bytes(message)).hexdigest(),
-    )
-    ledger.record_submission(
-        "prepared-malformed-response",
-        signature,
-        str(Hash.default()),
-        100,
-        wire_bytes=bytes(transaction),
-        state="prepared",
+    _record_prepared_wire(
+        ledger, "prepared-malformed-response", signer, message, transaction
     )
 
     with pytest.raises(_unknown_error_type()) as caught:
@@ -508,22 +599,7 @@ async def test_prepared_recovery_submits_the_exact_stored_wire_bytes(tmp_path) -
     transaction = Transaction([signer], message, Hash.default())
     prepared_wire = bytes(transaction)
     prepared_signature = transaction.signatures[0]
-    message_hash = hashlib.sha256(bytes(message)).hexdigest()
-    ledger.record_intent(
-        "prepared-recovery",
-        str(signer.pubkey()),
-        10,
-        5_000,
-        message_hash,
-    )
-    ledger.record_submission(
-        "prepared-recovery",
-        str(prepared_signature),
-        str(Hash.default()),
-        100,
-        wire_bytes=prepared_wire,
-        state="prepared",
-    )
+    _record_prepared_wire(ledger, "prepared-recovery", signer, message, transaction)
 
     returned = await client.build_and_send_transaction(
         [instruction],
@@ -628,20 +704,12 @@ async def test_prepared_recovery_ignores_rebuilt_message_and_receipt_context(
     prepared_signature = transaction.signatures[0]
     original_destinations = tuple(str(Pubkey.new_unique()) for _ in range(3))
     rebuilt_destinations = tuple(str(Pubkey.new_unique()) for _ in range(3))
-    ledger.record_intent(
+    _record_prepared_wire(
+        ledger,
         "changed-prepared-recovery",
-        str(signer.pubkey()),
-        10,
-        5_000,
-        hashlib.sha256(bytes(original_message)).hexdigest(),
-    )
-    ledger.record_submission(
-        "changed-prepared-recovery",
-        str(prepared_signature),
-        str(Hash.default()),
-        100,
-        wire_bytes=prepared_wire,
-        state="prepared",
+        signer,
+        original_message,
+        transaction,
         receipt_destinations=original_destinations,
     )
 
@@ -688,21 +756,7 @@ async def test_prepared_recovery_precedes_compute_budget_guard(tmp_path) -> None
     transaction = Transaction([signer], message, Hash.default())
     prepared_wire = bytes(transaction)
     prepared_signature = transaction.signatures[0]
-    ledger.record_intent(
-        "cycle-final-wire",
-        str(signer.pubkey()),
-        10,
-        5_000,
-        hashlib.sha256(bytes(message)).hexdigest(),
-    )
-    ledger.record_submission(
-        "cycle-final-wire",
-        str(prepared_signature),
-        str(Hash.default()),
-        100,
-        wire_bytes=prepared_wire,
-        state="prepared",
-    )
+    _record_prepared_wire(ledger, "cycle-final-wire", signer, message, transaction)
 
     returned = await client.build_and_send_transaction(
         final_instructions,
@@ -717,6 +771,65 @@ async def test_prepared_recovery_precedes_compute_budget_guard(tmp_path) -> None
     assert captured == [prepared_wire]
     rec = ledger.get_active_submission_record("cycle-final-wire")
     assert rec.state == "submitted"
+
+
+@pytest.mark.asyncio
+async def test_prepared_wire_is_not_replayed_under_another_risk_session(
+    tmp_path,
+) -> None:
+    """A wire reserved under one risk session may not be transmitted by a
+    process authorized for another: it would count against the wrong session
+    cap and stay invisible in that session's totals."""
+    rpc = SimpleNamespace(send_raw_transaction=AsyncMock())
+    client, ledger, signer = _live_client(tmp_path, rpc)
+    message = Message([_instruction()], signer.pubkey())
+    transaction = Transaction([signer], message, Hash.default())
+    _record_prepared_wire(
+        ledger,
+        "cross-session-prepared",
+        signer,
+        message,
+        transaction,
+        session_id="previous-session",
+    )
+    client.execution_policy = ExecutionPolicy(
+        mode="live",
+        live_authorized=True,
+        expected_wallet=str(signer.pubkey()),
+        max_trade_quote_raw=1_000_000,
+        max_total_fee_lamports=100_000,
+        risk_session_id="current-session",
+        max_session_quote_raw=10_000_000,
+        max_session_fee_lamports=10_000_000,
+        allow_skip_preflight=True,
+    )
+
+    with pytest.raises(ExecutionBlocked, match="risk session"):
+        await client.build_and_send_transaction(
+            [_instruction()],
+            signer,
+            quote_amount_raw=10,
+            fee_lamports=5_000,
+            intent_id="cross-session-prepared",
+            quote_mint=WSOL_MINT,
+        )
+
+    rpc.send_raw_transaction.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_close_cancels_the_blockhash_updater() -> None:
+    """The updater loops forever, so awaiting it instead of cancelling it hangs
+    shutdown: the RPC session never closes and the ledger/journal locks stay
+    held across a restart."""
+    client = SolanaClient("http://offline.invalid")
+    updater = asyncio.create_task(asyncio.Event().wait())
+    client._blockhash_updater_task = updater
+
+    await asyncio.wait_for(client.close(), timeout=1)
+
+    assert updater.done()
+    assert client._blockhash_updater_task is None
 
 
 @pytest.mark.asyncio
@@ -1205,20 +1318,12 @@ async def test_post_send_evidence_failure_propagates_without_retry(
         transaction = Transaction(
             [signer], Message(instructions, signer.pubkey()), Hash.default()
         )
-        ledger.record_intent(
+        _record_prepared_wire(
+            ledger,
             "post-send-evidence",
-            str(signer.pubkey()),
-            10,
-            5_000,
-            hashlib.sha256(bytes(transaction.message)).hexdigest(),
-        )
-        ledger.record_submission(
-            "post-send-evidence",
-            str(transaction.signatures[0]),
-            str(Hash.default()),
-            100,
-            wire_bytes=bytes(transaction),
-            state="prepared",
+            signer,
+            transaction.message,
+            transaction,
         )
     failure = EvidencePersistenceError("evidence disk unavailable")
 

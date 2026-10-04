@@ -26,7 +26,7 @@ from core.pubkeys import USDC_MINT, SystemAddresses
 from core.transaction_ledger import EvidencePersistenceError
 from core.transaction_state import TransactionOutcome
 from interfaces.core import Platform, TokenInfo
-from monitoring.trade_flow import FlowRules, FlowSignal
+from monitoring.trade_flow import FlowRules, FlowSignal, TradeQueue
 from platforms.pumpfun.curve_manager import PumpFunCurveManager
 from platforms.pumpfun.fee_schedule import (
     PumpFeeConfig,
@@ -1997,8 +1997,10 @@ async def test_start_propagates_fatal_reconciliation_error_after_cleanup() -> No
     trader.token_listener = SimpleNamespace(listen_for_tokens=listen)
     trader._cleanup_resources = cleanup
 
+    # 0.1 s expired under full-suite CPU contention before the immediate
+    # raise could surface; the deadline only guards against a hang.
     with pytest.raises(RuntimeError, match="reconciliation failed"):
-        await asyncio.wait_for(trader.start(), timeout=0.1)
+        await asyncio.wait_for(trader.start(), timeout=1)
 
     assert events == ["cleanup"]
 
@@ -2606,6 +2608,7 @@ async def test_start_finalizes_reservation_and_propagates_fatal_trade_error() ->
 @pytest.mark.asyncio
 async def test_handle_token_propagates_fatal_buy_exception_and_keeps_recovery() -> None:
     trader = object.__new__(UniversalTrader)
+    trader.execution_policy = ExecutionPolicy(mode=ExecutionMode.DRY_RUN)
     token = _token(Platform.LETS_BONK)
     trader.platform = Platform.LETS_BONK
     trader.allowed_quote_mints = None
@@ -2626,6 +2629,7 @@ async def test_handle_token_propagates_fatal_buy_exception_and_keeps_recovery() 
 @pytest.mark.asyncio
 async def test_handle_token_defers_unverified_pump_quote_allowlist_check() -> None:
     trader = object.__new__(UniversalTrader)
+    trader.execution_policy = ExecutionPolicy(mode=ExecutionMode.DRY_RUN)
     token = _token(Platform.PUMP_FUN)
     token.quote_mint = None
     token.state_from_event = False
@@ -2754,21 +2758,17 @@ async def test_single_shot_keeps_listening_past_gate_skips_until_a_buy() -> None
 
 
 @pytest.mark.asyncio
-async def test_paper_fill_continues_and_gate_skip_does_not_schedule_sampler() -> None:
-    """Dry-run: a blocked buy (paper fill) keeps scanning and schedules a
-    simulated exit; a plain gate skip neither continues the scan loop nor
-    schedules an outcome sampler."""
+async def test_dry_run_attempt_continues_past_later_gate_skips() -> None:
+    """A blocked attempt and later skips must not prematurely end discovery."""
     trader = _lifecycle_trader(yolo_mode=False)
     trader.token_wait_timeout = 5
     trader._buy_attempts = 0
     trader.trade_hub = None
-    trader._paper_entry_price = {}
     # Fill FIRST, then skips: the live failure mode. A hoisted attempt
     # baseline made every post-fill skip look like a buy and ended the run.
     tokens = [_token(Platform.LETS_BONK) for _ in range(3)]
     served = iter([*tokens, None, None, None])
     handled_symbols: list[str] = []
-    samplers: list[str] = []
 
     async def wait_for_token() -> TokenInfo:
         return next(served)
@@ -2780,23 +2780,44 @@ async def test_paper_fill_continues_and_gate_skip_does_not_schedule_sampler() ->
             return True
         return True  # plain gate skip
 
-    async def paper_outcome(token_info: TokenInfo, horizon_s: int) -> None:
-        samplers.append(str(token_info.mint))
-
     trader._wait_for_token = wait_for_token
     trader._handle_token = handle_token
     trader._finish_token_reservation = lambda token_info, handled: None
     trader._cleanup_resources = AsyncMock()
-    trader._paper_fill_outcome = paper_outcome
 
     await asyncio.wait_for(trader.start(), 3)
 
     # All three handled: the fill continues past, and post-fill skips keep
     # scanning (the hoisted-baseline bug ended the run right after a fill).
     assert handled_symbols == [str(t.mint) for t in tokens]
-    # Three horizons (60/300/900) each schedule one sampler for the fill
-    assert samplers == [str(tokens[0].mint)] * 3
     assert trader._cleanup_resources.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_dry_run_drains_existing_marks_after_entry_window_closes() -> None:
+    trader = _lifecycle_trader(yolo_mode=False)
+    entry_window_closed, finish_mark = asyncio.Event(), asyncio.Event()
+    mark = asyncio.create_task(finish_mark.wait())
+    trader._paper_tasks = {mark}
+    trader._position_tasks.add(mark)
+
+    async def no_more_entries() -> None:
+        entry_window_closed.set()
+
+    trader._wait_for_token = no_more_entries
+    trader._cleanup_resources = AsyncMock()
+    run = asyncio.create_task(trader.start())
+    try:
+        await asyncio.wait_for(entry_window_closed.wait(), 1)
+        await asyncio.sleep(0)
+        assert not run.done()
+        assert not mark.done()
+        trader._cleanup_resources.assert_not_awaited()
+    finally:
+        finish_mark.set()
+        await asyncio.wait_for(run, 1)
+    assert mark.result() is True
+    trader._cleanup_resources.assert_awaited_once()
 
 
 def test_failed_pending_recovery_keeps_reservation() -> None:
@@ -3164,6 +3185,7 @@ async def test_flow_signal_wakes_monitor_and_sells_unconditionally_at_event_pric
     trader.geyser_auth_type = "x-token"
     trader._flow_signals = {}
     trader._flow_wakeups = {}
+    trader._gate_queues = {}
     calculate_token_price = AsyncMock(return_value=1.2)  # below TP; poll would hold
     trader.platform_implementations = SimpleNamespace(
         curve_manager=SimpleNamespace(calculate_token_price=calculate_token_price)
@@ -3246,6 +3268,7 @@ async def test_flow_exit_latches_across_a_reverted_sell_with_no_further_events(
     trader.geyser_endpoint = "geyser.invalid"
     trader.geyser_api_token = "token"
     trader.geyser_auth_type = "x-token"
+    trader._gate_queues = {}
     calculate_token_price = AsyncMock(return_value=1.05)
     trader.platform_implementations = SimpleNamespace(
         curve_manager=SimpleNamespace(calculate_token_price=calculate_token_price)
@@ -3303,6 +3326,60 @@ async def test_flow_exit_latches_across_a_reverted_sell_with_no_further_events(
     assert position.is_active is False
     assert position.exit_reason is ExitReason.TRADE_FLOW
     assert token_key not in trader._flow_latched
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("latched", [False, True])
+@pytest.mark.parametrize("interrupt_stream", [False, True])
+async def test_history_loss_rejects_pending_signal_but_preserves_latched_exit(
+    monkeypatch: pytest.MonkeyPatch, *, latched: bool, interrupt_stream: bool
+) -> None:
+    token = _token(Platform.PUMP_FUN)
+    position = _net_roi_position(token)
+    trader = _net_roi_monitor_trader(
+        token,
+        prices=[],
+        sell_results=[
+            TradeResult(
+                success=True,
+                platform=token.platform,
+                tx_signature="confirmed-exit",
+                amount=2.0,
+                amount_raw=2_000_000,
+                price=1.0,
+                status=TransactionStatus.SUCCESS.value,
+            )
+        ],
+    )
+    token_key = str(token.mint)
+    queue = TradeQueue(maxsize=1)
+    queue.invalidate("interrupted" if interrupt_stream else "overflow")
+    trader._gate_queues = {token_key: queue}
+    trader._flow_signals = {
+        token_key: FlowSignal("creator_sell", "pending before loss", 9.0, 1)
+    }
+    trader._flow_latched = {token_key} if latched else set()
+    trader._flow_wakeups = {}
+
+    async def read_price(_token: TokenInfo) -> float:
+        trader._shutdown_event.set()  # Stop after this real monitor iteration.
+        return 1.0
+
+    trader.platform_implementations.curve_manager.calculate_token_price = read_price
+    monkeypatch.setattr(
+        "trading.universal_trader.handle_cleanup_after_sell",
+        AsyncMock(return_value=None),
+    )
+    await asyncio.wait_for(trader._monitor_position_loop(token, position), 1)
+    assert trader._flow_signals == {}
+    if latched:
+        assert not position.is_active
+        assert position.exit_reason is ExitReason.TRADE_FLOW
+        assert trader.seller.execute.await_args.kwargs["token_price"] == 1.0
+    else:
+        assert position.is_active
+        assert token_key not in trader._flow_latched
+        trader.seller.execute.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -3682,50 +3759,3 @@ async def test_emergency_exit_reconciles_pending_signature_without_resubmitting(
     assert str(token.mint) not in trader._active_positions
     trader.seller.execute.assert_not_awaited()
     cleanup_after_sell.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_paper_fill_outcome_links_journal_result() -> None:
-    """The +60s sampler re-prices the curve and links the realized delta
-    back to the fill's lesson row."""
-    import types
-
-    from learning.journal import LessonJournal, LessonObservation
-
-    trader = object.__new__(UniversalTrader)
-    trader.execution_policy = ExecutionPolicy(mode=ExecutionMode.DRY_RUN)
-    token = _token(Platform.LETS_BONK)
-    mint_key = str(token.mint)
-
-    journal = LessonJournal(":memory:")
-    trader.lesson_journal = journal
-    trader.jev_scorer = None
-    trader._paper_entry_price = {(mint_key, 60): 2e-8}
-    trader._PAPER_EXIT_DELAY_S = 0
-
-    class FakeCurve:
-        async def get_sell_state_and_token_program(self, curve, mint, commitment=None):
-            return (
-                {
-                    "real_sol_reserves": 200_000_000,
-                    "real_token_reserves": 5_000_000_000,
-                },
-                object(),
-            )
-
-    trader.platform_implementations = types.SimpleNamespace(curve_manager=FakeCurve())
-
-    journal.record(
-        LessonObservation(kind="gate_pass", mint=mint_key, symbol=token.symbol)
-    )
-    await trader._paper_fill_outcome(token, horizon_s=0)
-
-    row = journal._conn.execute(
-        "SELECT outcome_pnl_sol, outcome_reason FROM lessons"
-        " WHERE mint=? AND kind='horizon_0s'",
-        (mint_key,),
-    ).fetchone()
-    # entry 2e-8; exit = 0.2 SOL / 5000 tokens = 4e-8 -> +100% -> +0.01 SOL
-    assert row[0] is not None and row[0] > 0
-    assert row[1] == "paper_exit_0s"  # delay overridden to 0 in this test
-    journal.close()

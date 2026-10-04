@@ -217,3 +217,11 @@ learning-examples/token-lifecycles/*.sol
 
 # Sealed session evidence is local operational data; findings live in README.
 state/
+
+# Credential twin of .env was protected only by machine-local .git/info/exclude.
+ENVDATA
+
+# Local agent scaffolding and stray tool output; not project source.
+streamlit.txt
+.agents/
+.claude/skills/
