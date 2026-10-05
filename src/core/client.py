@@ -1430,7 +1430,16 @@ class SolanaClient:
             if (
                 stored_outcome is not None
                 and stored_outcome.status is not TransactionStatus.UNKNOWN
-                and outcome.status in {TransactionStatus.UNKNOWN, stored_outcome.status}
+                and stored_outcome.status is outcome.status
+                and outcome.commitment is None
+            ):
+                # The fresh observation carried no commitment, so it cannot
+                # strengthen the row: keep the stored terminal evidence.
+                outcome = stored_outcome
+            elif (
+                stored_outcome is not None
+                and stored_outcome.status is not TransactionStatus.UNKNOWN
+                and outcome.status is TransactionStatus.UNKNOWN
             ):
                 outcome = stored_outcome
 

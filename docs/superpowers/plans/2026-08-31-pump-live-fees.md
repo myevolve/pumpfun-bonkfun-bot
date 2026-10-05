@@ -232,7 +232,7 @@ Expected: tests and verifier pass.
 **Files:**
 - Modify: `src/trading/universal_trader.py`
 - Modify: `src/config_loader.py`
-- Modify: `tests/test_config_validation.py`
+- Modify: `tests/test_config_loader_safety.py`
 - Modify: `tests/test_trading_lifecycle_hardening.py`
 - Modify: `README.md`
 
@@ -247,7 +247,7 @@ Assert fee preparation precedes token processing, preparation failure starts no 
 
 - [ ] **Step 2: Run lifecycle tests and confirm RED**
 
-Run: `uv run pytest -q tests/test_config_validation.py tests/test_trading_lifecycle_hardening.py -k 'pump or fee or close or startup'`
+Run: `uv run pytest -q tests/test_config_loader_safety.py tests/test_trading_lifecycle_hardening.py -k 'pump or fee or close or startup'`
 Expected: the old configuration/runtime gates or missing lifecycle calls fail.
 
 - [ ] **Step 3: Wire lifecycle and remove obsolete hard gates**
@@ -260,7 +260,7 @@ Replace the statement that Pump live is unavailable with the actual guarantees: 
 
 - [ ] **Step 5: Run targeted lifecycle/config tests**
 
-Run: `uv run pytest -q tests/test_config_validation.py tests/test_trading_lifecycle_hardening.py`
+Run: `uv run pytest -q tests/test_config_loader_safety.py tests/test_trading_lifecycle_hardening.py`
 Expected: all selected tests pass.
 
 ### Task 6: Permanent offline verifier and release verification
@@ -285,7 +285,7 @@ Include WSOL and USDC fixture schedules, threshold-minus-one/threshold/threshold
 
 - [ ] **Step 3: Run scoped formatting and lint**
 
-Run: `uv run ruff check --fix src/interfaces/core.py src/platforms/pumpfun/fee_schedule.py src/platforms/pumpfun/curve_manager.py src/platforms/pumpfun/event_parser.py src/platforms/letsbonk/curve_manager.py src/trading/platform_aware.py src/trading/universal_trader.py src/config_loader.py tests/test_pumpfun_fee_schedule.py tests/test_pumpfun_curve_fees.py tests/test_pumpfun_event_parser_safety.py tests/test_trading_lifecycle_hardening.py tests/test_config_validation.py tests/test_letsbonk_execution_safety.py learning-examples/verify_pump_fee_schedule.py learning-examples/verify_extreme_fast_zero_rpc.py learning-examples/simulate_v2_trades.py` and then run `uv run ruff format` with the same explicit path list.
+Run: `uv run ruff check --fix src/interfaces/core.py src/platforms/pumpfun/fee_schedule.py src/platforms/pumpfun/curve_manager.py src/platforms/pumpfun/event_parser.py src/platforms/letsbonk/curve_manager.py src/trading/platform_aware.py src/trading/universal_trader.py src/config_loader.py tests/test_pumpfun_fee_schedule.py tests/test_pumpfun_curve_fees.py tests/test_pumpfun_event_parser_safety.py tests/test_trading_lifecycle_hardening.py tests/test_config_loader_safety.py tests/test_letsbonk_execution_safety.py learning-examples/verify_pump_fee_schedule.py learning-examples/verify_extreme_fast_zero_rpc.py learning-examples/simulate_v2_trades.py` and then run `uv run ruff format` with the same explicit path list.
 Then run `uv run ruff check --select E,F,I,S` with that same explicit path list.
 Expected: no new diagnostics.
 

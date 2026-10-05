@@ -511,6 +511,7 @@ def test_start_bot_rejects_disabled_config(
 
 def test_start_bot_propagates_fatal_trader_failure(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     config = {
         "name": "fatal-trader",
@@ -538,6 +539,7 @@ def test_start_bot_propagates_fatal_trader_failure(
         async def start(self, *, resume_only: bool = False) -> None:
             raise RuntimeError("listener failed")
 
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(bot_runner, "load_bot_config", lambda _: config)
     monkeypatch.setattr(bot_runner, "setup_logging", lambda _: None)
     monkeypatch.setattr(bot_runner, "print_config_summary", lambda _: None)

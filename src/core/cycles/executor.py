@@ -277,8 +277,8 @@ class CycleExecutor:
             state="prepared",
             receipt_destinations=receipt_destinations,
             quote_mint=str(SOL_PUBKEY),
+            max_session_quote_raw=self._policy.session_quote_cap(SOL_PUBKEY),
             risk_session_id=self._policy.risk_session_id,
-            max_session_quote_raw=self._policy.max_session_quote_raw,
             max_session_fee_lamports=self._policy.max_session_fee_lamports,
             intent_message_hash=message_hash,
         )

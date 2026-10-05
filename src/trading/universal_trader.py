@@ -2706,7 +2706,9 @@ class UniversalTrader:
                 )
                 handled = True
             else:
-                handled = await self._handle_failed_buy(token_info, buy_result)
+                handled = await self._handle_failed_buy(
+                    token_info, buy_result, entry_lesson_id=entry_lesson_id
+                )
             self._pending_recovery_tokens = [
                 pending
                 for pending in self._pending_recovery_tokens
@@ -2881,7 +2883,11 @@ class UniversalTrader:
         self._schedule_position_monitor(token_info, position)
 
     async def _handle_failed_buy(
-        self, token_info: TokenInfo, buy_result: TradeResult
+        self,
+        token_info: TokenInfo,
+        buy_result: TradeResult,
+        *,
+        entry_lesson_id: int | None = None,
     ) -> bool:
         """Keep unknown buys unresolved; clean up only terminal failures."""
         logger.error(f"Failed to buy {token_info.symbol}: {buy_result.error_message}")
@@ -2903,6 +2909,7 @@ class UniversalTrader:
                 "token": token_info,
                 "signature": buy_result.tx_signature,
                 "baseline_raw": buy_result.account_balance_baseline_raw,
+                "entry_lesson_id": entry_lesson_id,
             }
             self._reserved_mints.add(token_key)
             self._write_recovery_journal()
@@ -3051,6 +3058,7 @@ class UniversalTrader:
                             status=outcome.status.value,
                         ),
                         replace_unresolved=True,
+                        entry_lesson_id=record.get("entry_lesson_id"),
                     )
                     self.processed_tokens.add(token_key)
                     self._unresolved_buy_state_changed.set()
@@ -3115,10 +3123,24 @@ class UniversalTrader:
     def _apply_provisional_correction(
         self, row: dict[str, str], outcome: TransactionOutcome
     ) -> None:
-        """Give back state a fork-removed buy never had, or hold the mint."""
+        """Release a fork-removed buy, or escalate every other correction.
+
+        Handled here: a buy that finality reveals as failed or expired, whose
+        position still holds nothing. Deliberately NOT handled here: a
+        reverted-to-success buy, and any sell correction - the sell's position
+        was already removed and its cleanup may already have run, and the
+        cleanup journal is not safely reversible. Those are escalated loudly
+        for manual review instead of guessed at with real tokens.
+        """
         signature = row["signature"]
+        # Only a confirmed buy that finality proves never executed is handled
+        # automatically; every other direction escalates at the bottom.
+        automated = (
+            outcome.status is not TransactionStatus.SUCCESS
+            and row["status"] == "success"
+        )
         for token_key, (token_info, position) in tuple(self._active_positions.items()):
-            if position.position_id != signature:
+            if position.position_id != signature or not automated:
                 continue
             logger.error(
                 "Fork correction: buy %s for %s is %s at finality, not %s;"

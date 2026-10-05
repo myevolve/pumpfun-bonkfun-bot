@@ -687,6 +687,23 @@ def test_finalized_promotes_a_confirmed_outcome_without_replacing_it(
         assert corrected.status is TransactionStatus.REVERTED
         assert corrected.finalized is True
 
+        # A finalized read that cannot see the transaction is absence of
+        # evidence, not a correction: it must not demote a stored success,
+        # or a position holding real tokens would be released on a
+        # visibility gap.
+        _record_submission(ledger, intent="buy-3", signature="sig-3")
+        ledger.record_outcome(
+            TransactionOutcome(
+                TransactionStatus.SUCCESS, "sig-3", slot=42, commitment="confirmed"
+            )
+        )
+        ledger.record_outcome(
+            TransactionOutcome(
+                TransactionStatus.UNKNOWN, "sig-3", commitment="finalized"
+            )
+        )
+        assert ledger.get_outcome("sig-3").status is TransactionStatus.SUCCESS
+
 
 def test_releasing_never_submitted_wire_releases_session_budget(
     tmp_path: Path,

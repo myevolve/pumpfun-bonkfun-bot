@@ -218,9 +218,15 @@ class ExecutionPolicy:
             _validate_nonnegative_int(fee_lamports, "transaction fee")
         except ValueError as exc:
             raise TradeLimitExceeded(str(exc)) from exc
-        quote_cap = self.quote_cap(
-            self.max_trade_quote_raw, quote_mint, "max_trade_quote_raw"
-        )
+        if quote_amount_raw == 0:
+            # A fee-only transaction, such as account cleanup, spends no quote
+            # units: resolving a per-asset cap would block rent recovery under
+            # a policy that names another asset. Fee limits still apply.
+            quote_cap = 0
+        else:
+            quote_cap = self.quote_cap(
+                self.max_trade_quote_raw, quote_mint, "max_trade_quote_raw"
+            )
         if quote_cap is not None and quote_amount_raw > quote_cap:
             raise TradeLimitExceeded(
                 f"trade quote amount {quote_amount_raw} exceeds limit {quote_cap}"

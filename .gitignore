@@ -140,7 +140,7 @@ celerybeat.pid
 # Environments
 .env
 .env.*
-/ENVFILE
+/ENVFILE*
 !.env.example
 .venv
 env/
@@ -219,7 +219,9 @@ learning-examples/token-lifecycles/*.sol
 state/
 
 # Credential twin of .env was protected only by machine-local .git/info/exclude.
-ENVDATA
+# Every variant, not just the exact name: an editor or a copy produces
+# ENVDATA.bak / ENVDATA~, and those are the same credentials.
+ENVDATA*
 
 # Local agent scaffolding and stray tool output; not project source.
 streamlit.txt

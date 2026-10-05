@@ -69,7 +69,7 @@ from trading.universal_trader import (
     UniversalTrader,
 )
 from utils.logger import setup_file_logging
-from utils.paths import state_path
+from utils.paths import STATE_DIR, legacy_cwd_state_conflict, state_path
 
 PROCESS_POLL_INTERVAL_SECONDS = 0.2
 PROCESS_SHUTDOWN_GRACE_SECONDS = 5.0
@@ -401,6 +401,15 @@ async def start_bot(
     cfg = load_bot_config(config_path)
     if not cfg["enabled"]:
         raise RuntimeError(f"Bot '{cfg['name']}' is disabled")
+    legacy_state = legacy_cwd_state_conflict()
+    if legacy_state is not None:
+        raise RuntimeError(  # noqa: TRY003
+            f"A working-directory state tree at {legacy_state} predates "
+            "root-anchored durable state. Its positions, unresolved wires and "
+            "session risk belong to the previous state model: stop the bot, "
+            "reconcile its contents into the anchored state directory "
+            f"({STATE_DIR}), then relaunch. Never rename live WAL files."
+        )
     policy = build_execution_policy(cfg, authorize_live=authorize_live)
     setup_logging(cfg["name"])
     print_config_summary(cfg)

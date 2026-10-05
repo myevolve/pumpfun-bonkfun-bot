@@ -1498,6 +1498,13 @@ class TransactionLedger:
                         )
                     self._connection.commit()
                     return
+                if outcome.status is TransactionStatus.UNKNOWN:
+                    # Absence of evidence is not a correction: a read that
+                    # cannot see the transaction must never demote a stored
+                    # terminal result, or a position holding real tokens would
+                    # be released on a visibility gap.
+                    self._connection.commit()
+                    return
                 if (
                     existing_status is not TransactionStatus.UNKNOWN
                     and _commitment_rank(existing["commitment"])

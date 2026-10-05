@@ -20,3 +20,24 @@ STATE_DIR = REPO_ROOT / ".state"
 def state_path(*parts: str) -> Path:
     """Return a path under the absolute state directory."""
     return STATE_DIR.joinpath(*parts)
+
+
+def legacy_cwd_state_conflict(cwd: Path | None = None) -> Path | None:
+    """Return a cwd-relative ``.state`` that predates root anchoring, if any.
+
+    Durable state used to live in ``.state`` relative to the working
+    directory. A deployment started from another directory that upgrades to
+    this anchoring would otherwise silently open a fresh, empty state tree
+    and lose open positions, unresolved wires and cumulative session risk.
+    Callers must fail closed on the returned path: its contents belong to the
+    previous state model and must be migrated deliberately, never auto-read.
+    """
+    cwd = Path.cwd() if cwd is None else Path(cwd)
+    candidate = (cwd / ".state").resolve()
+    if candidate == STATE_DIR.resolve():
+        return None
+    if not candidate.exists():
+        return None
+    if not any(candidate.iterdir()):
+        return None
+    return candidate
