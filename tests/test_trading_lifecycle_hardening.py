@@ -23,7 +23,7 @@ from core.client import (
 )
 from core.execution_policy import ExecutionBlocked, ExecutionMode, ExecutionPolicy
 from core.pubkeys import USDC_MINT, SystemAddresses
-from core.transaction_ledger import EvidencePersistenceError
+from core.transaction_ledger import EvidencePersistenceError, TransactionLedger
 from core.transaction_state import TransactionOutcome
 from interfaces.core import Platform, TokenInfo
 from monitoring.trade_flow import FlowRules, FlowSignal, TradeQueue
@@ -2347,7 +2347,8 @@ async def test_unresolved_buy_recovery_uses_exact_durable_receipt_destinations()
         get_active_submission_record=lambda intent_id: SimpleNamespace(
             signature="buy-signature",
             fee_lamports=41_000,
-        )
+        ),
+        list_provisional_outcomes=lambda: [],
     )
     trader._handle_successful_buy = AsyncMock()
     trader.processed_tokens = set()
@@ -3759,3 +3760,55 @@ async def test_emergency_exit_reconciles_pending_signature_without_resubmitting(
     assert str(token.mint) not in trader._active_positions
     trader.seller.execute.assert_not_awaited()
     cleanup_after_sell.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_provisional_buy_is_released_when_a_fork_drops_it(tmp_path) -> None:
+    """A buy confirmed on a supermajority vote can still be dropped; when
+    finality says so, the position that never received tokens must go back and
+    the mint must stay blocked."""
+    trader = _lifecycle_trader(yolo_mode=False)
+    ledger = TransactionLedger(tmp_path / "ledger.sqlite3")
+    wallet = Pubkey.new_unique()
+    signature = "sig-dropped"
+    trader.transaction_ledger = ledger
+    trader.wallet = SimpleNamespace(pubkey=wallet)
+    trader._record_trade_evidence = lambda *args, **kwargs: None
+    ledger.record_intent("buy-intent", str(wallet), 1, 1, "a" * 64)
+    ledger.record_submission("buy-intent", signature, "hash", 100)
+    ledger.record_outcome(
+        TransactionOutcome(
+            TransactionStatus.SUCCESS, signature, slot=42, commitment="confirmed"
+        )
+    )
+
+    token = _token(Platform.LETS_BONK)
+    position = Position.create_from_buy_result(
+        mint=token.mint,
+        symbol=token.symbol,
+        entry_price=0.25,
+        quantity=2.0,
+        quantity_raw=2_000_000,
+        quote_amount_raw=10_000_000,
+        buy_fee_lamports=5_000,
+        position_id=signature,
+    )
+    trader._active_positions[str(token.mint)] = (token, position)
+    trader._reserved_mints.add(str(token.mint))
+
+    async def finalized(sig, *, commitment="confirmed", **kwargs):
+        dropped = TransactionOutcome(
+            TransactionStatus.REVERTED, sig, slot=42, commitment=commitment
+        )
+        ledger.record_outcome(dropped)
+        return dropped
+
+    trader.solana_client.confirm_transaction_outcome = finalized
+
+    await trader._reconcile_provisional_outcomes()
+
+    assert str(token.mint) not in trader._active_positions
+    assert str(token.mint) in trader._reserved_mints
+    assert position.is_active is False
+    assert ledger.get_outcome(signature).status is TransactionStatus.REVERTED
+    ledger.close()

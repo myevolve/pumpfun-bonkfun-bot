@@ -286,6 +286,17 @@ with `BuybackFeeRecipientMissing` (6062) printed as confirmed buys.
   refuses a wire whose `risk_session_id` differs from the authorized session or
   whose session already exceeds its caps. Restarting into a new `risk_session_id`
   must never silently transmit an old session's reserved wire.
+- **Confirmed is not finalized.** Every stored outcome carries the commitment
+  it was observed at, and `--status` lists `provisional_outcomes` beside
+  `active_submissions` — a trade that landed on a supermajority vote but is not
+  yet locked out can still be dropped by a fork. A finalized observation may
+  supersede a weaker confirmation (promotion, or correction when the fork
+  dropped it); a weaker one never overwrites a stronger. The unresolved-buy
+  loop re-reads provisional signatures at `finalized` on its existing tick
+  (no extra RPC), and a corrected buy releases the position that never received
+  tokens while keeping the mint blocked. A correction arriving after the
+  position was already released is logged for manual review, not auto-restored:
+  the cleanup journal is not safely reversible.
 
 ### Verifying the tp/sl exit path (issue #189)
 

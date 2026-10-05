@@ -31,6 +31,7 @@ from cleanup.modes import (
 from core.client import (
     RpcUnavailableError,
     SolanaClient,
+    TransactionOutcome,
     TransactionStatus,
     TransactionSubmissionUnknown,
     estimate_transaction_fee_lamports,
@@ -3066,6 +3067,7 @@ class UniversalTrader:
                         checks,
                     )
                     raise
+            await self._reconcile_provisional_outcomes()
             try:
                 await asyncio.wait_for(
                     self._shutdown_event.wait(),
@@ -3073,6 +3075,86 @@ class UniversalTrader:
                 )
             except TimeoutError:
                 pass
+
+    async def _reconcile_provisional_outcomes(self) -> None:
+        """Re-read confirmed-only outcomes at finality and apply a correction.
+
+        A finalized answer may supersede a confirmation, and that is the only
+        moment a trade a fork dropped can still be corrected. Runs on the
+        unresolved-buy tick, so an idle session costs one local ledger read
+        and no RPC at all.
+        """
+        ledger = getattr(self, "transaction_ledger", None)
+        wallet = getattr(self, "wallet", None)
+        if ledger is None or wallet is None:
+            return
+        provisional = await asyncio.to_thread(
+            ledger.list_provisional_outcomes,
+            str(wallet.pubkey),
+        )
+        for row in provisional:
+            signature = row["signature"]
+            try:
+                await self.solana_client.confirm_transaction_outcome(
+                    signature, commitment="finalized"
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - one signature must not stop the rest
+                logger.warning(
+                    "Provisional re-read failed for %s: %s", signature[:16], exc
+                )
+                continue
+            corrected = await asyncio.to_thread(
+                self.transaction_ledger.get_outcome, signature
+            )
+            if corrected is None or corrected.status.value == row["status"]:
+                continue
+            self._apply_provisional_correction(row, corrected)
+
+    def _apply_provisional_correction(
+        self, row: dict[str, str], outcome: TransactionOutcome
+    ) -> None:
+        """Give back state a fork-removed buy never had, or hold the mint."""
+        signature = row["signature"]
+        for token_key, (token_info, position) in tuple(self._active_positions.items()):
+            if position.position_id != signature:
+                continue
+            logger.error(
+                "Fork correction: buy %s for %s is %s at finality, not %s;"
+                " releasing the position that never received tokens",
+                signature[:16],
+                token_key,
+                outcome.status.value,
+                row["status"],
+            )
+            self._record_trade_evidence(
+                "chain_outcome",
+                token_info,
+                position=position,
+                action="buy",
+                signature=signature,
+                status=outcome.status.value,
+                slot=outcome.slot,
+                reason="fork_correction",
+            )
+            position.is_active = False
+            self._active_positions.pop(token_key, None)
+            # The mint stays reserved and processed: it was traded, and
+            # re-entering a coin whose buy never landed is exactly the
+            # duplicate this pass exists to prevent.
+            self._reserved_mints.add(token_key)
+            self.processed_tokens.add(token_key)
+            self._write_recovery_journal()
+            return
+        logger.error(
+            "Fork correction: %s was recorded as %s at %s but is %s at finality"
+            " and its position was already released - manual review required",
+            signature,
+            row["status"],
+            row["commitment"] or "no recorded commitment",
+            outcome.status.value,
+        )
 
     @staticmethod
     def _log_still_unresolved(token_key: str, checks: int, state: str) -> None:
