@@ -508,7 +508,12 @@ mean strictly positive at X=20 (+8.8% [+4.5, +13.3]), X=40 (+13.9% [+8.0,
 +19.6]) and X=50 (+14.0% [+8.8, +19.5]) — within-window sampling noise does
 not explain the edge; the remaining caveat is that one tape is one draw from
 the era. 17/22 hourly windows positive at X=40. The whale
-beats a +1-slot buy in ~35-40% of crossings (free skip). The recorded corpus
+beats a +1-slot buy in ~35-40% of crossings (free skip). Replaying the tape
+through a 2s poller with +2s/+5s discovery lag (the shadow's real granularity)
+costs only 0.5-3.3pp: test means stay positive at every X (X=40 +13.4%, X=20
++7.9%, X=50 +11.4%, both lag brackets). The shadow's cold-side (non-graduate)
+rows are expected negative; the pooled mean flips on the graduation cohort.
+The recorded corpus
 era (Jun-Jul) had no such pattern — the June milestone result (-10-13%,
 curve-only exits) and this result are both era statements, not contradictions.
 
