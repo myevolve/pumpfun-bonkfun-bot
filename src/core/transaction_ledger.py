@@ -916,10 +916,13 @@ class TransactionLedger:
         ]
 
     def list_provisional_outcomes(self, signer: str) -> list[dict[str, str]]:
-        """Return terminal outcomes for a signer that are not yet finalized.
+        """Return terminal outcomes for a signer not yet known to be finalized.
 
-        These trades landed on a supermajority vote but can still be dropped
-        by a fork, so an operator has to see them next to unresolved work.
+        Two populations land here. An outcome recorded at ``confirmed`` is
+        provisional: a fork can still drop it. An outcome recorded before the
+        commitment column existed has *unknown* strength - it is reported as
+        ``unclassified``, which is not a fork-risk claim. The first finalized
+        re-read promotes either one and it leaves this list.
         """
         if not signer:
             raise ValueError("signer is required")
@@ -942,7 +945,7 @@ class TransactionLedger:
                 "intent_id": str(row["intent_id"]),
                 "signature": str(row["signature"]),
                 "status": str(row["status"]),
-                "commitment": str(row["commitment"] or ""),
+                "commitment": str(row["commitment"] or "unclassified"),
                 "slot": "" if row["slot"] is None else str(row["slot"]),
             }
             for row in rows

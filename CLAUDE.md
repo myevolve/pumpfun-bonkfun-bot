@@ -298,6 +298,11 @@ with `BuybackFeeRecipientMissing` (6062) printed as confirmed buys.
   position was already released is logged for manual review, not auto-restored:
   the cleanup journal is not safely reversible.
 
+  Outcomes recorded before the commitment column existed carry **no** recorded
+  strength, not a weak one: `--status` reports those as `unclassified`, and
+  the first finalized re-read promotes them and clears them from the list. Do
+  not read a populated `provisional_outcomes` list as 25 forked trades.
+
 ### Verifying the tp/sl exit path (issue #189)
 
 ```bash
