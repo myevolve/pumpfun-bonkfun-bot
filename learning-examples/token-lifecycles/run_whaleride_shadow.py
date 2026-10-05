@@ -260,7 +260,12 @@ class Shadow:
         )
         if len(raw) < 83 or any(raw[i] not in (0, 1) for i in (48, 81, 82)):
             raise ValueError("noncanonical_curve_flags")
-        state = PumpFunCurveManager._decode_curve_state_with_idl(self.decoder, raw)
+        try:
+            state = PumpFunCurveManager._decode_curve_state_with_idl(self.decoder, raw)
+        except ValueError as exc:
+            if "quote mint" in str(exc):
+                raise ValueError("non_sol_quote") from exc
+            raise
         if state["quote_mint"] != WSOL_MINT:
             raise ValueError("non_sol_quote")
         return state
