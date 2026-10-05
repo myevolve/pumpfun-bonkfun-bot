@@ -74,9 +74,17 @@ def load_watch_set() -> dict:
         return {}
     return json.loads(WATCH_PATH.read_text())
 
+DETECTED_TOKENS_LIMIT = 30
+
+
 
 @st.cache_data(ttl=5)
-def load_trade_files() -> list[dict]:
+def load_trade_files(limit: int = DETECTED_TOKENS_LIMIT) -> list[dict]:
+    """Newest detected-token records, read only as far as the tab renders.
+
+    The trades directory holds one file per detection; reading every one to
+    render the newest 30 was by far the dashboard's most expensive loader.
+    """
     if not TRADES_DIR.exists():
         return []
     trades = []
@@ -90,6 +98,8 @@ def load_trade_files() -> list[dict]:
             trades.append(data)
         except (json.JSONDecodeError, KeyError):
             pass
+        if len(trades) >= limit:
+            break
     return trades
 
 
@@ -942,7 +952,7 @@ with tab_trades:
     if not trades:
         st.info("No trade files found in trades/")
     else:
-        for t in trades[:30]:
+        for t in trades[:DETECTED_TOKENS_LIMIT]:
             name = t.get("name", "?")
             symbol = t.get("symbol", "?")
             mint = t.get("mint", "?")
