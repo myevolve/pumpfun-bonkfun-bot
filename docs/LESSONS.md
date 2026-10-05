@@ -479,3 +479,49 @@ both prices used the invalid real-inventory ratio. Its claims that losses were
 structural and 60 seconds was optimal are unsupported. The new paired diagnostic
 above answers coverage and gross price-mark questions only; a profitable exit
 policy still requires executable, costed, fresh held-out evidence.
+
+## Whale-ride graduation exit (2026-10-05, single tape, not promoted)
+
+Offline re-examination of `lifecycles_24h.jsonl` (24,015 coins, Sep 4-5 2026)
+found the first held-out-positive policy family in the record — and the reason
+every earlier milestone backtest disagreed with it. The whale sweep that
+completes a curve makes pump.fun seed the PumpSwap pool at ~79% of the curve's
+final marginal price (`pool_quote ≈ 0.79 × raised SOL`,
+`pool_base = raised / final_marginal_price`, verified on the tape: CAT crossed
+X=20 at 1.25e-4, pool opened 3.26e-4 = 2.61×). A mid-curve entrant who holds
+through graduation and sells into the pool captures the sweep; every
+curve-only exit either dumps before it or cannot exit at all.
+
+`learning-examples/token-lifecycles/simulate_graduation_exit.py` reproduces
+it. On that tape, entry at the X-SOL crossing (+1-slot landing, skipped when
+graduation beats the buy), exit at pool+2 slots:
+
+| X SOL | hold | test mean | win | test p90 |
+|---|---|---|---|---|
+| 30 | 5 | +10.8% | 23% | +108% |
+| 40 | 5 | +13.9% | 27% | +110% |
+| 50 | 5 | +14.0% | 36% | +75% |
+| 60 | 5 | +8.9% | 49% | +41% |
+
+Train/test halves agree; 17/22 hourly windows positive at X=40. The whale
+beats a +1-slot buy in ~35-40% of crossings (free skip). The recorded corpus
+era (Jun-Jul) had no such pattern — the June milestone result (-10-13%,
+curve-only exits) and this result are both era statements, not contradictions.
+
+Known biases, all optimistic: one 24-hour window; failed transactions are
+excluded from tapes (our reverting buys/sells would add fees, not trades);
+pool+2 assumes the exit wins the race against the first sniper wave. The
+phantom that inflated the first pass — `sell_value` pricing a sale into a
+completed curve's virtual remainder — is exactly what this policy avoids:
+never price a post-buyout curve state as a curve sale. Confirmation needs a
+fresh recording (London runner, provider-only projection; acquisition is a
+user decision). The bot-side capture path exists: TradeEvent-gated crossing
+entry with zero-RPC build + TPU-QUIC (1-2 slots), and #237's graduated-market
+seller for the exit. Shadow-mode first, `enabled: false` until then.
+
+`run_whaleride_shadow.py` collects the forward test: PumpPortal discovery plus
+a paced public-RPC trace of every tracked curve, with pool and vault rows on
+graduation (`--report` scores it with the same cost model). Traces land in
+`.state/whaleride-shadow/shadow.jsonl`; the traced entry is the first observed
+state at or after the crossing, so shadow results are conservative on entry
+price. Zero credentials, zero signing; SIGINT stops it cleanly.
