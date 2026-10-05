@@ -503,7 +503,11 @@ graduation beats the buy), exit at pool+2 slots:
 | 50 | 5 | +14.0% | 36% | +75% |
 | 60 | 5 | +8.9% | 49% | +41% |
 
-Train/test halves agree; 17/22 hourly windows positive at X=40. The whale
+Train/test halves agree; 2,000-draw bootstrap CIs on the held-out half put the
+mean strictly positive at X=20 (+8.8% [+4.5, +13.3]), X=40 (+13.9% [+8.0,
++19.6]) and X=50 (+14.0% [+8.8, +19.5]) — within-window sampling noise does
+not explain the edge; the remaining caveat is that one tape is one draw from
+the era. 17/22 hourly windows positive at X=40. The whale
 beats a +1-slot buy in ~35-40% of crossings (free skip). The recorded corpus
 era (Jun-Jul) had no such pattern — the June milestone result (-10-13%,
 curve-only exits) and this result are both era statements, not contradictions.
