@@ -339,6 +339,33 @@ def test_pump_live_mode_is_accepted_for_runtime_fee_attestation() -> None:
     assert policy.mode is ExecutionMode.LIVE
 
 
+def test_per_mint_quote_caps_validate_per_asset() -> None:
+    """A cap may differ per quote asset, and each asset is checked on its own."""
+    config = minimal_config()
+    config["execution"] = {
+        "mode": "live",
+        "expected_wallet": "11111111111111111111111111111111",
+        "max_trade_quote_raw": {"sol": 10_000_000, "usdc": 5_000},
+        "max_total_fee_lamports": 50_000,
+        "risk_session_id": "per-mint",
+        "max_session_quote_raw": {"sol": 20_000_000, "usdc": 10_000},
+        "max_session_fee_lamports": 1_000_000,
+    }
+
+    validate_config(config)
+    policy = ExecutionPolicy.from_config(config)
+    assert policy.quote_cap(policy.max_trade_quote_raw, "usdc", "cap") == 5_000
+    assert policy.quote_cap(policy.max_trade_quote_raw, "sol", "cap") == 10_000_000
+
+    config["execution"]["max_trade_quote_raw"] = {"sol": -1}
+    with pytest.raises(ValueError, match="non-negative integer"):
+        validate_config(config)
+
+    config["execution"]["max_trade_quote_raw"] = {"not-a-coin": 5}
+    with pytest.raises(ValueError):
+        validate_config(config)
+
+
 def test_loaded_config_is_dry_run_without_explicit_execution_mode(
     tmp_path: Path,
 ) -> None:

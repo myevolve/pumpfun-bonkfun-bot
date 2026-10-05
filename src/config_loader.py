@@ -196,11 +196,13 @@ INTEGER_RANGES: dict[str, tuple[int | None, int | None, bool, bool]] = {
     "compute_units.sell": (1, None, True, True),
     "compute_units.account_data_size": (1, None, True, True),
     "retries.max_attempts": (1, 1, True, True),
-    "execution.max_trade_quote_raw": (0, None, True, True),
     "execution.max_total_fee_lamports": (0, None, True, True),
-    "execution.max_session_quote_raw": (0, None, True, True),
     "execution.max_session_fee_lamports": (0, None, True, True),
 }
+
+# Quote caps are per-asset capable (SOL 9 decimals, USDC 6), so they accept
+# either one integer or a mapping keyed by quote mint or alias.
+QUOTE_CAP_FIELDS = ("execution.max_trade_quote_raw", "execution.max_session_quote_raw")
 
 NUMBER_RANGES: dict[str, tuple[float | None, float | None, bool, bool]] = {
     "trade.buy_amount": (0, None, False, True),
@@ -476,6 +478,21 @@ def validate_config(config: dict[str, Any]) -> None:
         if isinstance(value, bool) or not isinstance(value, int):
             raise ValueError(f"{path} must be an integer")
         _validate_range(path, value, limits)
+
+    from core.pubkeys import resolve_quote_mint
+
+    for path in QUOTE_CAP_FIELDS:
+        present, value = _optional_nested_value(config, path)
+        if not present:
+            continue
+        if isinstance(value, bool) or not isinstance(value, int | dict):
+            raise ValueError(f"{path} must be an integer or a per-mint mapping")
+        caps = value.items() if isinstance(value, dict) else ((None, value),)
+        for mint, cap in caps:
+            if isinstance(cap, bool) or not isinstance(cap, int) or cap < 0:
+                raise ValueError(f"{path}[{mint}] must be a non-negative integer")
+            if mint is not None:
+                resolve_quote_mint(mint)
 
     for path, limits in NUMBER_RANGES.items():
         present, value = _optional_nested_value(config, path)

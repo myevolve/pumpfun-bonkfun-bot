@@ -519,6 +519,13 @@ interface pump.fun maintains.
   means updating `PLATFORM_LISTENER_COMPATIBILITY` there too.
 - Bots with `separate_process: true` run in their own process. One log file per
   bot instance.
+- **Quote caps are per quote asset.** `execution.max_trade_quote_raw` and
+  `execution.max_session_quote_raw` accept either one integer (the cap for
+  every quote asset, unchanged meaning) or a mapping keyed by `sol`, `usdc`
+  or a raw mint: `{"sol": 10000000, "usdc": 5000}`. SOL has 9 decimals and
+  USDC 6, so one raw number cannot express "0.01 SOL per trade, 5 USDC per
+  trade" — and a mapping that does not name an asset **blocks** it rather than
+  leaving it uncapped. Fee caps stay scalar: lamports have one scale.
 - **Durable state is anchored to the project root, not the working directory.**
   Every ledger, position journal, cleanup journal, lesson DB and UI config
   path resolves through `utils.paths.state_path()` (`.state` under the

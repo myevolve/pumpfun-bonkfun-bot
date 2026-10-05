@@ -12,8 +12,33 @@ from math import isfinite
 from typing import Any
 
 from solders.pubkey import Pubkey
+from core.pubkeys import normalize_quote_mint, resolve_quote_mint
 
 _MAX_RISK_SESSION_ID_LENGTH = 128
+
+QuoteCaps = int | dict[str, int]
+
+
+def _normalize_quote_caps(value: object, field_name: str) -> QuoteCaps | None:
+    """Accept one cap for every quote asset, or a cap per quote mint.
+
+    SOL has 9 decimals and USDC 6, so a single raw-unit cap cannot express
+    "0.01 SOL per trade, 5 USDC per trade" - the scalar is kept as the
+    every-asset form so existing configurations keep their exact meaning.
+    """
+    if value is None or isinstance(value, int) and not isinstance(value, bool):
+        if value is not None:
+            _validate_nonnegative_int(value, field_name)
+        return value
+    if isinstance(value, dict):
+        if not value:
+            raise ValueError(f"{field_name} must not be empty when given as a mapping")
+        normalized: dict[str, int] = {}
+        for mint, cap in value.items():
+            _validate_nonnegative_int(cap, f"{field_name}[{mint}]")
+            normalized[str(resolve_quote_mint(mint))] = cap
+        return normalized
+    raise ValueError(f"{field_name} must be an integer or a per-mint mapping")
 
 
 class ExecutionMode(StrEnum):
@@ -42,10 +67,10 @@ class ExecutionPolicy:
     mode: ExecutionMode = ExecutionMode.DRY_RUN
     live_authorized: bool = False
     expected_wallet: str | None = None
-    max_trade_quote_raw: int | None = None
+    max_trade_quote_raw: QuoteCaps | None = None
     max_total_fee_lamports: int | None = None
     risk_session_id: str | None = None
-    max_session_quote_raw: int | None = None
+    max_session_quote_raw: QuoteCaps | None = None
     max_session_fee_lamports: int | None = None
     allow_skip_preflight: bool = False
     allow_force_burn: bool = False
@@ -67,8 +92,11 @@ class ExecutionPolicy:
             raise ValueError("live_authorized requires execution mode 'live'")
         for name, value in (
             ("max_trade_quote_raw", self.max_trade_quote_raw),
-            ("max_total_fee_lamports", self.max_total_fee_lamports),
             ("max_session_quote_raw", self.max_session_quote_raw),
+        ):
+            object.__setattr__(self, name, _normalize_quote_caps(value, name))
+        for name, value in (
+            ("max_total_fee_lamports", self.max_total_fee_lamports),
             ("max_session_fee_lamports", self.max_session_fee_lamports),
         ):
             if value is not None:
@@ -148,20 +176,54 @@ class ExecutionPolicy:
                 f"Configured wallet does not match signer wallet ({actual})"
             )
 
-    def validate_budgets(self, quote_amount_raw: int, fee_lamports: int) -> None:
+    def quote_cap(
+        self,
+        caps: QuoteCaps | None,
+        quote_mint: Pubkey | str | None,
+        name: str,
+    ) -> int | None:
+        """Resolve the cap that applies to one quote asset.
+
+        A per-mint mapping fails closed for an asset it does not name: a cap
+        that silently does not apply is worse than no mapping at all.
+        """
+        if caps is None:
+            return None
+        if isinstance(caps, int):
+            return caps
+        # Native SOL (None) is the same asset as wrapped SOL, and aliases such
+        # as "usdc" name the same mint as its base58 address.
+        mint = (
+            normalize_quote_mint(None)
+            if quote_mint is None
+            else resolve_quote_mint(quote_mint)
+        )
+        cap = caps.get(str(mint))
+        if cap is None:
+            raise ExecutionBlocked(  # noqa: TRY003
+                f"{name} does not cover quote asset {mint}"
+            )
+        return cap
+
+    def validate_budgets(
+        self,
+        quote_amount_raw: int,
+        fee_lamports: int,
+        *,
+        quote_mint: Pubkey | str | None = None,
+    ) -> None:
         """Enforce per-trade quote and total-fee budgets."""
         try:
             _validate_nonnegative_int(quote_amount_raw, "trade quote amount")
             _validate_nonnegative_int(fee_lamports, "transaction fee")
         except ValueError as exc:
             raise TradeLimitExceeded(str(exc)) from exc
-        if (
-            self.max_trade_quote_raw is not None
-            and quote_amount_raw > self.max_trade_quote_raw
-        ):
+        quote_cap = self.quote_cap(
+            self.max_trade_quote_raw, quote_mint, "max_trade_quote_raw"
+        )
+        if quote_cap is not None and quote_amount_raw > quote_cap:
             raise TradeLimitExceeded(
-                f"trade quote amount {quote_amount_raw} exceeds "
-                f"limit {self.max_trade_quote_raw}"
+                f"trade quote amount {quote_amount_raw} exceeds limit {quote_cap}"
             )
         if (
             self.max_total_fee_lamports is not None
@@ -172,8 +234,8 @@ class ExecutionPolicy:
                 f"limit {self.max_total_fee_lamports}"
             )
 
-    def session_risk_limits(self) -> tuple[str, int, int]:
-        """Return complete cumulative limits for an authorized live policy."""
+    def session_risk_limits(self) -> tuple[str, int]:
+        """Return the session id and its cumulative fee limit."""
         if (
             self.risk_session_id is None
             or self.max_session_quote_raw is None
@@ -184,9 +246,20 @@ class ExecutionPolicy:
             )
         return (
             self.risk_session_id,
-            self.max_session_quote_raw,
             self.max_session_fee_lamports,
         )
+
+    def session_quote_cap(self, quote_mint: Pubkey | str | None) -> int:
+        """Return the cumulative quote cap that applies to one quote asset."""
+        self.session_risk_limits()
+        cap = self.quote_cap(
+            self.max_session_quote_raw, quote_mint, "max_session_quote_raw"
+        )
+        if cap is None:
+            raise ExecutionBlocked(  # noqa: TRY003
+                "Persistent session risk limits are required for live execution"
+            )
+        return cap
 
     def validate_preflight(self, skip_preflight: bool) -> None:
         """Prevent callers from bypassing simulation without a policy grant."""

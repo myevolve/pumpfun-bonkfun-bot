@@ -32,7 +32,7 @@ from spl.token.instructions import get_associated_token_address
 from core import client as client_module
 from core.client import JsonRpcError, RpcUnavailableError, SolanaClient
 from core.execution_policy import ExecutionBlocked, ExecutionPolicy, TradeLimitExceeded
-from core.pubkeys import WSOL_MINT
+from core.pubkeys import USDC_MINT, WSOL_MINT
 from core.transaction_ledger import EvidencePersistenceError, TransactionLedger
 from core.transaction_state import TransactionOutcome, TransactionStatus
 
@@ -2359,3 +2359,51 @@ def test_token_account_creation_and_closure_preserve_delta_direction() -> None:
         )
         is None
     )
+
+
+def test_per_mint_quote_caps_bound_each_asset_independently() -> None:
+    """SOL has 9 decimals and USDC 6: one raw cap cannot express both limits."""
+    policy = ExecutionPolicy(
+        mode="live",
+        live_authorized=True,
+        expected_wallet=str(Pubkey.new_unique()),
+        max_trade_quote_raw={"sol": 10_000_000, "usdc": 5_000},
+        max_session_quote_raw={"sol": 20_000_000, "usdc": 10_000},
+        max_total_fee_lamports=100_000,
+        max_session_fee_lamports=1_000_000,
+        risk_session_id="per-mint",
+    )
+
+    policy.validate_budgets(10_000_000, 5_000, quote_mint=WSOL_MINT)
+    policy.validate_budgets(5_000, 5_000, quote_mint=USDC_MINT)
+    with pytest.raises(TradeLimitExceeded):
+        policy.validate_budgets(5_001, 5_000, quote_mint=USDC_MINT)
+    with pytest.raises(TradeLimitExceeded):
+        policy.validate_budgets(10_000_001, 5_000, quote_mint=WSOL_MINT)
+
+    assert policy.session_quote_cap(USDC_MINT) == 10_000
+    assert policy.session_quote_cap(WSOL_MINT) == 20_000_000
+
+    # An asset the mapping does not name is blocked, not silently uncapped.
+    with pytest.raises(ExecutionBlocked):
+        policy.validate_budgets(1, 5_000, quote_mint=Pubkey.new_unique())
+
+
+def test_scalar_quote_cap_still_covers_every_asset() -> None:
+    """A single cap keeps its meaning: one limit for all quote assets."""
+    policy = ExecutionPolicy(
+        mode="live",
+        live_authorized=True,
+        expected_wallet=str(Pubkey.new_unique()),
+        max_trade_quote_raw=1_000_000,
+        max_session_quote_raw=2_000_000,
+        max_total_fee_lamports=100_000,
+        max_session_fee_lamports=1_000_000,
+        risk_session_id="scalar",
+    )
+
+    policy.validate_budgets(1_000_000, 5_000, quote_mint=USDC_MINT)
+    policy.validate_budgets(1_000_000, 5_000, quote_mint=WSOL_MINT)
+    with pytest.raises(TradeLimitExceeded):
+        policy.validate_budgets(1_000_001, 5_000, quote_mint=USDC_MINT)
+    assert policy.session_quote_cap(USDC_MINT) == 2_000_000

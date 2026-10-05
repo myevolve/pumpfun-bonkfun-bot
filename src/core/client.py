@@ -654,14 +654,17 @@ class SolanaClient:
         self.execution_policy.validate_budgets(
             record.quote_amount_raw,
             record.fee_lamports,
+            quote_mint=record.quote_mint,
         )
         # This process transmits the wire, so it must count against the risk
         # session authorized right now, not the one that reserved it.
         (
             risk_session_id,
-            max_session_quote_raw,
             max_session_fee_lamports,
         ) = self.execution_policy.session_risk_limits()
+        max_session_quote_raw = self.execution_policy.session_quote_cap(
+            record.quote_mint
+        )
         if record.risk_session_id != risk_session_id:
             raise ExecutionBlocked(  # noqa: TRY003
                 "Prepared transaction belongs to risk session "
@@ -996,14 +999,18 @@ class SolanaClient:
         normalized_quote_mint = normalize_quote_mint(quote_mint)
         validated_quote_amount = quote_amount_raw
         if fee_lamports is not None:
-            policy.validate_budgets(validated_quote_amount, fee_lamports)
+            policy.validate_budgets(
+                validated_quote_amount, fee_lamports, quote_mint=quote_mint
+            )
         fee_lamports = max(fee_lamports or 0, estimated_fee)
-        policy.validate_budgets(validated_quote_amount, fee_lamports)
+        policy.validate_budgets(
+            validated_quote_amount, fee_lamports, quote_mint=quote_mint
+        )
         (
             risk_session_id,
-            max_session_quote_raw,
             max_session_fee_lamports,
         ) = policy.session_risk_limits()
+        max_session_quote_raw = policy.session_quote_cap(normalized_quote_mint)
 
         logger.info(
             f"Priority fee in microlamports: {priority_fee if priority_fee else 0}"

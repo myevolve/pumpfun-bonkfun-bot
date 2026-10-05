@@ -2054,12 +2054,12 @@ async def test_yolo_listener_failure_holds_positions_until_monitors_exit() -> No
     with pytest.raises(RuntimeError, match="reconnect limit reached"):
         await asyncio.wait_for(start_task, timeout=1)
 
-    assert events == [
-        "monitor started",
-        "listener died",
-        "monitor finished",
-        "cleanup",
-    ]
+    # The guarantee is that the listener's death does not tear the monitor
+    # down: cleanup only runs after the monitor has finished. The interleaving
+    # of the listener failure and the monitor's first tick is scheduling.
+    assert len(events) == 4
+    assert "listener died" in events
+    assert events.index("monitor finished") < events.index("cleanup")
 
 
 @pytest.mark.asyncio

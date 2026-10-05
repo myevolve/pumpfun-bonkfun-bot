@@ -160,9 +160,7 @@ def read_bot_status(  # noqa: C901, PLR0912, PLR0915
             key=lambda item: item["mint"],
         )
     if policy.mode is ExecutionMode.LIVE:
-        risk_session_id, max_session_quote_raw, max_session_fee_lamports = (
-            policy.session_risk_limits()
-        )
+        risk_session_id, max_session_fee_lamports = policy.session_risk_limits()
         risk_totals = SessionRiskTotals({}, 0, 0)
         if ledger_path.exists():
             with TransactionLedger(ledger_path) as ledger:
@@ -179,9 +177,13 @@ def read_bot_status(  # noqa: C901, PLR0912, PLR0915
         base_status["risk_session"] = {
             "id": risk_session_id,
             "reserved_quote_raw_by_mint": risk_totals.quote_amount_raw_by_mint,
-            "max_quote_raw_per_mint": max_session_quote_raw,
+            "max_quote_raw_configured": policy.max_session_quote_raw,
+            "max_quote_raw_by_mint": {
+                mint: policy.session_quote_cap(mint)
+                for mint in risk_totals.quote_amount_raw_by_mint
+            },
             "remaining_quote_raw_by_mint": {
-                mint: max(0, max_session_quote_raw - amount)
+                mint: max(0, policy.session_quote_cap(mint) - amount)
                 for mint, amount in risk_totals.quote_amount_raw_by_mint.items()
             },
             "reserved_fee_lamports": risk_totals.fee_lamports,
@@ -626,7 +628,7 @@ async def run_live_preflight(  # noqa: C901, PLR0912, PLR0915
         if not isinstance(risk_session, dict):
             raise TypeError("Status returned invalid session-risk data")
         reserved_fees = int(risk_session["reserved_fee_lamports"])
-        _, max_session_quote, max_session_fees = policy.session_risk_limits()
+        _, max_session_fees = policy.session_risk_limits()
         max_transaction_fees = policy.max_total_fee_lamports
         max_trade_quote = policy.max_trade_quote_raw
         if max_transaction_fees is None or max_trade_quote is None:
@@ -697,14 +699,27 @@ async def run_live_preflight(  # noqa: C901, PLR0912, PLR0915
             for mint, required_raw in quote_budgets.items():
                 mint_text = str(mint)
                 reserved_raw = int(reserved_by_mint.get(mint_text, 0))
-                remaining_raw = max(0, max_session_quote - reserved_raw)
+                try:
+                    per_trade_limit = policy.quote_cap(
+                        policy.max_trade_quote_raw, mint, "max_trade_quote_raw"
+                    )
+                    session_limit = policy.session_quote_cap(mint)
+                except ExecutionBlocked as exc:
+                    quote_budget_ok = False
+                    quote_budget_details[mint_text] = {
+                        "required_raw": required_raw,
+                        "ok": False,
+                        "error": str(exc),
+                    }
+                    continue
+                remaining_raw = max(0, session_limit - reserved_raw)
                 mint_ok = (
-                    required_raw <= max_trade_quote and required_raw <= remaining_raw
+                    required_raw <= per_trade_limit and required_raw <= remaining_raw
                 )
                 quote_budget_ok = quote_budget_ok and mint_ok
                 quote_budget_details[mint_text] = {
                     "required_raw": required_raw,
-                    "per_trade_limit_raw": max_trade_quote,
+                    "per_trade_limit_raw": per_trade_limit,
                     "remaining_session_raw": remaining_raw,
                     "ok": mint_ok,
                 }

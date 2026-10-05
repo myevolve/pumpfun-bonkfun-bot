@@ -254,7 +254,8 @@ def test_status_reads_validated_recovery_journal_without_live_authorization(
     assert status["risk_session"] == {
         "id": "test-session",
         "reserved_quote_raw_by_mint": {str(WSOL_MINT): 250_000},
-        "max_quote_raw_per_mint": 10_000_000,
+        "max_quote_raw_configured": 10_000_000,
+        "max_quote_raw_by_mint": {str(WSOL_MINT): 10_000_000},
         "remaining_quote_raw_by_mint": {str(WSOL_MINT): 9_750_000},
         "reserved_fee_lamports": 10_000,
         "max_fee_lamports": 1_000_000,
