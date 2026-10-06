@@ -546,6 +546,26 @@ these columns; (2) migrate additive-first (ALTER ADD COLUMN), then rebuild
 only when a NOT NULL must become nullable, with a backup before each step.
 Backups: `lessons.sqlite3.bak-20261006` and `.bak2-20261006`.
 
+## Trend strengthening — the ACTIVE band expands downward (2026-10-06 16:18Z)
+
+Three hours after the first positive pooled mean, the trend REVERSED the
+expected decay: X=60 pooled +1.1% (from +0.4%), coupling 11.4% vs 7.6%
+break-even (ACTIVE 8/8); X=50 pooled +0.6% (crossed zero), coupling 8.5%
+vs 6.7% (ACTIVE 3rd consecutive); X=40 hit exact break-even 5.5/5.5 (from
+dormant). Max curve real_sol in the paper window: 52.99 SOL and climbing
+(11.5 -> 23.2 -> 53 over three hours). Cohort: 21 pool-priced outcomes, 24
+pool rows, 34 completions, 132 paper decisions in the last 66 min
+(~120/hour capacity holding).
+
+The "regime death" hypothesis is answered: the opposite happened. The
+manufactured-sweep era did not cool — the quiet stretch was a lull inside
+a warm regime. Sealed snapshots: 8 (e68fee6c was the 10:34Z reading; every
+hash recorded at reading time). The promotion case now has: positive
+pooled forward means at TWO levels, coupling margins of +1.8/+3.8pp, and
+a warming market — the remaining gates are duration (24-48h of sealed
+snapshots, ~6h banked) and the cohort threshold (~21 of ~30 toward it).
+
+
 ## First positive pooled forward mean (2026-10-06 15:12Z)
 
 X=60's pooled entry mean crossed zero on live shadow data: +0.4% mean
