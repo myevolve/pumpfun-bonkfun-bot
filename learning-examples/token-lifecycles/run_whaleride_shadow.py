@@ -273,31 +273,49 @@ class Shadow:
     # -- tick -----------------------------------------------------------------
     def tick(self, coins: list[dict], values: list, slot: int) -> None:
         """Single-threaded: called only from mark_loop between awaits."""
-        curve_values = values[: len(coins)]
-        pool_rows, vault_rows = self._split_batch(coins, values)
+        idx = 0
+        curve_values: list[object] = []
+        pool_rows: dict[str, object] = {}
+        vault_rows: dict[str, tuple] = {}
+        for c in coins:
+            curve_values.append(values[idx])
+            idx += 1
+            if c["pool"] is not None and c["vaults"] is None:
+                pool_rows[c["mint"]] = values[idx]
+                idx += 1
+            if c["vaults"] is not None:
+                vault_rows[c["mint"]] = (values[idx], values[idx + 1])
+                idx += 2
         self._trace_curves(coins, curve_values, slot)
         self._decode_pools(coins, pool_rows)
         self._settle_vaults(coins, vault_rows, slot)
         self._prune(coins)
         self.tracked = {m: c for m, c in self.tracked.items() if not c["done"]}
 
-    @staticmethod
-    def _split_batch(
-        coins: list[dict], values: list
-    ) -> tuple[dict[str, object], dict[str, tuple]]:
-        """Split the tail of `values` into per-coin pool and vault account rows."""
-        rest = values[len(coins) :]
-        pool_rows: dict[str, object] = {}
-        vault_rows: dict[str, tuple] = {}
-        idx = 0
+    def _coin_keys(self, c: dict) -> list[str]:
+        """This coin's request keys, in the same order tick() walks values."""
+        keys = [c["curve"]]
+        if c["pool"] is not None and c["vaults"] is None:
+            keys.append(c["pool"])
+        if c["vaults"] is not None:
+            keys.extend(c["vaults"])
+        return keys
+
+    def _batches(self, coins: list[dict]) -> list[list[tuple[dict, list[str]]]]:
+        """Greedy per-coin batches; a coin's keys never split across chunks."""
+        batches: list[list[tuple[dict, list[str]]]] = []
+        batch: list[tuple[dict, list[str]]] = []
+        n = 0
         for c in coins:
-            if c["pool"] is not None and c["vaults"] is None:
-                pool_rows[c["mint"]] = rest[idx]
-                idx += 1
-            if c["vaults"] is not None:
-                vault_rows[c["mint"]] = (rest[idx], rest[idx + 1])
-                idx += 2
-        return pool_rows, vault_rows
+            keys = self._coin_keys(c)
+            if batch and n + len(keys) > MAX_BATCH_KEYS:
+                batches.append(batch)
+                batch, n = [], 0
+            batch.append((c, keys))
+            n += len(keys)
+        if batch:
+            batches.append(batch)
+        return batches
 
     def _trace_curves(self, coins: list[dict], curve_values: list, slot: int) -> None:
         """Record curve rows, graduation flags, and hotness."""
@@ -455,19 +473,10 @@ class Shadow:
                     }
                 )
 
-    def keys(self) -> tuple[list[str], list[dict]]:
+    def snapshots(self) -> list[dict]:
         """Snapshot the tracked coins; done coins leave tracked here."""
         self.tracked = {m: c for m, c in self.tracked.items() if not c["done"]}
-        keys: list[str] = []
-        coins: list[dict] = []
-        for c in self.tracked.values():
-            coins.append(c)
-            keys.append(c["curve"])
-            if c["pool"] is not None and c["vaults"] is None:
-                keys.append(c["pool"])
-            if c["vaults"] is not None:
-                keys.extend(c["vaults"])
-        return keys, coins
+        return list(self.tracked.values())
 
     def _bump_rejects(self, coin: dict, reason: str) -> None:
         """Prune coins the decoder cannot read, so they never pin the cap."""
@@ -482,12 +491,12 @@ class Shadow:
         while True:
             await asyncio.sleep(max(0.0, next_start - time.monotonic()))
             next_start = time.monotonic() + POLL_SECONDS
-            keys, coins = self.keys()
-            if not keys:
+            coins = self.snapshots()
+            if not coins:
                 continue
-            for start in range(0, len(keys), MAX_BATCH_KEYS):
-                key_slice = keys[start : start + MAX_BATCH_KEYS]
-                coin_slice = coins[start : start + MAX_BATCH_KEYS]
+            for batch in self._batches(coins):
+                coin_slice = [c for c, _ in batch]
+                key_slice = [k for _, ks in batch for k in ks]
                 try:
                     result = await self.rpc(
                         session,
@@ -718,6 +727,56 @@ def self_check() -> None:
     """Synthetic data through entry/exit math and the report path; no network."""
     with tempfile.TemporaryDirectory() as tmp:
         shadow = Shadow(RPC_ENDPOINTS[0], out_path=Path(tmp) / "shadow.jsonl")
+        # batch-layout regression: a coin with pool/vault keys must keep its
+        # curve value aligned through _batches -> tick (the 2026-10-06 bug)
+        layout_coins = [
+            {
+                "mint": "A",
+                "curve": "ca",
+                "pool": "pa",
+                "vaults": None,
+                "virtual_quote": 0,
+                "done": False,
+                "hot": False,
+                "complete_at": None,
+                "discovered": 0.0,
+                "rejects": 0,
+            },
+            {
+                "mint": "B",
+                "curve": "cb",
+                "pool": None,
+                "vaults": ("vb1", "vb2"),
+                "virtual_quote": 0,
+                "done": False,
+                "hot": False,
+                "complete_at": None,
+                "discovered": 0.0,
+                "rejects": 0,
+            },
+        ]
+        layout_batches = shadow._batches(layout_coins)
+        assert len(layout_batches) == 1
+        layout_keys = [k for _, ks in layout_batches[0] for k in ks]
+        assert layout_keys == ["ca", "pa", "cb", "vb1", "vb2"]
+        assert len(layout_keys) <= MAX_BATCH_KEYS
+        synthetic = ["curveA", "poolA", "curveB", "vB1", "vB2"]
+        idx = 0
+        walked: dict[str, object] = {}
+        for coin in [c for c, _ in layout_batches[0]]:
+            walked[coin["mint"] + ":curve"] = synthetic[idx]
+            idx += 1
+            if coin["pool"] is not None and coin["vaults"] is None:
+                walked[coin["mint"] + ":pool"] = synthetic[idx]
+                idx += 1
+            if coin["vaults"] is not None:
+                idx += 2
+        assert walked == {
+            "A:curve": "curveA",
+            "A:pool": "poolA",
+            "B:curve": "curveB",
+        }
+        assert idx == len(synthetic)
         assert shadow.out_path.parent.exists()
         # 0.01 SOL at the opening curve state buys 0.01*(1-fee) worth minus impact
         opening_tokens = tokens_bought(30_000_000_000, 1_073_000_000_000_000)
