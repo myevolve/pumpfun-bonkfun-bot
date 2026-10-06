@@ -113,6 +113,16 @@ def stop(proc: subprocess.Popen | None, pid: int | None) -> None:
         os.kill(pid, signal.SIGKILL)
 
 
+def _parse_ts(value: object) -> float:
+    """Row timestamps come in two shapes: epoch float (traces) and ISO (events)."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    try:
+        return float(time.mktime(time.strptime(str(value), "%Y-%m-%dT%H:%M:%SZ")))
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def watch_state() -> tuple[float, int] | None:
     """(last row wall-ts, last traced slot) from the JSONL tail, or None."""
     if not SHADOW_PATH.exists():
@@ -134,7 +144,7 @@ def watch_state() -> tuple[float, int] | None:
         except ValueError:
             continue
         if last_ts == 0.0 and row.get("ts"):
-            last_ts = float(row["ts"])
+            last_ts = _parse_ts(row["ts"])
         if last_slot == 0 and row.get("slot"):
             last_slot = int(row["slot"])
         if last_ts and last_slot:
@@ -207,6 +217,13 @@ def run() -> int:
     signal.signal(signal.SIGTERM, on_term)
     signal.signal(signal.SIGINT, on_term)
 
+    adopted = PID_FILE.read_text() if PID_FILE.exists() else ""
+    if adopted.strip().isdigit():
+        orphan = int(adopted.strip())
+        if pid_alive(orphan):
+            log("adopt_kill", {"pid": orphan})
+            stop(None, orphan)
+    PID_FILE.unlink(missing_ok=True)
     pid, proc = spawn()
     started = time.monotonic()
 
