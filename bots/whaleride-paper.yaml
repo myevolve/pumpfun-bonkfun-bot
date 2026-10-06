@@ -18,7 +18,7 @@ rpc_endpoint: "${SOLANA_NODE_RPC_ENDPOINT}"
 wss_endpoint: "${SOLANA_NODE_WSS_ENDPOINT}"
 private_key: "${SOLANA_PRIVATE_KEY}"
 
-enabled: false
+enabled: true
 separate_process: false
 platform: "pump_fun"
 
@@ -29,6 +29,7 @@ geyser:
 
 execution:
   mode: "dry_run"
+  expected_wallet: "9MFfWXdTmtWi9CdnduujpKGVP2gCgyjtyD9e2XC7wLCe"
 
 trade:
   buy_amount: 0.01
@@ -65,10 +66,10 @@ entry_gate:
   enabled: true
   mayhem_only: false
   min_buyers: 0
-  min_real_sol: 20
+  min_real_sol: 50
   max_real_sol: 80
-  max_wait_slots: 100
-  max_wait_ms: 40000
+  max_wait_slots: 700
+  max_wait_ms: 280000
 
 retries:
   max_attempts: 1
