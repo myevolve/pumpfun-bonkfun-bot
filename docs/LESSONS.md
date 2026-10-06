@@ -579,6 +579,30 @@ confounded: the instrument, not just the regime, changed. Fixed with per-coin
 batch grouping plus a batch-layout regression in `--self-check`; the
 graduation-rate verdict restarts from the fix.
 
+
+## Protocol-derivation discipline (2026-10-06, from the letsbonk pool bug)
+
+Issue #214's pool lookup failed for five consecutive bonk coins, and a
+one-window reproduction "proved" a reversed seed order. It was wrong: a
+32-byte window that reproduces a PDA can be a field-boundary coincidence
+(the pool's own base_mint/quote_vault fields, derived through the IDL's
+layout, were the decisive cross-checks). The arbiter for any PDA-seed
+hypothesis is the IDL's own field layout — for LaunchLab PoolState: 8 disc +
+8 epoch + four u8 + seven u64 + a 40-byte VestingSchedule + two config
+pubkeys put base_mint at 205 and quote_mint at 237. The original
+`[b"pool", base, quote]` order was correct; the example failed because the
+coin has no WSOL pool. A wrong "fix" that is verified against a coincidental
+match looks green — the swapped-order rejection in
+`letsbonk-buy-sell/verify_pool_derivation.py` is the tripwire for that.
+
+## Forward-test interim (2026-10-06, ~14h)
+
+Post-instrument-fix, the collector sees completions correctly (14 observed,
+max real_quote exactly 85.0 SOL) but the graduation rate is ~0.14% of
+WSOL-paired coins versus the Sep 4-5 tape's 3.3% — roughly 20x quieter.
+Neither the whale-ride's pooled verdict nor a regime conclusion is possible
+at this rate; the collector keeps running. The tape's day may simply have
+been an exceptional mayhem burst.
 Separately verified live: ~37% of current PumpPortal launches pair against
 quote mints that are neither WSOL nor USDC (e.g. `XsoCS1Tf…`, `A7bdiYdS…` —
 distinct tokens per coin, confirmed by reading their BondingCurve accounts).
