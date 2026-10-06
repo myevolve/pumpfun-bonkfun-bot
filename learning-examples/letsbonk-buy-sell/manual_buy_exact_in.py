@@ -226,7 +226,11 @@ async def get_pool_state_data(client: AsyncClient, pool_state: Pubkey) -> dict |
     try:
         account_info = await client.get_account_info(pool_state)
         if not account_info.value:
-            print("Pool state account not found")
+            print(
+                "Pool state account not found. This coin may have no WSOL "
+                "pool: current bonk launches routinely pair against other "
+                "tokens, and this example only trades WSOL-paired coins."
+            )
             return None
 
         return decode_pool_state(account_info.value.data)
@@ -520,9 +524,7 @@ async def buy_exact_in(
             else LETSBONK_PLATFORM_CONFIG
         )
         creator_fee_vault = derive_creator_fee_vault(creator, WSOL_MINT)
-        platform_fee_vault = derive_platform_fee_vault(
-            platform_config, WSOL_MINT
-        )
+        platform_fee_vault = derive_platform_fee_vault(platform_config, WSOL_MINT)
 
         print(f"Creator fee vault: {creator_fee_vault}")
         print(f"Platform fee vault: {platform_fee_vault}")
