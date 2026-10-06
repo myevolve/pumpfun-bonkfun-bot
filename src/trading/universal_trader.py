@@ -2591,6 +2591,27 @@ class UniversalTrader:
     async def _paper_mark(
         self, token_info: TokenInfo, entry_id: int, horizon_s: int, started: float
     ) -> None:
+        """Mark one horizon; ANY read failure is a censored observation.
+
+        A mark task that raises is fatal to the whole trader (the done
+        callback routes exceptions to shutdown) — and one coin's completed-
+        curve read failure (the whale beat the entry: zeroed reserves) must
+        never kill every other coin's evidence. So the body is fully
+        contained: exceptions become censored rows.
+        """
+        try:
+            await self._paper_mark_inner(token_info, entry_id, horizon_s, started)
+        except Exception as exc:  # noqa: BLE001 - mark reads never take the bot down
+            self.lesson_journal.finish_paper_mark(
+                entry_id,
+                horizon_s,
+                elapsed_s=monotonic() - started,
+                reason=f"read_error:{type(exc).__name__}",
+            )
+
+    async def _paper_mark_inner(
+        self, token_info: TokenInfo, entry_id: int, horizon_s: int, started: float
+    ) -> None:
         """Record comparable virtual-reserve marks, or an explicit missing outcome."""
         await asyncio.sleep(max(0.0, started + horizon_s - monotonic()))
         price = None
