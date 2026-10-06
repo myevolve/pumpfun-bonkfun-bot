@@ -2514,6 +2514,54 @@ class UniversalTrader:
         if tasks:
             await asyncio.gather(*tasks)
 
+    async def _graduated_pool_price(
+        self, token_info: TokenInfo, remaining: float
+    ) -> tuple[float, str] | None:
+        """Honest whale-ride exit price: the canonical pool's live state.
+
+        The curve read said complete; the whale-ride's thesis is that the
+        migration pool's opening liquidity carries the position's exit. Read
+        pool + both vaults in one batch (the shadow collector's proven
+        shape); any miss is a censored mark, never an invented price. Bounded
+        by the mark's remaining wall budget.
+        """
+        if remaining <= 0:
+            return None
+        from platforms.pumpfun.pumpswap import (
+            PumpSwapAddresses,
+            _decode_pool_account,
+        )
+
+        pool = PumpSwapAddresses.derive_canonical_pool(token_info.mint, WSOL_MINT)
+        try:
+            async with asyncio.timeout(remaining):
+                accounts = await self.solana_client.get_multiple_accounts(
+                    [pool], commitment="processed"
+                )
+            value = accounts[0]
+            if value is None:
+                return None  # pool not created: censored, priced elsewhere never
+            decoded = _decode_pool_account(value, pool, token_info.mint, WSOL_MINT)
+            async with asyncio.timeout(remaining):
+                vaults = await self.solana_client.get_multiple_accounts(
+                    [decoded.base_vault, decoded.quote_vault],
+                    commitment="processed",
+                )
+            base_v, quote_v = vaults
+            if base_v is None or quote_v is None:
+                return None
+            import struct
+
+            base_amt = struct.unpack_from("<Q", bytes(base_v.data), 64)[0]
+            quote_amt = struct.unpack_from("<Q", bytes(quote_v.data), 64)[0]
+            eff = quote_amt + decoded.virtual_quote_reserve_raw
+            if base_amt <= 0 or eff <= 0:
+                return None  # drained pool: nothing to sell into
+            price = (eff / 1e9) / (base_amt / 10**TOKEN_DECIMALS)
+            return price, "pool_reserves_ok"
+        except TimeoutError:
+            return None
+
     async def _paper_mark(
         self, token_info: TokenInfo, entry_id: int, horizon_s: int, started: float
     ) -> None:
@@ -2547,6 +2595,9 @@ class UniversalTrader:
                 evidence["quote_mint"] = str(state.get("quote_mint"))
                 if state.get("complete") is not False:
                     reason = "migrated_or_invalid_completion"
+                    pool_price = await self._graduated_pool_price(token_info, remaining)
+                    if pool_price is not None:
+                        price, reason = pool_price, "graduated_pool_exit"
                 elif state.get("is_sol_paired") is not True:
                     reason = "unsupported_quote"
                 else:
@@ -2781,11 +2832,7 @@ class UniversalTrader:
         started = monotonic()
         deadline = started + rules.max_wait_ms / 1000
         decision: GateDecision | None = None
-        if (
-            rules.min_buyers == 0
-            and rules.min_real_sol <= 0
-            and not queue.loss_reason
-        ):
+        if rules.min_buyers == 0 and rules.min_real_sol <= 0 and not queue.loss_reason:
             # No wait and no liquidity floor: accept at creation. With a
             # min_real_sol crossing rule (the whale-ride entry), fall through
             # to the event loop — the EntryGate waits for the crossing.
