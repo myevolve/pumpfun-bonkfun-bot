@@ -67,8 +67,8 @@ entry_gate:
   min_buyers: 0
   min_real_sol: 50
   max_real_sol: 80
-  max_wait_slots: 700
-  max_wait_ms: 280000
+  max_wait_slots: 75
+  max_wait_ms: 30000
 
 retries:
   max_attempts: 1
