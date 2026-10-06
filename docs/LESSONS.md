@@ -546,6 +546,25 @@ these columns; (2) migrate additive-first (ALTER ADD COLUMN), then rebuild
 only when a NOT NULL must become nullable, with a backup before each step.
 Backups: `lessons.sqlite3.bak-20261006` and `.bak2-20261006`.
 
+## Second live entry; first keeper recovery (2026-10-06 14:10-14:35Z)
+
+JEANPHILF (suUDqaQk...) accepted 14:08:57Z at real_sol 76.89 SOL — inside
+the X=60-80 band at 3.55e-7 — and graduated within minutes (complete=1,
+curve zeroed). Its 60s mark resolved WITH the populated entry price (the
+gate fix verified in production); the 300/900 marks cancelled because the
+session died at 14:09:57Z on `trade_stream_interrupted` — one coin's Geyser
+subscription loss invalidates the whole stream per the flow-loss design,
+cancelling every other entry's pending marks with it. The keeper detected
+the death in 61s and restarted cleanly (first real recovery; adoption had
+been verified only in tests). The cancelled marks are the honest record of
+an interrupted session, not lost evidence: censoring is what they exist
+for. Design note for the next iteration: a paper-only restart could drain
+marks first (the `_drain_paper_marks` path exists), but trading semantics
+must not change for measurement convenience — watch the censor rate before
+changing anything. Snapshot at 14:35Z: session healthy (54 decisions since
+restart, no accepts — max curve 36 SOL), 16 pool rows on the shadow.
+
+
 ## Coupling trend (2026-10-06, continuing; X=50 flickers, X=60 holds)
 
 Snapshots, all sha256-sealed (evidence-bundle.json overwritten in place —
