@@ -535,6 +535,17 @@ graduation (`--report` scores it with the same cost model). Traces land in
 state at or after the crossing, so shadow results are conservative on entry
 price. Zero credentials, zero signing; SIGINT stops it cleanly.
 
+## Paper-session schema debt (2026-10-06, fixed before launch)
+
+The whale-ride paper session's first accept crashed on `paper_marks`: the
+running journal expects `scheduled_utc`, `exit_state`, and a nullable
+`started_utc` — the DB predated all three. Two lessons: (1) schema drift
+between code and a long-lived DB crashes at WRITE time, not load time —
+the "one bot start to migrate" note in the report section did not cover
+these columns; (2) migrate additive-first (ALTER ADD COLUMN), then rebuild
+only when a NOT NULL must become nullable, with a backup before each step.
+Backups: `lessons.sqlite3.bak-20261006` and `.bak2-20261006`.
+
 ## What the ECC harness taught (2026-10-05, adopted)
 
 `~/GithubProjects/ECC` (an agent-harness plugin catalog: 68 agents, 293
