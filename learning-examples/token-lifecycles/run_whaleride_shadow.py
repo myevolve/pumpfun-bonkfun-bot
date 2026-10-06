@@ -41,6 +41,7 @@ import tempfile
 import time
 from collections import Counter
 from contextlib import redirect_stdout
+from dataclasses import dataclass as _dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -86,6 +87,21 @@ POOL_TIMEOUT = 120.0  # completed curve without a readable pool: censor
 HOT_X_SOL = 20.0  # a trace at least this hot stays under observation longer
 BUY_LAMPORTS = 10_000_000
 POOL_FEE = 0.003
+
+
+@_dataclass
+class XRow:
+    """One report row's scoring inputs (kept together for the printer)."""
+
+    entries: list[float]
+    whale: int
+    censored: int
+    grad_arm: list[float]
+    cold_arm: list[float]
+    grad_after: int
+    crossers: int
+
+
 COST = BUY_LAMPORTS + TX_FEES_LAMPORTS
 HOLD_SECONDS = 2.0  # non-graduate exit horizon (~5 slots)
 POOL_EXIT_LAG = 1.0  # pool rows must be at least this far past the entry
@@ -693,43 +709,35 @@ def report(
     )
     for x_sol in xs:
         scored = [_score_coin(coin, x_sol, hold_seconds) for coin in coins.values()]
-        entries = [pnl for outcome, pnl in scored if outcome == "entry"]
-        whale = sum(1 for outcome, _ in scored if outcome == "whale")
-        censored = sum(1 for outcome, _ in scored if outcome == "censored")
-        _print_row(x_sol, entries, whale, censored)
-
-
-def _score_coin(
-    coin: dict, x_sol: float, hold_seconds: float
-) -> tuple[str, float | None]:
-    """Whale-ride score for one coin at one X: ('entry', pnl) | ('whale'|'censored', None)."""
-    curves = sorted(coin["curves"], key=lambda r: r["ts"])
-    hit = next((r for r in curves if r["rq"] >= x_sol * 1e9), None)
-    if hit is None:
-        return "none", None
-    if hit["cp"]:
-        return "whale", None  # whale swept through X between polls: buy would revert
-    tokens = tokens_bought(hit["vq"], hit["vt"])
-    if any(r["cp"] for r in curves):
-        pool_row = next(
-            (p for p in coin["pools"] if p["ts"] >= hit["ts"] + POOL_EXIT_LAG), None
+        entries = [p for kind, p, _ in scored if kind in ("entry_pool", "entry_cold")]
+        grad_arm = [p for kind, p, _ in scored if kind == "entry_pool"]
+        cold_arm = [p for kind, p, _ in scored if kind == "entry_cold"]
+        whale = sum(1 for kind, _, _ in scored if kind == "whale")
+        censored = sum(1 for kind, _, _ in scored if kind == "censored")
+        # coupling: of the coins that crossed X while the curve was still
+        # tradeable, the share that graduated later. This is the whale-ride's
+        # activation indicator — the pooled EV turns positive only above the
+        # break-even coupling implied by the two arms' means.
+        grad_after = sum(1 for kind, _, grad in scored if grad is True)
+        crossers = sum(1 for kind, _, grad in scored if grad is not None)
+        _print_row(
+            x_sol,
+            XRow(
+                entries=entries,
+                whale=whale,
+                censored=censored,
+                grad_arm=grad_arm,
+                cold_arm=cold_arm,
+                grad_after=grad_after,
+                crossers=crossers,
+            ),
         )
-        if pool_row is None:
-            return "censored", None
-        eff, base = pool_row["q"] + pool_row["vrq"], pool_row["b"]
-        pnl = (
-            -float(COST)
-            if not base or not eff
-            else eff * tokens / (base + tokens) * (1 - POOL_FEE) - COST
-        )
-        return "entry", pnl
-    exit_row = next((r for r in curves if r["ts"] >= hit["ts"] + hold_seconds), None)
-    if exit_row is None:
-        return "censored", None
-    return "entry", sell_value(exit_row["vq"], exit_row["vt"], tokens) - COST
 
 
-def _print_row(x_sol: float, entries: list[float], whale: int, censored: int) -> None:
+def _print_row(x_sol: float, row: "XRow") -> None:
+    entries, whale, censored = row.entries, row.whale, row.censored
+    grad_arm, cold_arm = row.grad_arm, row.cold_arm
+    grad_after, crossers = row.grad_after, row.crossers
     if not entries:
         print(f"{x_sol:>4.0f} | {0:>7} {whale:>10} {censored:>8} | no entries yet")
         return
@@ -744,6 +752,59 @@ def _print_row(x_sol: float, entries: list[float], whale: int, censored: int) ->
         f"{statistics.mean(entries) / 1e5:+8.1f}% {wins:6.1%} "
         f"{pct(entries, 0.1) / 1e5:+7.1f}% {pct(entries, 0.5) / 1e5:+6.1f}% "
         f"{pct(entries, 0.9) / 1e5:+7.1f}%"
+    )
+    if grad_after and crossers and grad_arm and cold_arm:
+        grad_mean = statistics.mean(grad_arm)
+        cold_mean = statistics.mean(cold_arm)
+        coupling = grad_after / crossers
+        denom = grad_mean - cold_mean
+        break_even = (-cold_mean / denom) if denom > 0 else float("inf")
+        state = "ACTIVE" if coupling >= break_even else "dormant"
+        print(
+            f"      coupling P(grad|crossed)={coupling:5.1%} ({grad_after}/{crossers})"
+            f" — break-even {break_even:5.1%} → whale-ride {state}"
+        )
+
+
+def _score_coin(
+    coin: dict, x_sol: float, hold_seconds: float
+) -> tuple[str, float | None, bool | None]:
+    """One coin at one X: (kind, pnl, graduated_after_crossing).
+
+    kinds: none | whale (complete at the crossing: the buy would revert) |
+    entry_pool (graduated, priced off the pool's opening state) |
+    entry_cold (never graduated, curve exit at the hold horizon) |
+    censored (crossed, but the exit was not observed).
+    graduated_after_crossing is None when the coin never crossed.
+    """
+    curves = sorted(coin["curves"], key=lambda r: r["ts"])
+    hit = next((r for r in curves if r["rq"] >= x_sol * 1e9), None)
+    if hit is None:
+        return "none", None, None
+    if hit["cp"]:
+        return "whale", None, None  # whale swept through X between polls
+    graduated_after = any(r["cp"] for r in curves)
+    tokens = tokens_bought(hit["vq"], hit["vt"])
+    if graduated_after:
+        pool_row = next(
+            (p for p in coin["pools"] if p["ts"] >= hit["ts"] + POOL_EXIT_LAG), None
+        )
+        if pool_row is None:
+            return "censored", None, True
+        eff, base = pool_row["q"] + pool_row["vrq"], pool_row["b"]
+        pnl = (
+            -float(COST)
+            if not base or not eff
+            else eff * tokens / (base + tokens) * (1 - POOL_FEE) - COST
+        )
+        return "entry_pool", pnl, True
+    exit_row = next((r for r in curves if r["ts"] >= hit["ts"] + hold_seconds), None)
+    if exit_row is None:
+        return "censored", None, False
+    return (
+        "entry_cold",
+        sell_value(exit_row["vq"], exit_row["vt"], tokens) - COST,
+        False,
     )
 
 
@@ -765,6 +826,7 @@ def self_check() -> None:
                 "complete_at": None,
                 "discovered": 0.0,
                 "rejects": 0,
+                "pool_rejects": 0,
             },
             {
                 "mint": "B",
@@ -777,6 +839,7 @@ def self_check() -> None:
                 "complete_at": None,
                 "discovered": 0.0,
                 "rejects": 0,
+                "pool_rejects": 0,
             },
         ]
         layout_batches = shadow._batches(layout_coins)
