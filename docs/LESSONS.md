@@ -546,6 +546,19 @@ these columns; (2) migrate additive-first (ALTER ADD COLUMN), then rebuild
 only when a NOT NULL must become nullable, with a backup before each step.
 Backups: `lessons.sqlite3.bak-20261006` and `.bak2-20261006`.
 
+## Coupling trend, first oscillation observed (2026-10-06 10:04Z)
+
+The activation indicator's first real-time swing, now three sealed
+snapshots deep: X=50 read ACTIVE at 09:30Z (8.7% vs 8.0%), dormant at 09:53Z
+(5.4% vs 7.0%), and ACTIVE again at 10:04Z (7.3% vs 6.4%); X=60 tracked
+10.1% vs 7.8% ACTIVE through all three. X=20-40 stayed dormant throughout.
+Reading: the whale-ride's viable band is X>=50, flickering at X=50 and
+holding at X=60, with 12-22 completions seen per snapshot (12 pool rows
+captured). The PUP lesson stands as the honest mid-band entry example
+(-91%). No promotion decision is implied by an oscillating indicator; the
+trend needs sealed snapshots over days, and every bundle carries its own
+sha256 so later readers can verify the sequence was not rewritten.
+
 ## Whale-ride paper session live (2026-10-06)
 
 Launched (dry-run, designated wallet, supervisor keepers): gate waits for
