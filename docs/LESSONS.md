@@ -546,7 +546,19 @@ these columns; (2) migrate additive-first (ALTER ADD COLUMN), then rebuild
 only when a NOT NULL must become nullable, with a backup before each step.
 Backups: `lessons.sqlite3.bak-20261006` and `.bak2-20261006`.
 
-## Coupling trend, first oscillation observed (2026-10-06 10:04Z)
+## Coupling trend (2026-10-06, continuing; X=50 flickers, X=60 holds)
+
+Snapshots, all sha256-sealed (evidence-bundle.json overwritten in place —
+each hash below was recorded at reading time): 09:30Z X50 8.7/8.0 ACTIVE,
+X60 10.1/7.8 ACTIVE; 09:53Z X50 5.4/7.0 dormant, X60 8.0/7.8 ACTIVE;
+10:04Z X50 7.3/6.4 ACTIVE, X60 10.1/7.8 ACTIVE; 10:14Z X50 6.2/6.4 dormant,
+X60 8.6/7.1 ACTIVE; 10:34Z (bundle e68fee6c) X50 5.9/6.9 dormant, X60
+8.3/7.5 ACTIVE; 10:47Z X50 7.3/6.9 ACTIVE (13 graduators), X60 10.2/7.5
+ACTIVE. Score: X=60 ACTIVE in 6 of 6; X=50 ACTIVE in 3 of 6 — the stable
+band is X>=60 and the paper gate sits there (min_real_sol 60). Cohort: 14
+pool rows, 23 completions, ~908 crossers at X=20. The X=50 flicker is the
+margin itself — no entry capital goes there until it holds.
+
 
 The activation indicator's first real-time swing, now three sealed
 snapshots deep: X=50 read ACTIVE at 09:30Z (8.7% vs 8.0%), dormant at 09:53Z
