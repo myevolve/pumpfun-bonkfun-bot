@@ -14,6 +14,7 @@ import os
 import re
 import signal
 import sqlite3
+import statistics
 import subprocess
 import time
 from pathlib import Path
@@ -74,8 +75,8 @@ def load_watch_set() -> dict:
         return {}
     return json.loads(WATCH_PATH.read_text())
 
-DETECTED_TOKENS_LIMIT = 30
 
+DETECTED_TOKENS_LIMIT = 30
 
 
 @st.cache_data(ttl=5)
@@ -238,6 +239,103 @@ def load_trade_evidence(path: Path) -> dict:
 def _evidence_amount(value: int | None) -> str:
     """Keep unknowns distinct from zero and integer amounts exact in the browser."""
     return "Unknown" if value is None else f"{value:,}"
+
+
+def load_whaleride_coupling() -> dict:
+    """Coupling per X from the shadow collector's JSONL, read-only."""
+    return _coupling_from_rows(_read_shadow_rows())
+
+
+def _read_shadow_rows() -> tuple[dict[str, list], dict[str, list]]:
+    """Curve and pool rows from the shadow collector's JSONL."""
+    path = state_path("whaleride-shadow", "shadow.jsonl")
+    curves: dict[str, list] = {}
+    pools: dict[str, list] = {}
+    if not path.exists():
+        return curves, pools
+    try:
+        with path.open() as f:
+            for line in f:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                mint = row.get("m") or row.get("mint")
+                if not mint:
+                    continue
+                if row.get("k") == "c":
+                    curves.setdefault(mint, []).append(row)
+                elif row.get("k") == "p":
+                    pools.setdefault(mint, []).append(row)
+    except OSError:
+        return {}, {}
+    return curves, pools
+
+
+def _coupling_from_rows(curves: dict[str, list], pools: dict[str, list]) -> dict:
+    """Score every X level the way run_whaleride_shadow.report() does."""
+
+    def tokens_bought(vq: int, vt: int) -> float:
+        return vt - (vq * vt) / (vq + 9_875_000)
+
+    out: dict[str, dict] = {}
+    for x in (20, 30, 40, 50, 60):
+        grad_arm: list[float] = []
+        cold_arm: list[float] = []
+        grad_after = crossers = 0
+        for mint, cs in curves.items():
+            cs.sort(key=lambda r: r["ts"])
+            hit = next((r for r in cs if r["rq"] >= x * 1e9), None)
+            if hit is None or hit["cp"]:
+                continue
+            graduated_after = any(r["cp"] for r in cs)
+            tokens = tokens_bought(hit["vq"], hit["vt"])
+            if graduated_after:
+                pool_row = next(
+                    (p for p in pools.get(mint, []) if p["ts"] >= hit["ts"] + 1.0),
+                    None,
+                )
+                if pool_row is None:
+                    continue
+                eff, base = pool_row["q"] + pool_row["vrq"], pool_row["b"]
+                pnl = (
+                    -10_065_000
+                    if base <= 0 or eff <= 0
+                    else eff * tokens / (base + tokens) * 0.997 - 10_065_000
+                )
+                grad_arm.append(pnl)
+                grad_after += 1
+            else:
+                exit_row = next((r for r in cs if r["ts"] >= hit["ts"] + 2.0), None)
+                if exit_row is None:
+                    continue
+                pnl = (
+                    exit_row["vq"] * tokens / (exit_row["vt"] + tokens) * 0.9875
+                    - 10_065_000
+                )
+                cold_arm.append(pnl)
+            crossers += 1
+        out[f"x{x}"] = _coupling_row(grad_arm, cold_arm, grad_after, crossers)
+    return out
+
+
+def _coupling_row(
+    grad_arm: list[float], cold_arm: list[float], grad_after: int, crossers: int
+) -> dict:
+    if not crossers or not grad_arm or not cold_arm:
+        return {"status": "insufficient_data", "crossers": crossers}
+    grad_mean = statistics.mean(grad_arm)
+    cold_mean = statistics.mean(cold_arm)
+    coupling = grad_after / crossers
+    denom = grad_mean - cold_mean
+    break_even = (-cold_mean / denom) if denom > 0 else 10.0
+    return {
+        "coupling": round(coupling, 4),
+        "grad_n": grad_after,
+        "crossers": crossers,
+        "break_even_coupling": round(break_even, 4),
+        "state": "ACTIVE" if coupling >= break_even else "dormant",
+    }
 
 
 # ─── Process control ─────────────────────────────────────────────────────────
@@ -902,6 +1000,37 @@ with tab_learning:
             st.info(
                 "No eligible live outcomes. Historical paper proxies are excluded. "
                 "Gross marks are separate observations, not simulated fills."
+            )
+
+        st.subheader("Whale-ride coupling — is the graduation exit alive?")
+        st.caption(
+            "P(graduation | crossed X) from the shadow collector's traces, "
+            "against the EV break-even implied by the graduator and non-"
+            "graduator arms. ACTIVE means a crossing at that level prices "
+            "positive expected value in this snapshot. One reading of one "
+            "collector, not a fill record."
+        )
+        wr_rows = []
+        for key, row in load_whaleride_coupling().items():
+            if row.get("state") is None and row.get("status"):
+                continue
+            wr_rows.append(
+                {
+                    "X (SOL)": key[1:],
+                    "coupling": row.get("coupling"),
+                    "break-even": row.get("break_even_coupling"),
+                    "state": row.get("state", "—"),
+                    "grad n": row.get("grad_n"),
+                    "crossers": row.get("crossers"),
+                }
+            )
+        if wr_rows:
+            wrdf = pd.DataFrame(wr_rows).set_index("X (SOL)")
+            st.dataframe(wrdf, width="stretch")
+        else:
+            st.info(
+                "No shadow coupling data yet. Start the collector: "
+                "keep_whaleride_shadow.py"
             )
 
         if lstats["pnl_by_quality"]:
