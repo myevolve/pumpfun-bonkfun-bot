@@ -1,0 +1,85 @@
+# Whale-ride paper profile — the graduation-exit strategy, DRY-RUN ONLY.
+#
+# The whale-ride enters when a curve's real SOL reserves cross a level
+# (min_real_sol) and holds through graduation, selling into the PumpSwap
+# pool the moment the price read reveals the migration (exit_strategy
+# "graduation"). Evidence and mechanics:
+#   - backtest: learning-examples/token-lifecycles/simulate_graduation_exit.py
+#   - forward shadow: learning-examples/token-lifecycles/run_whaleride_shadow.py
+#   - phantom check for any tape:
+#     learning-examples/token-lifecycles/verify_completed_curve_phantom.py
+#
+# This profile is DISABLED and dry-run. It never signs. Do not enable live
+# execution until the forward shadow verdict is in docs/LESSONS.md and a
+# separate --authorize-live review passes the standard gates.
+name: "whaleride-paper"
+env_file: ".state/wallets/live-readiness.secrets"
+rpc_endpoint: "${SOLANA_NODE_RPC_ENDPOINT}"
+wss_endpoint: "${SOLANA_NODE_WSS_ENDPOINT}"
+private_key: "${SOLANA_PRIVATE_KEY}"
+
+enabled: false
+separate_process: false
+platform: "pump_fun"
+
+geyser:
+  endpoint: "${GEYSER_ENDPOINT}"
+  api_token: "${GEYSER_API_TOKEN}"
+  auth_type: "x-token"
+
+execution:
+  mode: "dry_run"
+
+trade:
+  buy_amount: 0.01
+  buy_slippage: 0.3
+  sell_slippage: 0.3
+  # hold through graduation; the graduation trigger sells into the pool
+  exit_strategy: "graduation"
+  # backstop only: if the coin never graduates, time-based exits for the
+  # whale-ride are NOT the strategy — the shadow's non-graduate arm is the
+  # honest baseline, and this backstop books whatever the curve still holds
+  max_hold_time: 600
+  price_check_interval: 1
+  max_exit_sell_attempts: 3
+  price_read_outage_budget: 300
+  extreme_fast_mode: false
+  curve_refresh_budget: 2.0
+  trust_create_event: true
+
+filters:
+  match_string: null
+  bro_address: null
+  allowed_quote_mints: ["sol"]
+  listener_type: "geyser"
+  max_token_age: 0.001
+  marry_mode: false
+  yolo_mode: true
+
+# the whale-ride entry, in the existing gate's vocabulary:
+# - min_real_sol: the crossing level (the backtest's best rows: 20-50 SOL)
+# - max_real_sol below graduation (~85): a completing whale sweep arrives as
+#   a post-completion event and must be skipped, not bought
+# - min_buyers 0 / mayhem_only false: the sweep itself is the signal
+entry_gate:
+  enabled: true
+  mayhem_only: false
+  min_buyers: 0
+  min_real_sol: 20
+  max_real_sol: 80
+  max_wait_slots: 100
+  max_wait_ms: 40000
+
+retries:
+  max_attempts: 1
+
+priority_fees:
+  enable_dynamic: false
+  enable_fixed: true
+  fixed_amount: 200_000
+  extra_percentage: 0.0
+  hard_cap: 200_000
+
+compute_units:
+  buy: 140_000
+  sell: 110_000

@@ -165,15 +165,22 @@ The YAML files are commented inline. The sections that matter most:
   breaker is inert.
 - **`trade`** — `buy_amount` is the SOL amount per buy;
   `trade.quote_amounts` supplies whole-unit amounts for non-SOL quote mints.
-  Slippage, `exit_strategy` (`time_based`, `tp_sl`, `manual`), and
-  `extreme_fast_mode` control execution. Extreme-fast mode skips the
+  Slippage, `exit_strategy` (`time_based`, `tp_sl`, `manual`, `graduation`),
+  and `extreme_fast_mode` control execution. Extreme-fast mode skips the
   bonding-curve price read and buys a fixed token amount instead. See
   [Extreme fast mode](#extreme-fast-mode-zero-rpc-buys) for its two provenance
   controls, `trust_create_event` and `curve_refresh_budget`. For SOL-only
   `tp_sl`, `take_profit_percentage` is a net ROI target: the executable
   nonlinear sell quote must cover the confirmed buy spend, buy and sell
   transaction fees, configured success-cleanup fee, and the requested return.
-  When configured, stop-loss and maximum-hold exits remain unconditional safety exits.
+  `graduation` is the whale-ride exit: hold while the curve trades, and sell
+  unconditionally the moment the price read reveals the migrated PumpSwap
+  pool (`pool_status` flips) — the strategy sells into the pool's opening
+  liquidity. `max_hold_time` remains the backstop. Pair it with an
+  `entry_gate` whose `min_real_sol` is the crossing level and whose
+  `max_real_sol` sits below graduation (~80) so completing whale sweeps are
+  skipped rather than bought. When configured, stop-loss and maximum-hold
+  exits remain unconditional safety exits.
   The position monitor's read-only price check rides out an RPC/DNS outage for
   `price_read_outage_budget` seconds (default 300; 0 fails on the first error)
   before the process fails closed with the position still journaled; data or
