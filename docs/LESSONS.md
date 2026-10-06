@@ -565,3 +565,16 @@ hardening:
   mle-workflow/recursive-decision-ledger disciplines (point-in-time features,
   append-only evidence, fail-closed promotion) confirm practices the repo
   already follows rather than add new ones.
+
+## Forward-test instrument bug (2026-10-06, fixed)
+
+The shadow's first ~10 hours under-counted graduations by design error: the
+batch chunking interleaved each coin's pool/vault keys with its curve key
+while the tick still sliced values as `[all curves][all extras]`. Pool
+accounts were decoded as curves (992 false `curve_unreadable` quarantines),
+misalignment raised IndexError (7,330 dropped ticks), and **every pool exit
+was lost** — 9 completed curves were observed but none produced a pool row.
+The apparent graduation drought (0.1% vs the tape's 3.3%) is therefore
+confounded: the instrument, not just the regime, changed. Fixed with per-coin
+batch grouping plus a batch-layout regression in `--self-check`; the
+graduation-rate verdict restarts from the fix.
