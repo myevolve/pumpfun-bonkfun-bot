@@ -25,6 +25,7 @@ Usage:
 
 from __future__ import annotations
 
+# ruff: noqa: C901, PLR0915 - runner-script pattern
 import argparse
 import json
 import os
@@ -115,7 +116,7 @@ def stop(proc: subprocess.Popen | None, pid: int | None) -> None:
 
 def _parse_ts(value: object) -> float:
     """Row timestamps come in two shapes: epoch float (traces) and ISO (events)."""
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
+    if isinstance(value, int | float) and not isinstance(value, bool):
         return float(value)
     try:
         return float(time.mktime(time.strptime(str(value), "%Y-%m-%dT%H:%M:%SZ")))
@@ -162,7 +163,13 @@ def health_reason(
     now: float,
     started: float,
 ) -> str | None:
-    """One restart decision per tick; None means healthy."""
+    """One restart decision per tick; None means healthy.
+
+    Everything runs in wall time: `started` must be time.time() at spawn,
+    not monotonic — the 2026-10-06 instant-fire bug compared wall `now`
+    against monotonic `started`, so the difference was the machine's
+    uptime and every threshold fired on the first quiet poll.
+    """
     if not alive:
         return "process_dead"
     if state is None:
@@ -225,7 +232,7 @@ def run() -> int:
             stop(None, orphan)
     PID_FILE.unlink(missing_ok=True)
     pid, proc = spawn()
-    started = time.monotonic()
+    started = time.time()  # wall clock: health_reason compares against row ts
 
     while not stop_signal["raised"]:
         time.sleep(POLL_SECONDS)
@@ -243,10 +250,7 @@ def run() -> int:
         previous_state = state
         if reason is None:
             continue
-        if (
-            reason == "process_dead"
-            and time.monotonic() - started < QUICK_DEATH_SECONDS
-        ):
+        if reason == "process_dead" and time.time() - started < QUICK_DEATH_SECONDS:
             quick_deaths += 1
         else:
             quick_deaths = 0
@@ -271,7 +275,7 @@ def run() -> int:
         if stop_signal["raised"]:
             break
         pid, proc = spawn()
-        started = time.monotonic()
+        started = time.time()  # wall clock: health_reason compares against row ts
         previous_state = None
 
     stop(proc, pid)

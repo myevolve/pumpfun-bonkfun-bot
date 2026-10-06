@@ -21,6 +21,7 @@ Usage:
 
 from __future__ import annotations
 
+import calendar
 import json
 import signal
 import sqlite3
@@ -144,7 +145,10 @@ def seconds_since_row() -> float | None:
     if utc is None:
         return None
     try:
-        stamp = time.mktime(time.strptime(utc, "%Y-%m-%dT%H:%M:%SZ"))
+        # calendar.timegm: the journal stamps UTC; mktime would read the
+        # string as local time (PDT here) and land the stamp ~7h ahead,
+        # inverting every staleness decision (observed live: stale_s -24058).
+        stamp = calendar.timegm(time.strptime(utc, "%Y-%m-%dT%H:%M:%SZ"))
     except (TypeError, ValueError):
         return None
     return time.time() - stamp
