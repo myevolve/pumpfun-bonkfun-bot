@@ -77,11 +77,14 @@ class LetsBonkAddressProvider(AddressProvider):
                 "refusing to assume wrapped SOL"
             )
 
-        # LaunchLab pool seeds are [b"pool", quote_mint, base_mint] — verified
-        # 2026-10-06 against 569 live PoolState accounts (issue #214): the
-        # previous [base, quote] order derived accounts that do not exist.
+        # Seed order [b"pool", base_mint, quote_mint] verified on-chain
+        # 2026-10-06 against a live PoolState (issue #214 follow-up): the
+        # IDL places base_mint at 205 and quote_mint at 237, and the pool's
+        # own base_vault/quote_vault fields match [pool_vault, pool, <mint>]
+        # for those same mints. The issue's coin failed because it is
+        # quoted (not paired as base against WSOL) — not a derivation bug.
         pool_state, _ = Pubkey.find_program_address(
-            [b"pool", bytes(quote_mint), bytes(base_mint)], LetsBonkAddresses.PROGRAM
+            [b"pool", bytes(base_mint), bytes(quote_mint)], LetsBonkAddresses.PROGRAM
         )
         return pool_state
 

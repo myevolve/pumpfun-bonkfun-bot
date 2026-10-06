@@ -140,7 +140,7 @@ def derive_pool_state_for_token(base_token_mint: Pubkey) -> Pubkey | None:
     Returns:
         Pubkey of the pool state account, or None if not found
     """
-    seeds = [b"pool", bytes(WSOL_MINT), bytes(base_token_mint)]  # LaunchLab seeds are [pool, quote, base] (verified 2026-10-06)
+    seeds = [b"pool", bytes(base_token_mint), bytes(WSOL_MINT)]
     pool_state_pda, _ = Pubkey.find_program_address(seeds, RAYDIUM_LAUNCHLAB_PROGRAM_ID)
     return pool_state_pda
 

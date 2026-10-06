@@ -1,15 +1,14 @@
 """Verify the LaunchLab pool derivation order against live PoolState accounts.
 
-LaunchLab (letsbonk) pool seeds are `[b"pool", quote_mint, base_mint]` — the
-reverse of what this repo assumed until 2026-10-06 (issue #214). This
-verifier machine-checks the order against live chain state:
-
+LaunchLab (letsbonk) pool seeds are `[b"pool", base_mint, quote_mint]` —
+confirmed 2026-10-06 on live PoolState accounts (issue #214 follow-up).
+This verifier machine-checks the order against live chain state:
 1. `getProgramAccounts` over the LaunchLab program, filtered to PoolState
-   discriminators, sliced to the two seed-source fields (offset 205: quote,
-   offset 237: base — confirmed on a 429-byte PoolState).
-2. For every sampled pool: derive `[b"pool", quote, base]` and require it to
-   reproduce the account's own address, and require the previous
-   `[b"pool", base, quote]` order NOT to (guards a regression).
+   discriminators, sliced to the two seed-source fields (offset 205: base,
+   offset 237: quote).
+2. For every sampled pool: derive `[b"pool", base, quote]` and require it to
+   reproduce the account's own address, and require the swapped
+   `[b"pool", quote, base]` order NOT to (guards a regression).
 
 Read-only network access; no keys, no signing, no funds. The full scan is
 ~1.5M accounts; a dedicated RPC endpoint (via `--rpc-env`) is strongly
@@ -103,24 +102,28 @@ async def verify(endpoint: str, samples: int) -> int:
             if len(data) < SAMPLE_SIZE:
                 skipped += 1
                 continue
-            quote = Pubkey.from_bytes(data[0:32])
-            base = Pubkey.from_bytes(data[32:64])
+            # PoolState layout (2026-10-06, issue #214 follow-up): base_mint
+            # at offset 205, quote_mint at offset 237 — the IDL's
+            # VestingSchedule is 40 bytes, putting these two pubkeys exactly
+            # at the slice's 0 and 32.
+            base = Pubkey.from_bytes(data[0:32])
+            quote = Pubkey.from_bytes(data[32:64])
             derived, _ = Pubkey.find_program_address(
-                [b"pool", bytes(quote), bytes(base)], PROGRAM
+                [b"pool", bytes(base), bytes(quote)], PROGRAM
             )
             if derived != address:
                 print(f"FAIL {address}: derived {derived}")
                 return 1
             reversed_attempt, _ = Pubkey.find_program_address(
-                [b"pool", bytes(base), bytes(quote)], PROGRAM
+                [b"pool", bytes(quote), bytes(base)], PROGRAM
             )
             if reversed_attempt == address:
-                print(f"FAIL {address}: old [base, quote] order also matches")
+                print(f"FAIL {address}: swapped [quote, base] order also matches")
                 return 1
             checked += 1
         print(
             f"verified {checked} pools ({skipped} skipped): "
-            "LaunchLab seeds are [b'pool', quote, base]"
+            "LaunchLab seeds are [b'pool', base, quote]"
         )
         return 0 if checked else 1
 
