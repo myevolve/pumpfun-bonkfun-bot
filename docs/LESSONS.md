@@ -546,6 +546,23 @@ these columns; (2) migrate additive-first (ALTER ADD COLUMN), then rebuild
 only when a NOT NULL must become nullable, with a backup before each step.
 Backups: `lessons.sqlite3.bak-20261006` and `.bak2-20261006`.
 
+## First positive pooled forward mean (2026-10-06 15:12Z)
+
+X=60's pooled entry mean crossed zero on live shadow data: +0.4% mean
+(153 entries, 32.7% win) with coupling 9.3% vs 7.1% break-even — the
+graduation exits' weight now outweighs the cold arm. X=50 flipped ACTIVE
+again too (6.8% vs 6.2%, pooled -0.3%). Cohort: 15 pool-priced graduator
+outcomes, 16 pool rows. The trend: X=60 ACTIVE 7/7 snapshots (8.0-10.2%
+coupling), X=50 4/7 (currently ACTIVE — the flicker band keeps producing
+evidence from both sides). Second in-band live entry landed (78 decisions
+in the last window, max curve 23 SOL — still below the 60 gate, so the
+session correctly stayed flat while the market cooled). The promotion
+case's arithmetic now has its first positive forward term; the gate stays
+at 60, sealed snapshots accumulate, and the promotion decision remains
+gated on days-scale trend stability + the paper arm reproducing the
+graduator mean on its own fills.
+
+
 ## Second live entry; first keeper recovery (2026-10-06 14:10-14:35Z)
 
 JEANPHILF (suUDqaQk...) accepted 14:08:57Z at real_sol 76.89 SOL — inside
