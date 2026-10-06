@@ -546,6 +546,17 @@ these columns; (2) migrate additive-first (ALTER ADD COLUMN), then rebuild
 only when a NOT NULL must become nullable, with a backup before each step.
 Backups: `lessons.sqlite3.bak-20261006` and `.bak2-20261006`.
 
+## Cross-instrument overlap verified (2026-10-06 16:46Z)
+
+The shadow and the paper arm are no longer independent narratives: JEANPHILF
+is in BOTH — the paper arm's lesson 59944 (accepted 76.89 SOL) and the
+shadow's pool row at 14:08:58Z. Two instruments, same coin, same graduation,
+independently priced. Cohort velocity: pool rows 15 → 21 → 27 across ~90
+minutes (fastest yet); completions 37; max curve in the paper window 53.34
+SOL and climbing toward the 60 gate. The promotion case's cohort threshold
+(~30 pool-priced outcomes) is roughly an hour away at this rate; the
+duration gate (24-48h of sealed snapshots) remains the longest pole.
+
 ## Trend strengthening — the ACTIVE band expands downward (2026-10-06 16:18Z)
 
 Three hours after the first positive pooled mean, the trend REVERSED the
