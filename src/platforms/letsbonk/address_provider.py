@@ -77,8 +77,11 @@ class LetsBonkAddressProvider(AddressProvider):
                 "refusing to assume wrapped SOL"
             )
 
+        # LaunchLab pool seeds are [b"pool", quote_mint, base_mint] — verified
+        # 2026-10-06 against 569 live PoolState accounts (issue #214): the
+        # previous [base, quote] order derived accounts that do not exist.
         pool_state, _ = Pubkey.find_program_address(
-            [b"pool", bytes(base_mint), bytes(quote_mint)], LetsBonkAddresses.PROGRAM
+            [b"pool", bytes(quote_mint), bytes(base_mint)], LetsBonkAddresses.PROGRAM
         )
         return pool_state
 
