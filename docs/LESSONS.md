@@ -546,6 +546,27 @@ these columns; (2) migrate additive-first (ALTER ADD COLUMN), then rebuild
 only when a NOT NULL must become nullable, with a backup before each step.
 Backups: `lessons.sqlite3.bak-20261006` and `.bak2-20261006`.
 
+## Whale-ride paper session live (2026-10-06)
+
+Launched (dry-run, designated wallet, supervisor keepers): gate waits for
+the real_sol crossing (min_real_sol 50, max 80, 30s window), holds through
+graduation, exits on the venue-state reveal. Launch sequence surfaced and
+fixed three real layers: the wallet env-override (documented), the paper_marks
+schema debt (two additive migrations + a rebuild, backups kept), and the
+gate's no_wait shortcut bypassing min_real_sol when min_buyers=0 — 108
+creation-time garbage entries produced and deleted before the fix. The
+serial processor also cannot sustain minute-scale waits (~46 coins/hour
+arrivals vs ~2/min processing): window shortened to 30s/75 slots, with the
+slow-crossing blind spot documented and the shadow still covering it.
+
+**First entry landed**: PUP (HdD6Eaw...) accepted at real_sol 50.87 SOL
+(ACTIVE band), lesson 59679, marks scheduled at 60/300/900s. Evidence
+aggregation: `build_evidence_bundle.py` — one command, sealed sha256,
+phantom audit + held-out table + live coupling + journal counters. First
+two runs showed the coupling indicator cooling in real time (X=50: 8.7%
+ACTIVE -> 5.4% dormant within the hour): the market, measured, saying the
+strategy sleeps.
+
 ## What the ECC harness taught (2026-10-05, adopted)
 
 `~/GithubProjects/ECC` (an agent-harness plugin catalog: 68 agents, 293
