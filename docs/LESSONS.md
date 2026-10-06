@@ -594,6 +594,27 @@ gated on days-scale trend stability + the paper arm reproducing the
 graduator mean on its own fills.
 
 
+## Mark hardening: one lost race must not kill the evidence rig (2026-10-06 19:0xZ)
+
+The burst arrived and killed the paper bot TWICE — both times ~60-90s after
+an accept, both times the same shape: the whale sweep beat the paper entry
+(zeroed virtual reserves — the buy correctly failed closed at 17:54:30 and
+18:41:45), and then the ENTRY'S OWN MARK TASK raised through the same
+strict decoder at its horizon read, routing to _fatal_monitor_errors ->
+trader shutdown. One lost race killed every other coin's pending evidence
+during the heaviest burst of the week.
+
+Fix: the mark body is fully contained — any exception becomes a censored
+mark row (read_error:<type>) and the trader keeps processing. Second-order
+lesson: the gate accept racing a sweep completion is the whale-beat case;
+the buy failure IS fail-closed behavior (no funds moved), but the evidence
+machinery must survive losing that race. The lesson journal now has 108
+deleted garbage entries (creation-time accepts from the pre-gate-fix era,
+documented above) on top of today's two burst deaths — all recoverable
+from backups if ever needed.
+
+
+
 ## Second live entry; first keeper recovery (2026-10-06 14:10-14:35Z)
 
 JEANPHILF (suUDqaQk...) accepted 14:08:57Z at real_sol 76.89 SOL — inside
