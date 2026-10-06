@@ -20,6 +20,7 @@ class ExitReason(Enum):
     MAX_HOLD_TIME = "max_hold_time"
     MANUAL = "manual"
     TRADE_FLOW = "trade_flow"  # real-time flow rule fired (creator sell, trail...)
+    GRADUATED = "graduated"  # the bonding curve completed; sell into the pool
 
 
 @dataclass

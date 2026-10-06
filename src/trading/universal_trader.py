@@ -155,8 +155,10 @@ def _validate_exit_config(
     if not isinstance(exit_strategy, str):
         raise ValueError("exit_strategy must be a string")
     strategy = exit_strategy.lower()
-    if strategy not in {"tp_sl", "time_based", "manual"}:
-        raise ValueError("exit_strategy must be one of: tp_sl, time_based, manual")
+    if strategy not in {"tp_sl", "time_based", "manual", "graduation"}:
+        raise ValueError(
+            "exit_strategy must be one of: tp_sl, time_based, manual, graduation"
+        )
     if (
         isinstance(price_check_interval, bool)
         or not isinstance(price_check_interval, int)
@@ -3557,6 +3559,15 @@ class UniversalTrader:
                     # A flow rule is an unconditional exit like stop-loss: it
                     # must not be gated by the take-profit net-ROI target.
                     should_exit, exit_reason = True, ExitReason.TRADE_FLOW
+                if (
+                    getattr(self, "exit_strategy", None) == "graduation"
+                    and token_info.pool_status == "pumpswap"
+                ):
+                    # Whale-ride exit: the curve completed and the price read
+                    # above came from the migrated PumpSwap pool. Unconditional
+                    # like the flow exit — the strategy's whole point is to
+                    # sell into the pool's opening liquidity.
+                    should_exit, exit_reason = True, ExitReason.GRADUATED
                 if should_exit and exit_reason:
                     exit_sell_attempts += 1
                     if (

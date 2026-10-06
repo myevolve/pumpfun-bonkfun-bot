@@ -3812,3 +3812,78 @@ async def test_provisional_buy_is_released_when_a_fork_drops_it(tmp_path) -> Non
     assert position.is_active is False
     assert ledger.get_outcome(signature).status is TransactionStatus.REVERTED
     ledger.close()
+
+
+@pytest.mark.asyncio
+async def test_graduation_strategy_sells_when_pool_status_flips() -> None:
+    """A whale-ride position exits as soon as the price read reveals the
+    migrated PumpSwap pool — the strategy's whole point — unconditionally,
+    like the flow exit."""
+    trader = object.__new__(UniversalTrader)
+    token = _token(Platform.PUMP_FUN)
+    token.creator = Pubkey.new_unique()
+    token.pool_status = "funding"
+    position = Position.create_from_buy_result(
+        mint=token.mint,
+        symbol=token.symbol,
+        entry_price=1.0,
+        quantity=2.0,
+        take_profit_percentage=0.5,
+        quantity_raw=2_000_000,
+        quote_amount_raw=100_000,
+        buy_fee_lamports=40_000,
+        position_id="buy-signature",
+    )
+    trader._shutdown_event = asyncio.Event()
+    trader.exit_strategy = "graduation"
+    trader.price_check_interval = 60
+    trader.max_exit_sell_attempts = 1
+    trader.price_read_outage_budget = 300.0
+    trader.flow_rules = None
+    trader._flow_signals = {}
+    trader._flow_wakeups = {}
+    trader._gate_queues = {}
+
+    async def read_price_revealing_migration(*args, **kwargs):
+        # the venue-state machinery runs inside the price read; the first
+        # read reveals that the curve graduated to PumpSwap
+        token.pool_status = "pumpswap"
+        return 1.2
+
+    calculate_token_price = AsyncMock(side_effect=read_price_revealing_migration)
+    trader.platform_implementations = SimpleNamespace(
+        curve_manager=SimpleNamespace(calculate_token_price=calculate_token_price)
+    )
+    trader.seller = SimpleNamespace(
+        execute=AsyncMock(
+            return_value=TradeResult(
+                success=True,
+                platform=Platform.PUMP_FUN,
+                tx_signature="sell-signature",
+                amount=2.0,
+                amount_raw=2_000_000,
+                price=1.2,
+                status=TransactionStatus.SUCCESS.value,
+            )
+        )
+    )
+    trader.solana_client = SimpleNamespace()
+    trader.wallet = SimpleNamespace()
+    trader.priority_fee_manager = SimpleNamespace()
+    trader.cleanup_mode = None
+    trader.cleanup_with_priority_fee = False
+    trader.cleanup_force_close_with_burn = False
+    trader._get_pool_address = lambda token_info: token_info.bonding_curve
+    trader._persist_position = lambda token_info, active_position: None
+    trader._log_trade = lambda *args, **kwargs: None
+    trader._remove_position = lambda mint: None
+
+    import trading.universal_trader as ut
+
+    ut.handle_cleanup_after_sell = AsyncMock(return_value=None)
+
+    await asyncio.wait_for(trader._monitor_position_until_exit(token, position), 5)
+
+    assert calculate_token_price.await_count == 1  # exited on the reveal tick
+    assert position.is_active is False
+    assert position.exit_reason is ExitReason.GRADUATED
