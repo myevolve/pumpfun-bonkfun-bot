@@ -2514,6 +2514,32 @@ class UniversalTrader:
         if tasks:
             await asyncio.gather(*tasks)
 
+    async def _completed_curve_pool_price(
+        self, token_info: TokenInfo, remaining: float
+    ) -> tuple[float, str] | None:
+        """Pool exit price when the curve read itself failed.
+
+        Reads the raw curve bytes (the strict decoder rejects a zeroed
+        completed curve before reporting `complete`); complete=1 routes to
+        the pool exit, anything else stays censored.
+        """
+        if remaining <= 0:
+            return None
+        try:
+            async with asyncio.timeout(remaining):
+                accounts = await self.solana_client.get_multiple_accounts(
+                    [token_info.bonding_curve], commitment="processed"
+                )
+            value = accounts[0]
+            if value is None:
+                return None
+            data = bytes(value.data)
+            if len(data) < 49 or data[48] != 1:
+                return None  # not complete: the failure was something else
+        except (TimeoutError, Exception):
+            return None
+        return await self._graduated_pool_price(token_info, remaining)
+
     async def _graduated_pool_price(
         self, token_info: TokenInfo, remaining: float
     ) -> tuple[float, str] | None:
@@ -2612,6 +2638,22 @@ class UniversalTrader:
                         reason = "gross_virtual_reserve_mark"
                     else:
                         reason = "invalid_price"
+            except ValueError as exc:
+                # A completed curve can zero its virtual reserves (the whale
+                # takes everything), which the strict decoder rejects before
+                # complete is even seen. Read the raw curve bytes directly:
+                # complete=1 routes to the whale-ride pool exit; anything
+                # else stays a censored observation.
+                if "positive" in str(exc) or "complete" in str(exc).lower():
+                    pool_price = await self._completed_curve_pool_price(
+                        token_info, remaining
+                    )
+                    if pool_price is not None:
+                        price, reason = pool_price, "graduated_pool_exit"
+                    else:
+                        reason = f"read_error:{type(exc).__name__}"
+                else:
+                    reason = f"read_error:{type(exc).__name__}"
             except Exception as exc:  # noqa: BLE001 - explicit censored read, not success
                 # No retries or transport text that could disclose credentials.
                 reason = f"read_error:{type(exc).__name__}"
