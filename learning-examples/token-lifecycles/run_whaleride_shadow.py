@@ -401,17 +401,23 @@ class Shadow:
                     WSOL_MINT,
                 )
             except BAD_ACCOUNT as exc:
-                c["done"] = True
+                # Migrations are transient: the pool account can briefly exist
+                # in an unfinished state. Curve rejects reset the shared
+                # counter, so pool-pipeline failures carry their own
+                # three-tick grace.
                 self.counts["pool_rejected"] += 1
-                self.record(
-                    {
-                        "k": "e",
-                        "what": "pool_rejected",
-                        "mint": c["mint"],
-                        "ts": utc(),
-                        "err": str(exc)[:120],
-                    }
-                )
+                c["pool_rejects"] = c.get("pool_rejects", 0) + 1
+                if c["pool_rejects"] >= 3:
+                    c["done"] = True
+                    self.record(
+                        {
+                            "k": "e",
+                            "what": "pool_rejected",
+                            "mint": c["mint"],
+                            "ts": utc(),
+                            "err": str(exc)[:120],
+                        }
+                    )
                 continue
             c["vaults"] = (str(decoded.base_vault), str(decoded.quote_vault))
             c["virtual_quote"] = decoded.virtual_quote_reserve_raw
@@ -428,17 +434,20 @@ class Shadow:
                 base_amt = vault_amount(base_value)
                 quote_amt = vault_amount(quote_value)
             except BAD_ACCOUNT as exc:
-                c["done"] = True
+                # Same transient-migration grace as pool decode failures.
                 self.counts["vault_rejected"] += 1
-                self.record(
-                    {
-                        "k": "e",
-                        "what": "vault_rejected",
-                        "mint": c["mint"],
-                        "ts": utc(),
-                        "err": str(exc)[:120],
-                    }
-                )
+                c["pool_rejects"] = c.get("pool_rejects", 0) + 1
+                if c["pool_rejects"] >= 3:
+                    c["done"] = True
+                    self.record(
+                        {
+                            "k": "e",
+                            "what": "vault_rejected",
+                            "mint": c["mint"],
+                            "ts": utc(),
+                            "err": str(exc)[:120],
+                        }
+                    )
                 continue
             self.record(
                 {
@@ -458,6 +467,21 @@ class Shadow:
         now = time.monotonic()
         for c in coins:
             if c["done"]:
+                continue
+            if c.get("complete_at") is not None:
+                # a completed coin's clock runs from graduation: it only needs
+                # the two-tick pool pipeline, not the full trace window
+                if now - c["complete_at"] > POOL_TIMEOUT:
+                    c["done"] = True
+                    self.record(
+                        {
+                            "k": "e",
+                            "what": "prune",
+                            "mint": c["mint"],
+                            "ts": utc(),
+                            "reason": "pool_pipeline_timeout",
+                        }
+                    )
                 continue
             limit = ENTRY_TIMEOUT if c["hot"] else WATCH_SECONDS
             if now - c["discovered"] > limit:
