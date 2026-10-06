@@ -36,7 +36,12 @@ from core.client import (
     TransactionSubmissionUnknown,
     estimate_transaction_fee_lamports,
 )
-from core.execution_policy import ExecutionBlocked, ExecutionMode, ExecutionPolicy
+from core.execution_policy import (
+    DrawdownBreaker,
+    ExecutionBlocked,
+    ExecutionMode,
+    ExecutionPolicy,
+)
 from core.priority_fee.manager import PriorityFeeManager
 from core.pubkeys import (
     TOKEN_DECIMALS,
@@ -320,6 +325,7 @@ class UniversalTrader:
                 "Net take profit requires a SOL-only allowed_quote_mints list"
             )
         self.execution_policy = execution_policy or ExecutionPolicy()
+        self._drawdown = DrawdownBreaker.from_policy(self.execution_policy)
         self.wallet = Wallet(private_key)
         self.execution_policy.validate_wallet(self.wallet.pubkey)
         self.platform = Platform(platform) if isinstance(platform, str) else platform
@@ -1507,6 +1513,9 @@ class UniversalTrader:
             if sold_quote_raw is not None and position.quote_amount_raw is not None
             else None
         )
+        drawdown = getattr(self, "_drawdown", None)
+        if drawdown is not None:
+            drawdown.record_close(pnl_quote_raw, quote_mint)
         self.lesson_journal.link_outcome(
             str(position.mint),
             pnl_quote_raw,
@@ -2667,6 +2676,21 @@ class UniversalTrader:
                 gate=asdict(decision) if decision is not None else None,
             )
             if decision is not None and not decision.accept:
+                return True
+            drawdown = getattr(self, "_drawdown", None)
+            if drawdown is not None and drawdown.tripped_reason is not None:
+                self._record_trade_evidence(
+                    "decision",
+                    token_info,
+                    action="skip",
+                    reason="circuit_breaker_tripped",
+                    breaker=self._drawdown.tripped_reason,
+                )
+                logger.warning(
+                    "Circuit breaker tripped (%s): skipping entry for %s",
+                    self._drawdown.tripped_reason,
+                    token_info.symbol,
+                )
                 return True
 
             if (

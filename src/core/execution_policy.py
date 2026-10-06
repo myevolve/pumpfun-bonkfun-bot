@@ -7,11 +7,13 @@ constructed and tested before any network or signer objects are created.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from dataclasses import field as dataclasses_field
 from enum import StrEnum
 from math import isfinite
 from typing import Any
 
 from solders.pubkey import Pubkey
+
 from core.pubkeys import normalize_quote_mint, resolve_quote_mint
 
 _MAX_RISK_SESSION_ID_LENGTH = 128
@@ -26,7 +28,7 @@ def _normalize_quote_caps(value: object, field_name: str) -> QuoteCaps | None:
     "0.01 SOL per trade, 5 USDC per trade" - the scalar is kept as the
     every-asset form so existing configurations keep their exact meaning.
     """
-    if value is None or isinstance(value, int) and not isinstance(value, bool):
+    if value is None or (isinstance(value, int) and not isinstance(value, bool)):
         if value is not None:
             _validate_nonnegative_int(value, field_name)
         return value
@@ -74,6 +76,8 @@ class ExecutionPolicy:
     max_session_fee_lamports: int | None = None
     allow_skip_preflight: bool = False
     allow_force_burn: bool = False
+    max_consecutive_losses: int | None = None
+    max_session_drawdown_quote_raw: QuoteCaps | None = None
 
     def __post_init__(self) -> None:
         """Validate policy invariants at construction time."""
@@ -93,8 +97,15 @@ class ExecutionPolicy:
         for name, value in (
             ("max_trade_quote_raw", self.max_trade_quote_raw),
             ("max_session_quote_raw", self.max_session_quote_raw),
+            ("max_session_drawdown_quote_raw", self.max_session_drawdown_quote_raw),
         ):
             object.__setattr__(self, name, _normalize_quote_caps(value, name))
+        if self.max_consecutive_losses is not None and (
+            isinstance(self.max_consecutive_losses, bool)
+            or not isinstance(self.max_consecutive_losses, int)
+            or self.max_consecutive_losses < 1
+        ):
+            raise ValueError("max_consecutive_losses must be a positive integer")  # noqa: TRY003
         for name, value in (
             ("max_total_fee_lamports", self.max_total_fee_lamports),
             ("max_session_fee_lamports", self.max_session_fee_lamports),
@@ -311,6 +322,8 @@ class ExecutionPolicy:
             risk_session_id=raw.get("risk_session_id"),
             max_session_quote_raw=raw.get("max_session_quote_raw"),
             max_session_fee_lamports=raw.get("max_session_fee_lamports"),
+            max_consecutive_losses=raw.get("max_consecutive_losses"),
+            max_session_drawdown_quote_raw=raw.get("max_session_drawdown_quote_raw"),
             allow_skip_preflight=raw.get("allow_skip_preflight", False),
             allow_force_burn=raw.get("allow_force_burn", False),
         )
@@ -327,3 +340,78 @@ def validate_finite_number(value: object, field_name: str) -> None:
         raise ValueError(f"{field_name} must be a number")
     if not isfinite(float(value)):
         raise ValueError(f"{field_name} must be finite")
+
+
+@dataclass(slots=True)
+class DrawdownBreaker:
+    """Session-scoped loss circuit breaker.
+
+    Counts consecutive losing closes and per-quote-asset realized drawdown;
+    once a threshold trips, the latch holds until a new risk session starts
+    (a restart). Unpriced closes (sold amount unknown) cannot be attributed
+    and are ignored rather than guessed.
+    """
+
+    max_consecutive_losses: int | None
+    max_session_drawdown_quote_raw: QuoteCaps | None
+    consecutive_losses: int = 0
+    realized_pnl_raw: dict[str, int] = dataclasses_field(default_factory=dict)
+    tripped_reason: str | None = None
+
+    @classmethod
+    def from_policy(cls, policy: ExecutionPolicy) -> DrawdownBreaker | None:
+        """Build the breaker, or None when no threshold is configured."""
+        if (
+            policy.max_consecutive_losses is None
+            and policy.max_session_drawdown_quote_raw is None
+        ):
+            return None
+        return cls(
+            max_consecutive_losses=policy.max_consecutive_losses,
+            max_session_drawdown_quote_raw=policy.max_session_drawdown_quote_raw,
+        )
+
+    def record_close(self, pnl_quote_raw: int | None, quote_mint: object) -> None:
+        """Update loss counters from one closed position."""
+        if self.tripped_reason is not None or pnl_quote_raw is None:
+            return
+        if isinstance(pnl_quote_raw, bool) or not isinstance(pnl_quote_raw, int):
+            raise ValueError("pnl_quote_raw must be an integer or None")
+        key = "unknown" if quote_mint is None else str(quote_mint)
+        self.realized_pnl_raw[key] = self.realized_pnl_raw.get(key, 0) + pnl_quote_raw
+        if pnl_quote_raw < 0:
+            self.consecutive_losses += 1
+        else:
+            self.consecutive_losses = 0
+        if (
+            self.max_consecutive_losses is not None
+            and self.consecutive_losses >= self.max_consecutive_losses
+        ):
+            self.tripped_reason = (
+                f"consecutive_losses={self.consecutive_losses}"
+                f" (threshold {self.max_consecutive_losses})"
+            )
+            return
+        cap = self._cap_for(key)
+        if cap is not None and -self.realized_pnl_raw[key] >= cap:
+            self.tripped_reason = (
+                f"session drawdown {self.realized_pnl_raw[key]} on {key} (cap {cap})"
+            )
+
+    def _cap_for(self, key: str) -> int | None:
+        caps = self.max_session_drawdown_quote_raw
+        if caps is None:
+            return None
+        if isinstance(caps, int):
+            return caps
+        return caps.get(key)
+
+    def entry_block(self, quote_mint: object) -> str | None:
+        """Reason new entries are halted, or None. Missing per-mint cap: fail-closed."""
+        if self.tripped_reason is not None:
+            return self.tripped_reason
+        key = "unknown" if quote_mint is None else str(quote_mint)
+        caps = self.max_session_drawdown_quote_raw
+        if isinstance(caps, dict) and key not in caps:
+            return f"no session drawdown cap configured for quote {key}"
+        return None

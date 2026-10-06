@@ -155,6 +155,14 @@ The YAML files are commented inline. The sections that matter most:
   Leave `allow_skip_preflight: false` unless transaction simulation has been
   deliberately waived after a separate risk review. `allow_force_burn` should
   remain false unless destructive cleanup has been separately reviewed.
+  `max_consecutive_losses` (positive int) and `max_session_drawdown_quote_raw`
+  (scalar or per-quote mapping, same shapes as the quote caps) configure the
+  loss circuit breaker: after N consecutive losing closes, or when one quote
+  asset's realized session drawdown reaches its cap, new entries stop for the
+  rest of the risk session while open positions keep their normal exits.
+  Unpriced closes are ignored, and a per-quote mapping that omits the entry's
+  quote asset blocks that entry (fail-closed). Without either threshold the
+  breaker is inert.
 - **`trade`** — `buy_amount` is the SOL amount per buy;
   `trade.quote_amounts` supplies whole-unit amounts for non-SOL quote mints.
   Slippage, `exit_strategy` (`time_based`, `tp_sl`, `manual`), and

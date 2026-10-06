@@ -534,3 +534,34 @@ graduation (`--report` scores it with the same cost model). Traces land in
 `.state/whaleride-shadow/shadow.jsonl`; the traced entry is the first observed
 state at or after the crossing, so shadow results are conservative on entry
 price. Zero credentials, zero signing; SIGINT stops it cleanly.
+
+## What the ECC harness taught (2026-10-05, adopted)
+
+`~/GithubProjects/ECC` (an agent-harness plugin catalog: 68 agents, 293
+skills, hook workflows) yielded one built artifact and one money-path
+hardening:
+
+- **Built: `keep_whaleride_shadow.py`** — a keeper for the forward-test
+  collector, from ECC's loop-operator/loop-status/observer patterns:
+  identity-verified PID (`ps` argv, not `kill 0` — LESSONS #5), progress
+  watermark over the JSONL tail, stall reasons (process dead / rows stale
+  10 min / slot frozen 15 min), TERM-then-KILL child cleanup, quick-death
+  backoff ladder 30s→8min, and a `keeper.gave-up` marker instead of
+  crash-looping.
+- **Built: the loss circuit breaker** (`DrawdownBreaker` in
+  `core/execution_policy.py`, config `execution.max_consecutive_losses` and
+  `execution.max_session_drawdown_quote_raw`) — from ECC's
+  llm-trading-agent-security checklist. Gap analysis against the bot: spend
+  caps, mandatory min-out, full outcome ledgers, key isolation and per-quote
+  caps were already covered; the missing control was a LOSS-based halt.
+  Semantics: closes feed `pnl_quote_raw` from the `_link_lesson_outcome`
+  funnel; consecutive losses and per-quote drawdown latch a session-wide
+  entry halt while open positions keep their exits; unpriced closes are
+  ignored; a per-quote mapping that omits the entry's quote fails closed.
+- **Recorded, not built**: the MCP circuit breaker (persisted exponential
+  backoff for unhealthy endpoints) maps to our RPC handling, but the client
+  already carries per-request cooldowns; the gan-harness bounded
+  generator→evaluator loop fits offline strategy iteration only; ECC's
+  mle-workflow/recursive-decision-ledger disciplines (point-in-time features,
+  append-only evidence, fail-closed promotion) confirm practices the repo
+  already follows rather than add new ones.

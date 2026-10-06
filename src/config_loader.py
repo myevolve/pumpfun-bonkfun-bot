@@ -131,6 +131,8 @@ ALLOWED_CONFIG_KEYS: dict[str, set[str] | None] = {
         "risk_session_id",
         "max_session_quote_raw",
         "max_session_fee_lamports",
+        "max_consecutive_losses",
+        "max_session_drawdown_quote_raw",
         "allow_skip_preflight",
         "allow_force_burn",
     },
@@ -198,11 +200,16 @@ INTEGER_RANGES: dict[str, tuple[int | None, int | None, bool, bool]] = {
     "retries.max_attempts": (1, 1, True, True),
     "execution.max_total_fee_lamports": (0, None, True, True),
     "execution.max_session_fee_lamports": (0, None, True, True),
+    "execution.max_consecutive_losses": (1, None, True, True),
 }
 
 # Quote caps are per-asset capable (SOL 9 decimals, USDC 6), so they accept
 # either one integer or a mapping keyed by quote mint or alias.
-QUOTE_CAP_FIELDS = ("execution.max_trade_quote_raw", "execution.max_session_quote_raw")
+QUOTE_CAP_FIELDS = (
+    "execution.max_trade_quote_raw",
+    "execution.max_session_quote_raw",
+    "execution.max_session_drawdown_quote_raw",
+)
 
 NUMBER_RANGES: dict[str, tuple[float | None, float | None, bool, bool]] = {
     "trade.buy_amount": (0, None, False, True),
