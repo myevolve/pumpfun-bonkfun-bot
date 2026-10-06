@@ -578,3 +578,10 @@ The apparent graduation drought (0.1% vs the tape's 3.3%) is therefore
 confounded: the instrument, not just the regime, changed. Fixed with per-coin
 batch grouping plus a batch-layout regression in `--self-check`; the
 graduation-rate verdict restarts from the fix.
+
+Separately verified live: ~37% of current PumpPortal launches pair against
+quote mints that are neither WSOL nor USDC (e.g. `XsoCS1Tf…`, `A7bdiYdS…` —
+distinct tokens per coin, confirmed by reading their BondingCurve accounts).
+The WSOL-only whale-ride cohort is therefore smaller than the tape's coin
+population; rate comparisons against the tape should use WSOL-paired
+denominators on both sides.
