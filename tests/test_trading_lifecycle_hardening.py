@@ -26,7 +26,13 @@ from core.pubkeys import USDC_MINT, SystemAddresses
 from core.transaction_ledger import EvidencePersistenceError, TransactionLedger
 from core.transaction_state import TransactionOutcome
 from interfaces.core import Platform, TokenInfo
-from monitoring.trade_flow import FlowRules, FlowSignal, TradeQueue
+from monitoring.trade_flow import (
+    FlowRules,
+    FlowSignal,
+    GateRules,
+    TradeEvent,
+    TradeQueue,
+)
 from platforms.pumpfun.curve_manager import PumpFunCurveManager
 from platforms.pumpfun.fee_schedule import (
     PumpFeeConfig,
@@ -3887,3 +3893,81 @@ async def test_graduation_strategy_sells_when_pool_status_flips() -> None:
     assert calculate_token_price.await_count == 1  # exited on the reveal tick
     assert position.is_active is False
     assert position.exit_reason is ExitReason.GRADUATED
+
+
+
+@pytest.mark.asyncio
+async def test_crossing_gate_waits_for_min_real_sol_instead_of_creating() -> None:
+    """The whale-ride entry: min_buyers=0 must not short-circuit to a
+    creation-time accept when a min_real_sol crossing rule is set — the gate
+    waits through sub-floor events and accepts on the crossing."""
+    trader = object.__new__(UniversalTrader)
+    token = _token(Platform.PUMP_FUN)
+    token.creator = Pubkey.new_unique()
+    token.slot = 1_000
+    token.is_mayhem_mode = False
+    trader.gate_rules = GateRules(
+        mayhem_only=False,
+        min_buyers=0,
+        min_real_sol=50.0,
+        max_real_sol=80.0,
+        max_wait_slots=700,
+        max_wait_ms=5_000,
+    )
+    queue: asyncio.Queue = asyncio.Queue()
+    queue.loss_reason = None
+
+    def event(slot: int, real_sol: float, is_buy: bool = True) -> TradeEvent:
+        return TradeEvent(
+            mint=str(token.mint),
+            user="buyer",
+            creator=str(token.creator),
+            is_buy=is_buy,
+            sol_amount=1_000_000,
+            token_amount=1_000,
+            virtual_sol_reserves=int(real_sol * 1e9),
+            virtual_token_reserves=1_000_000_000,
+            real_sol_reserves=int(real_sol * 1e9),
+            real_token_reserves=1_000_000_000,
+            slot=slot,
+            signature=f"sig-{slot}",
+            timestamp=0,
+        )
+
+    await queue.put(event(1_005, 10.0))  # below the floor: must wait
+    await queue.put(event(1_010, 55.0))  # the crossing: accept
+    trader._gate_queues = {str(token.mint): queue}
+
+    decision = await asyncio.wait_for(trader._await_entry_gate(token), 5)
+
+    assert decision.accept is True
+    assert decision.real_sol == 55.0
+    assert decision.slots_waited == 10
+    assert queue.empty()  # both events consumed: the low one waited through
+
+
+@pytest.mark.asyncio
+async def test_zero_floor_gate_still_accepts_at_creation() -> None:
+    """Without a min_real_sol rule the min_buyers=0 shortcut keeps its old
+    meaning: accept at creation with no wait (the no_wait semantics)."""
+    trader = object.__new__(UniversalTrader)
+    token = _token(Platform.PUMP_FUN)
+    token.creator = Pubkey.new_unique()
+    token.slot = 1_000
+    token.is_mayhem_mode = False
+    trader.gate_rules = GateRules(
+        mayhem_only=False,
+        min_buyers=0,
+        min_real_sol=0.0,
+        max_wait_slots=700,
+        max_wait_ms=5_000,
+    )
+    stub_queue: asyncio.Queue = asyncio.Queue()
+    stub_queue.loss_reason = None
+    trader._gate_queues = {str(token.mint): stub_queue}
+
+    decision = await asyncio.wait_for(trader._await_entry_gate(token), 5)
+
+    assert decision.accept is True
+    assert decision.reason == "no_wait"
+    assert decision.real_sol is None

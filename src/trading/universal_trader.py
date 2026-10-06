@@ -2781,7 +2781,14 @@ class UniversalTrader:
         started = monotonic()
         deadline = started + rules.max_wait_ms / 1000
         decision: GateDecision | None = None
-        if rules.min_buyers == 0 and not queue.loss_reason:
+        if (
+            rules.min_buyers == 0
+            and rules.min_real_sol <= 0
+            and not queue.loss_reason
+        ):
+            # No wait and no liquidity floor: accept at creation. With a
+            # min_real_sol crossing rule (the whale-ride entry), fall through
+            # to the event loop — the EntryGate waits for the crossing.
             decision = GateDecision(True, "no_wait", 0, None, 0)
         while decision is None:
             remaining = deadline - monotonic()
