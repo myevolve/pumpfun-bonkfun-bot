@@ -2662,7 +2662,8 @@ class UniversalTrader:
                     reason = "migrated_or_invalid_completion"
                     pool_price = await self._graduated_pool_price(token_info, remaining)
                     if pool_price is not None:
-                        price, reason = pool_price, "graduated_pool_exit"
+                        price, _ = pool_price
+                        reason = "graduated_pool_exit"
                 elif state.get("is_sol_paired") is not True:
                     reason = "unsupported_quote"
                 else:
@@ -2687,7 +2688,8 @@ class UniversalTrader:
                     token_info, remaining
                 )
                 if pool_price is not None:
-                    price, reason = pool_price, "graduated_pool_exit"
+                    price, _ = pool_price
+                    reason = "graduated_pool_exit"
                 else:
                     reason = f"read_error:{type(exc).__name__}"
             except Exception as exc:  # noqa: BLE001 - explicit censored read, not success
