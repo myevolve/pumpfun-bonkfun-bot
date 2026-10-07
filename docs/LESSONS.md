@@ -557,6 +557,20 @@ SOL and climbing toward the 60 gate. The promotion case's cohort threshold
 (~30 pool-priced outcomes) is roughly an hour away at this rate; the
 duration gate (24-48h of sealed snapshots) remains the longest pole.
 
+## The fatal root cause, closed (2026-10-07 02:10Z)
+
+The 'Failed to initialize or start trader' crashes at 17:55Z and 21:57Z
+were not the Jev 402 or parse errors — the full traceback finally showed:
+`price, reason = pool_price, "graduated_pool_exit"` parses the RHS as a
+2-tuple, so `price` received the helper's whole `(price, reason)` tuple.
+`finish_paper_mark`'s `isfinite` then raised TypeError, which
+`_paper_mark_finished` forwards as fatal by design (persistence failures
+kill the bot) — so EVERY graduated_pool_exit mark crashed the session.
+Both call sites now unpack properly; proven with a stubbed-helper run
+delivering a numeric exit_price to the journal. The three mark-path fixes
+(settle+retry, TypeError fallthrough, tuple unpack) compose: the next
+graduation prices honestly instead of censoring or crashing.
+
 ## Pool exit price read retry (2026-10-07 01:23Z)
 
 The overnight run's graduated coins (CITED, GOLDBONER, SDOGE) censored
