@@ -2553,40 +2553,58 @@ class UniversalTrader:
         """
         if remaining <= 0:
             return None
+        # Migration race: the pool/vault accounts can be briefly unreadable
+        # (the 14h-run's TypeError censoring). A short settle delay catches
+        # the pool in its readable state; the mark's own budget bounds it.
+        await asyncio.sleep(min(2.0, remaining / 4))
         from platforms.pumpfun.pumpswap import (
             PumpSwapAddresses,
             _decode_pool_account,
         )
 
         pool = PumpSwapAddresses.derive_canonical_pool(token_info.mint, WSOL_MINT)
-        try:
-            async with asyncio.timeout(remaining):
-                accounts = await self.solana_client.get_multiple_accounts(
-                    [pool], commitment="processed"
-                )
-            value = accounts[0]
-            if value is None:
-                return None  # pool not created: censored, priced elsewhere never
-            decoded = _decode_pool_account(value, pool, token_info.mint, WSOL_MINT)
-            async with asyncio.timeout(remaining):
-                vaults = await self.solana_client.get_multiple_accounts(
-                    [decoded.base_vault, decoded.quote_vault],
-                    commitment="processed",
-                )
-            base_v, quote_v = vaults
-            if base_v is None or quote_v is None:
-                return None
-            import struct
+        for attempt in range(2):
+            try:
+                async with asyncio.timeout(remaining):
+                    accounts = await self.solana_client.get_multiple_accounts(
+                        [pool], commitment="processed"
+                    )
+                value = accounts[0]
+                if value is None:
+                    return None  # pool not created: censored, priced elsewhere never
+                decoded = _decode_pool_account(value, pool, token_info.mint, WSOL_MINT)
+                async with asyncio.timeout(remaining):
+                    vaults = await self.solana_client.get_multiple_accounts(
+                        [decoded.base_vault, decoded.quote_vault],
+                        commitment="processed",
+                    )
+                base_v, quote_v = vaults
+                if base_v is None or quote_v is None:
+                    return None
+                import struct
 
-            base_amt = struct.unpack_from("<Q", bytes(base_v.data), 64)[0]
-            quote_amt = struct.unpack_from("<Q", bytes(quote_v.data), 64)[0]
-            eff = quote_amt + decoded.virtual_quote_reserve_raw
-            if base_amt <= 0 or eff <= 0:
-                return None  # drained pool: nothing to sell into
-            price = (eff / 1e9) / (base_amt / 10**TOKEN_DECIMALS)
-            return price, "pool_reserves_ok"
-        except TimeoutError:
-            return None
+                base_amt = struct.unpack_from("<Q", bytes(base_v.data), 64)[0]
+                quote_amt = struct.unpack_from("<Q", bytes(quote_v.data), 64)[0]
+                eff = quote_amt + decoded.virtual_quote_reserve_raw
+                if base_amt <= 0 or eff <= 0:
+                    return None  # drained pool: nothing to sell into
+                price = (eff / 1e9) / (base_amt / 10**TOKEN_DECIMALS)
+                return price, "pool_reserves_ok"
+            except (TimeoutError, ValueError, TypeError) as exc:
+                # First failure on a fresh migration: settle and retry once.
+                # The pool/vault accounts are briefly unreadable mid-migration
+                # (observed: TypeError on the 14h run, ValueError on PUP).
+                if attempt == 0 and remaining > 5:
+                    await asyncio.sleep(min(3.0, remaining / 3))
+                    remaining -= 3.0
+                    continue
+                if isinstance(exc, ValueError) and (
+                    "positive" in str(exc) or "complete" in str(exc).lower()
+                ):
+                    # zeroed completed curve: the fallthrough handles it
+                    return None
+                return None
+        return None
 
     async def _paper_mark(
         self, token_info: TokenInfo, entry_id: int, horizon_s: int, started: float
