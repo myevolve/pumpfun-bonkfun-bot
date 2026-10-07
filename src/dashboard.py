@@ -241,6 +241,30 @@ def _evidence_amount(value: int | None) -> str:
     return "Unknown" if value is None else f"{value:,}"
 
 
+@st.cache_data(ttl=10)
+def load_grad_decay() -> dict:
+    """G-anchored decay from the journal's grad_marks table, read-only."""
+    conn = sqlite3.connect(f"file:{LESSON_DB}?mode=ro", uri=True, timeout=5)
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*), AVG(open_price), AVG(p5), AVG(p30), AVG(p120)"
+            " FROM grad_marks WHERE open_price IS NOT NULL"
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return {}
+    finally:
+        conn.close()
+    if not row or not row[0] or not row[1]:
+        return {}
+    return {
+        "n": row[0],
+        "open": row[1],
+        "p5_over_open": row[2] / row[1] if row[2] else None,
+        "p30_over_open": row[3] / row[1] if row[3] else None,
+        "p120_over_open": row[4] / row[1] if row[4] else None,
+    }
+
+
 def load_whaleride_coupling() -> dict:
     """Coupling per X from the shadow collector's JSONL, read-only."""
     curves, pools = _read_shadow_rows()
@@ -1032,6 +1056,18 @@ with tab_learning:
             st.info(
                 "No shadow coupling data yet. Start the collector: "
                 "keep_whaleride_shadow.py"
+            )
+
+        gdec = load_grad_decay()
+        if gdec:
+            st.caption(
+                f"Graduation-anchored decay (n={gdec['n']}): pool price at "
+                f"G+5s **{gdec['p5_over_open']}**, G+30s "
+                f"**{gdec['p30_over_open']}**, G+120s "
+                f"**{gdec['p120_over_open']}** relative to the pool-open "
+                "price. Detection latency bounded by the 2s watch poll; "
+                "censored horizons are excluded, not zero-filled. The tape's "
+                "median liquidity half-life after peak is 18s."
             )
 
         if lstats["pnl_by_quality"]:
