@@ -2677,20 +2677,17 @@ class UniversalTrader:
                         reason = "gross_virtual_reserve_mark"
                     else:
                         reason = "invalid_price"
-            except ValueError as exc:
-                # A completed curve can zero its virtual reserves (the whale
-                # takes everything), which the strict decoder rejects before
-                # complete is even seen. Read the raw curve bytes directly:
-                # complete=1 routes to the whale-ride pool exit; anything
-                # else stays a censored observation.
-                if "positive" in str(exc) or "complete" in str(exc).lower():
-                    pool_price = await self._completed_curve_pool_price(
-                        token_info, remaining
-                    )
-                    if pool_price is not None:
-                        price, reason = pool_price, "graduated_pool_exit"
-                    else:
-                        reason = f"read_error:{type(exc).__name__}"
+            except (ValueError, TypeError) as exc:
+                # The migration race raises either ValueError (zeroed virtual
+                # reserves on a completed curve) or TypeError (unexpected data
+                # mid-migration). Both route to the raw-curve-bytes check:
+                # complete=1 means the whale-ride pool exit is the honest
+                # mark; anything else stays a censored observation.
+                pool_price = await self._completed_curve_pool_price(
+                    token_info, remaining
+                )
+                if pool_price is not None:
+                    price, reason = pool_price, "graduated_pool_exit"
                 else:
                     reason = f"read_error:{type(exc).__name__}"
             except Exception as exc:  # noqa: BLE001 - explicit censored read, not success
