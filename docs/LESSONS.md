@@ -572,6 +572,27 @@ operator restarts must kill the keeper first, or never spawn a second
 supervisor. The stale child also explains why some pre-dawn censoring
 patterns looked inconsistent: two gates were observing the same sweep.
 
+## First complete G-record: the pool fate is bimodal (2026-10-07 06:09Z)
+
+poopcat (entry 62798): accepted 06:06:13Z at real_sol 60.01, graduation
+detected **8.6s** after entry, pool open 4.621e-7. The G-clock samples:
+G+7.4s **+2.0%**, G+32.5s **+16.9%**, G+122.3s **+40.0%** — this pool
+RISES after migration, contradicting the tape's 18s median half-life.
+The post-graduation pool fate is **bimodal**: the tape's median captured
+the manufactured-dump majority; a minority of pools hold and climb.
+
+And the first **positive** paper mark: +100.98% at the 60s pool exit
+(entry 2.517e-7 from the accept event, exit 5.058e-7 pool-priced). Even
+paying the measured 1-2-slot entry drift (+25%), the real return is
+~+61% on this coin.
+
+Cohort: 4 complete pool-priced records — 1 winner (+101%), 3 losers
+(−75%, −84%, −91%). Mean still deeply negative; variance enormous.
+The latency frontier's mean-EV death stands for the cohort; the bimodal
+tail is why the ≥30-cohort threshold is the referee. The G-clock now
+accumulates the live pool-fate distribution — the promotion question
+re-opens only if the cohort's mean crosses its break-even.
+
 ## The latency frontier: the promotion question answered (2026-10-07 05:4xZ)
 
 Measured on 215–273 graduated coins with slot-level trades: the entry
