@@ -557,6 +557,30 @@ SOL and climbing toward the 60 gate. The promotion case's cohort threshold
 (~30 pool-priced outcomes) is roughly an hour away at this rate; the
 duration gate (24-48h of sealed snapshots) remains the longest pole.
 
+## The whale never sells: exit condition found in the tape (2026-10-07 03:0xZ)
+
+Analysis of 476 whale-swept graduations (20+ SOL sweeps, 24h tape,
+wallet-level trade records): the whale **never** sells into the pool
+— 0 of 476. 12.2% of whales buy MORE. The post-graduation decay is
+not the whale dumping — it is the followers dumping on each other,
+and the pool's liquidity halves in a median of **18 seconds** after its
+peak (p25: 2s; 68% gone within 60s, 89% within 300s).
+
+The condition-driven exit rule follows directly from the measured decay:
+**the exit condition is graduation detection, priced in seconds.** The
+pool's opening liquidity IS the peak; every second of detection or
+submission latency is paid out of the exit price. This is exactly the
+user's hold directive made concrete: no timeline, hold by conditions —
+and the condition (graduation) with its measured urgency (18s half-life).
+
+New instrument deployed: **graduation-anchored marks**. Each planned
+paper entry spawns a watcher polling the curve every 2s until complete,
+then records the pool-open price and samples G+5/30/120s into
+`grad_marks` (first detection wins; every failure censors a column,
+never fatal). The accept-anchored horizons measured the mixed clock;
+the G-clock measures the strategy's actual exit window. First
+G-anchored records land with the next whale-swept graduation.
+
 ## Hold policy: conditions rule, never a timeline (2026-10-07, user directive)
 
 Holds are **dynamic and condition-driven** — never a fixed timeline. The
