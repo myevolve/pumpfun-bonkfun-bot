@@ -557,6 +557,21 @@ SOL and climbing toward the 60 gate. The promotion case's cohort threshold
 (~30 pool-priced outcomes) is roughly an hour away at this rate; the
 duration gate (24-48h of sealed snapshots) remains the longest pole.
 
+## Duplicate-writer incident (2026-10-07 04:14Z, resolved)
+
+Two bot_runner processes wrote the same journal for ~6 hours: the paper
+keeper's child (spawned 21:59Z) survived every operator-managed restart
+because the operator's proc-service kills never touched the keeper's
+lineage. SQLite's WAL serialized the writes (no corruption), but the
+one-writer-by-convention invariant was violated and the position JSON
+was exposed to lost updates. Resolution: single supervisor restored —
+the keeper detected its child's death (process_dead, restarts=4,
+quick_deaths=0), backed off 30s, respawned with the latest code
+(04:19:30Z). Rule going forward: **the keeper owns the bot lifecycle**;
+operator restarts must kill the keeper first, or never spawn a second
+supervisor. The stale child also explains why some pre-dawn censoring
+patterns looked inconsistent: two gates were observing the same sweep.
+
 ## The whale never sells: exit condition found in the tape (2026-10-07 03:0xZ)
 
 Analysis of 476 whale-swept graduations (20+ SOL sweeps, 24h tape,
