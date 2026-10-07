@@ -572,6 +572,30 @@ operator restarts must kill the keeper first, or never spawn a second
 supervisor. The stale child also explains why some pre-dawn censoring
 patterns looked inconsistent: two gates were observing the same sweep.
 
+## Sentients: slow graduations and false rollovers (2026-10-07 15:0xZ)
+
+Third rollover-capable record, first under the continuous detector:
+accepted at 60.12 SOL, graduation **4m24s** after the crossing (vs
+8.6s/2.7s — slow graduations exist; the entry rides a grind, the 60s
+mark shows +2.37% still on-curve). The detector fired at G+26.9s on a
+2.7% dip — a FALSE rollover: the pool rebounded above the recorded
+peak (p30 7.416e-7) and stayed elevated (p120 +16.3%). The exit still
+captured **+180.4%** vs entry; the true peak was +194%.
+
+The timeline's fate on the same coin: 300s **+198.4%**, 900s
+**−92.35%**. The rollover rule crushed the timeline — but firing on a
+2.7% dip is the tuning question: a **rollover threshold** (exit only on
+a >N% drop from peak) trades exit speed against giving back gains, and
+the G-clock's price paths make the threshold sweep measurable per coin.
+The recorded peak is the peak at rollover time (first-write-wins);
+post-rollover rebounds are visible in the scheduled samples.
+
+Cohort: 2 rollover records — ELONPHIL +87.9% (fired late, blind rise),
+Sentients +180.4% (fired early, rebounded). Both beat the fixed 900s
+horizon (−91.5%, −92.35%); the fast-peak coins (fixed 60s +212%) are
+where the timeline still wins. The threshold sweep is the next
+refinement.
+
 ## The LP route is locked: fee config measured (2026-10-07 11:0xZ)
 
 Read the live fee_config PDA (the only tier, all PumpSwap pools):
