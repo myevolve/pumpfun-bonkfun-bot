@@ -2668,41 +2668,28 @@ class UniversalTrader:
             if not is_new:
                 return
             grad_at = monotonic()
+            pending = {5: "p5", 30: "p30", 120: "p120"}
             peak = (0.0, 0.0)  # (price, elapsed_s)
-            for offset, column in ((5, "p5"), (30, "p30"), (120, "p120")):
-                await asyncio.sleep(max(0.0, grad_at + offset - monotonic()))
+            rollover = None
+            while monotonic() < deadline and not (rollover and not pending):
+                await asyncio.sleep(2.0)
+                elapsed = monotonic() - grad_at
                 price = await self._graduated_pool_price(
                     token_info, remaining=max(5.0, deadline - monotonic())
                 )
-                if price is not None:
-                    self.lesson_journal.finish_grad_mark(
-                        entry_id, column, price[0], monotonic() - grad_at
-                    )
-                    if price[0] > peak[0]:
-                        peak = (price[0], monotonic() - grad_at)
-            # Rollover detector: poll until the first sample below the
-            # running peak — the condition-driven exit's captured outcome.
-            if peak[0] > 0:
-                rollover = None
-                while monotonic() < deadline:
-                    await asyncio.sleep(2.0)
-                    price = await self._graduated_pool_price(
-                        token_info, remaining=max(5.0, deadline - monotonic())
-                    )
-                    if price is None:
-                        continue
-                    if price[0] < peak[0]:
-                        rollover = (
-                            peak[0],
-                            peak[1],
-                            price[0],
-                            monotonic() - grad_at,
+                if price is None:
+                    continue
+                for offset, column in tuple(pending.items()):
+                    if elapsed >= offset:
+                        self.lesson_journal.finish_grad_mark(
+                            entry_id, column, price[0], elapsed
                         )
-                        break
-                    if price[0] > peak[0]:
-                        peak = (price[0], monotonic() - grad_at)
-                if rollover is not None:
+                        del pending[offset]
+                if peak[0] and price[0] < peak[0]:
+                    rollover = (peak[0], peak[1], price[0], elapsed)
                     self.lesson_journal.record_grad_rollover(entry_id, *rollover)
+                elif price[0] > peak[0]:
+                    peak = (price[0], elapsed)
         except Exception:  # noqa: BLE001 - the watch is optional instrumentation
             logger.warning(
                 "Graduation watch for entry %s censored", entry_id, exc_info=True
