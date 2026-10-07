@@ -557,6 +557,34 @@ SOL and climbing toward the 60 gate. The promotion case's cohort threshold
 (~30 pool-priced outcomes) is roughly an hour away at this rate; the
 duration gate (24-48h of sealed snapshots) remains the longest pole.
 
+## First overnight evidence (2026-10-07 00:38Z, 14h autonomous)
+
+The paper arm ran 14 hours unattended and produced the first real evidence
+cohort: 8 in-band entries (real_sol 60-79 SOL, all inside the ACTIVE band
+the coupling indicator called), 1328 decisions (~50/hour sustained), 71
+completions / 61 pool rows on the shadow (37 new graduations captured).
+
+**SPILL (61646)**: the first complete honest 3-horizon outcome — entered at
+62.39 SOL, the coin died on the curve (never graduated): 60s **-9.5%**,
+300s **-29%**, 900s **-75%**. Exactly the cold-arm decay pattern the tape
+predicted. Three horizons, same entry, populated prices, honest outcome.
+
+**CITED, GOLDBONER, SDOGE** graduated but their marks censored with
+TypeError (the pool/vault accounts were briefly in migration-unfinished
+state at mark-read time — the same transient race the shadow documented).
+The censoring is correct fail-closed behavior; the pool-exit pricing needs
+a read retry to survive the race. Verified live: CITED's pool reads fine
+minutes later (650B base tokens / 0.010 SOL quote — the whale took the
+SOL, the exit price is honest and it's a loss).
+
+**The active-band entries are real**: the gate accepted exactly the coins
+the coupling indicator called (real_sol 60-79, the X=50-60 ACTIVE band),
+8 entries in ~14 hours (~0.57/hour — matching the 8.5% coupling at 60
+crossings × ~25/hour crossers). The promotion case's cohort is building.
+
+**TypeSafe's 402** (no API credits): Jev scoring degrades gracefully
+(non-fatal), the gate runs without it. The evidence does not depend on Jev.
+
 ## Trend strengthening — the ACTIVE band expands downward (2026-10-06 16:18Z)
 
 Three hours after the first positive pooled mean, the trend REVERSED the
