@@ -155,7 +155,56 @@ class LessonJournal:
                 self._conn.execute(
                     f"ALTER TABLE lessons ADD COLUMN {column} {column_type}"
                 )
+        grad_existing = {
+            r[1] for r in self._conn.execute("PRAGMA table_info(grad_marks)")
+        }
+        for column in (
+            "peak_price",
+            "peak_elapsed_s",
+            "rollover_price",
+            "rollover_elapsed_s",
+        ):
+            if column not in grad_existing:
+                self._conn.execute(f"ALTER TABLE grad_marks ADD COLUMN {column} REAL")
         self._conn.commit()
+
+    def record_grad_rollover(
+        self,
+        entry_id: int,
+        peak_price: float,
+        peak_elapsed_s: float,
+        rollover_price: float,
+        rollover_elapsed_s: float,
+    ) -> None:
+        """Record the pool's rise peak and the first rollover sample.
+
+        The condition-driven exit: hold while the pool rises, exit on the
+        first lower sample. This stores what a rollover exit captured.
+        """
+        for name, price in (("peak", peak_price), ("rollover", rollover_price)):
+            if isinstance(price, bool) or not isfinite(price) or price <= 0:
+                raise ValueError(f"Graduation {name} price must be finite and positive")  # noqa: TRY003
+        for name, elapsed in (
+            ("peak", peak_elapsed_s),
+            ("rollover", rollover_elapsed_s),
+        ):
+            if not isfinite(elapsed) or elapsed < 0:
+                raise ValueError(
+                    f"Graduation {name} elapsed must be finite and nonnegative"
+                )  # noqa: TRY003
+        with self._conn:
+            self._conn.execute(
+                "UPDATE grad_marks SET peak_price=?, peak_elapsed_s=?,"
+                " rollover_price=?, rollover_elapsed_s=?"
+                " WHERE entry_id=? AND peak_price IS NULL",
+                (
+                    peak_price,
+                    peak_elapsed_s,
+                    rollover_price,
+                    rollover_elapsed_s,
+                    entry_id,
+                ),
+            )
 
     def record(
         self,
