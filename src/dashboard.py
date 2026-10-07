@@ -243,7 +243,8 @@ def _evidence_amount(value: int | None) -> str:
 
 def load_whaleride_coupling() -> dict:
     """Coupling per X from the shadow collector's JSONL, read-only."""
-    return _coupling_from_rows(_read_shadow_rows())
+    curves, pools = _read_shadow_rows()
+    return _coupling_from_rows(curves, pools)
 
 
 def _read_shadow_rows() -> tuple[dict[str, list], dict[str, list]]:
