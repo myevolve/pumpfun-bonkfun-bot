@@ -257,6 +257,24 @@ def audit_lessons(db: Path) -> dict:
                 " WHERE utc >= datetime('now', '-24 hours') GROUP BY decision"
             ).fetchall()
         )
+        # G-anchored decay: pool price at graduation vs G+5/30/120s samples,
+        # as mean ratios over rows where both columns resolve. The table is
+        # absent in journals not yet opened by the new schema.
+        grad = {
+            "n": 0,
+            "p5_over_open": None,
+            "p30_over_open": None,
+            "p120_over_open": None,
+        }
+        grad_n = 0
+        try:
+            grad_row = conn.execute(
+                "SELECT COUNT(*), AVG(open_price), AVG(p5), AVG(p30), AVG(p120)"
+                " FROM grad_marks WHERE open_price IS NOT NULL"
+            ).fetchone()
+            grad_n = conn.execute("SELECT COUNT(*) FROM grad_marks").fetchone()[0]
+        except sqlite3.OperationalError:
+            grad_row = None
     finally:
         conn.close()
     return {
@@ -267,6 +285,8 @@ def audit_lessons(db: Path) -> dict:
         "avg_hold_s": avg_hold_s[0],
         "resolved_marks": avg_hold_s[1],
         "avg_hold_by_reason": holds,
+        "grad_marks_total": grad_n,
+        "grad_decay": grad,
     }
 
 
@@ -340,6 +360,13 @@ def main() -> None:
                 f"avg realized hold: {journal['avg_hold_s']}s over "
                 f"{journal['resolved_marks']} resolved marks "
                 f"(condition-driven; by reason: {journal['avg_hold_by_reason']})"
+            )
+        gdec = journal.get("grad_decay") or {}
+        if gdec.get("n"):
+            print(
+                f"grad-anchored decay (n={gdec['n']}): "
+                f"G+5s {gdec['p5_over_open']}, G+30s {gdec['p30_over_open']}, "
+                f"G+120s {gdec['p120_over_open']} (pool price / open price)"
             )
 
 

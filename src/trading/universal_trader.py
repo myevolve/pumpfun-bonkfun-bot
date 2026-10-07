@@ -2489,6 +2489,13 @@ class UniversalTrader:
                     done, entry_id, h, started
                 )
             )
+        watch = asyncio.create_task(
+            self._graduation_watch(token_info, entry_id, started)
+        )
+        self._paper_tasks.add(watch)
+        watch.add_done_callback(
+            lambda done: self._paper_mark_finished(done, entry_id, -1, started)
+        )
 
     def _paper_mark_finished(
         self, task: asyncio.Task, entry_id: int, horizon_s: int, started: float
@@ -2605,6 +2612,68 @@ class UniversalTrader:
                     return None
                 return None
         return None
+
+    async def _graduation_watch(
+        self, token_info: TokenInfo, entry_id: int, started: float
+    ) -> None:
+        """G-anchored measurement clock: pool price at graduation + G+5/30/120s.
+
+        The accept-anchored horizons mix sweep continuation, graduation and
+        pool decay; the tape says the pool's liquidity halves in a median of
+        18s after its peak, so the strategy's real exit question is anchored
+        at the graduation event. Poll the curve every 2s until complete,
+        price the pool (settle+retry), then sample the decay. ANY failure is
+        a censored column — never fatal, never an invented price.
+        """
+        try:
+            deadline = started + 960
+            while monotonic() < deadline:
+                remaining = deadline - monotonic()
+                try:
+                    async with asyncio.timeout(remaining):
+                        (
+                            state,
+                            _,
+                            _,
+                            _,
+                        ) = await self.platform_implementations.curve_manager.get_pool_state_and_token_program(
+                            token_info.bonding_curve,
+                            token_info.mint,
+                            commitment="processed",
+                        )
+                    if state.get("complete") is True:
+                        break
+                except (TimeoutError, ValueError, TypeError, AttributeError):
+                    pass  # migration race / transient: poll again
+                await asyncio.sleep(2.0)
+            else:
+                return  # never graduated inside the watch window
+            grad_elapsed = monotonic() - started
+            pool_price = await self._graduated_pool_price(
+                token_info, remaining=max(5.0, deadline - monotonic())
+            )
+            is_new = self.lesson_journal.record_grad_open(
+                entry_id,
+                grad_elapsed,
+                pool_price[0] if pool_price else None,
+                "grad_open" if pool_price else "grad_open_censored",
+            )
+            if not is_new:
+                return
+            grad_at = monotonic()
+            for offset, column in ((5, "p5"), (30, "p30"), (120, "p120")):
+                await asyncio.sleep(max(0.0, grad_at + offset - monotonic()))
+                price = await self._graduated_pool_price(
+                    token_info, remaining=max(5.0, deadline - monotonic())
+                )
+                if price is not None:
+                    self.lesson_journal.finish_grad_mark(
+                        entry_id, column, price[0], monotonic() - grad_at
+                    )
+        except Exception:  # noqa: BLE001 - the watch is optional instrumentation
+            logger.warning(
+                "Graduation watch for entry %s censored", entry_id, exc_info=True
+            )
 
     async def _paper_mark(
         self, token_info: TokenInfo, entry_id: int, horizon_s: int, started: float

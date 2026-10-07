@@ -39,7 +39,6 @@ from core.pubkeys import (
     normalize_quote_mint,
     quote_units_per_token,
 )
-
 from utils.logger import get_logger
 from utils.paths import state_path
 
@@ -90,6 +89,17 @@ CREATE TABLE IF NOT EXISTS paper_marks (
     reason TEXT,
     exit_state TEXT,
     PRIMARY KEY (entry_id, horizon_s)
+);
+CREATE TABLE IF NOT EXISTS grad_marks (
+    entry_id INTEGER NOT NULL REFERENCES lessons(id),
+    grad_utc TEXT NOT NULL,
+    grad_elapsed_s REAL,
+    open_price REAL,
+    p5 REAL,
+    p30 REAL,
+    p120 REAL,
+    reason TEXT,
+    PRIMARY KEY (entry_id)
 );
 """
 
@@ -143,7 +153,7 @@ class LessonJournal:
         ):
             if column not in existing:
                 self._conn.execute(
-                    f"ALTER TABLE lessons ADD COLUMN {column} {column_type}"  # noqa: S608 - fixed column names
+                    f"ALTER TABLE lessons ADD COLUMN {column} {column_type}"
                 )
         self._conn.commit()
 
@@ -313,6 +323,51 @@ class LessonJournal:
                     entry_id,
                     horizon_s,
                 ),
+            )
+
+    _GRAD_COLUMNS = frozenset({"open_price", "p5", "p30", "p120"})
+
+    def record_grad_open(
+        self,
+        entry_id: int,
+        grad_elapsed_s: float,
+        open_price: float | None,
+        reason: str,
+    ) -> bool:
+        """Record the pool-open observation at graduation; first detection wins.
+
+        Returns False when another watcher already recorded this entry.
+        """
+        if grad_elapsed_s < 0 or not isfinite(grad_elapsed_s):
+            raise ValueError("Graduation elapsed time must be finite and nonnegative")  # noqa: TRY003
+        if open_price is not None and (
+            isinstance(open_price, bool) or not isfinite(open_price) or open_price <= 0
+        ):
+            raise ValueError("Graduation pool price must be finite and positive")  # noqa: TRY003
+        with self._conn:
+            cursor = self._conn.execute(
+                "INSERT OR IGNORE INTO grad_marks"
+                " (entry_id, grad_utc, grad_elapsed_s, open_price, reason)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (entry_id, _utc(), grad_elapsed_s, open_price, reason),
+            )
+        return cursor.rowcount > 0
+
+    def finish_grad_mark(
+        self, entry_id: int, column: str, price: float, elapsed_s: float
+    ) -> None:
+        """Fill one G-anchored horizon; censored horizons stay NULL forever."""
+        if column not in self._GRAD_COLUMNS or column == "open_price":
+            raise ValueError(f"Unknown graduation mark column: {column}")  # noqa: TRY003
+        if isinstance(price, bool) or not isfinite(price) or price <= 0:
+            raise ValueError("Graduation mark price must be finite and positive")  # noqa: TRY003
+        if not isfinite(elapsed_s) or elapsed_s < 0:
+            raise ValueError("Graduation elapsed time must be finite and nonnegative")  # noqa: TRY003
+        with self._conn:
+            self._conn.execute(
+                f"UPDATE grad_marks SET {column}=?, reason=reason || ?"
+                f" WHERE entry_id=? AND {column} IS NULL",
+                (price, f" {column}={elapsed_s:.1f}s", entry_id),
             )
 
     def close(self) -> None:
