@@ -572,6 +572,30 @@ operator restarts must kill the keeper first, or never spawn a second
 supervisor. The stale child also explains why some pre-dawn censoring
 patterns looked inconsistent: two gates were observing the same sweep.
 
+## The LP route is locked: fee config measured (2026-10-07 11:0xZ)
+
+Read the live fee_config PDA (the only tier, all PumpSwap pools):
+**lp=0 bps, protocol=95 bps, creator=30 bps.** Liquidity providers earn
+nothing — depositing into a graduated pool donates capital to absorb
+the dump's IL while protocol and creator split 100% of the fees. The
+follower cannot own the fee stream by LPing.
+
+The corrected annuity: creator=30 bps × 1,858 SOL/24h median volume =
+~5.6 SOL/day — payback ~15 days on the median 85 SOL self-sweep (not
+the 5–9 days estimated at 50–90 bps; the actual config is lower but
+still a real annuity).
+
+The complete, measured economics of the pump.fun endgame:
+1. Creators self-sweep (66%) to graduate — buying a fee annuity.
+2. The followers' churn IS the annuity's income; the decay pays them.
+3. LPs are locked out (0 bps) — the stream is creator+protocol only.
+4. Entry trading is dead at retail latency (−9% to −32% EV).
+5. The serial snipers are paid launch services (no fees, no sells).
+
+The only profitable roles are creator (annuity) and protocol (95 bps).
+A follower at retail latency has no +EV role in this game — measured,
+sealed, and re-openable only if the fee config or the regime changes.
+
 ## The whale census: the self-sweep fee annuity (2026-10-07 09:0xZ)
 
 Wallet-level census of 477 whale-swept graduations (24h tape): **66.2%
