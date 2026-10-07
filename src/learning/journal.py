@@ -47,6 +47,13 @@ logger = get_logger(__name__)
 _DEFAULT_DB = state_path("learning", "lessons.sqlite3")
 PAPER_HORIZONS = (60, 300, 900)
 PAPER_MARK_MAX_LATENESS_S = 5.0
+ROLLOVER_EXIT_DROP_FRACTION = 0.05
+"""Pool-price drop from the running peak that marks a rollover.
+
+Tuned by the recorded price paths: 2s-poll noise produces sub-2% dips
+(3 of 5 records fired false rollovers at 0% threshold); 5% keeps the
+real rollovers and skips the noise.
+"""
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS lessons (
@@ -191,7 +198,7 @@ class LessonJournal:
             if not isfinite(elapsed) or elapsed < 0:
                 raise ValueError(
                     f"Graduation {name} elapsed must be finite and nonnegative"
-                )  # noqa: TRY003
+                )
         with self._conn:
             self._conn.execute(
                 "UPDATE grad_marks SET peak_price=?, peak_elapsed_s=?,"

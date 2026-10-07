@@ -62,6 +62,7 @@ from interfaces.core import Platform, TokenInfo
 from learning.journal import (
     PAPER_HORIZONS,
     PAPER_MARK_MAX_LATENESS_S,
+    ROLLOVER_EXIT_DROP_FRACTION,
     GateSnapshot,
     JevScorer,
     LessonJournal,
@@ -2685,7 +2686,7 @@ class UniversalTrader:
                             entry_id, column, price[0], elapsed
                         )
                         del pending[offset]
-                if peak[0] and price[0] < peak[0]:
+                if peak[0] and price[0] < peak[0] * (1 - ROLLOVER_EXIT_DROP_FRACTION):
                     rollover = (peak[0], peak[1], price[0], elapsed)
                     self.lesson_journal.record_grad_rollover(entry_id, *rollover)
                 elif price[0] > peak[0]:
