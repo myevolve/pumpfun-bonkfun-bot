@@ -275,6 +275,13 @@ def audit_lessons(db: Path) -> dict:
             grad_n = conn.execute("SELECT COUNT(*) FROM grad_marks").fetchone()[0]
         except sqlite3.OperationalError:
             grad_row = None
+        if grad_row and grad_row[0] and grad_row[1]:
+            grad["n"] = grad_row[0]
+            for i, key in enumerate(
+                ("p5_over_open", "p30_over_open", "p120_over_open"), 2
+            ):
+                if grad_row[i] is not None:
+                    grad[key] = round(grad_row[i] / grad_row[1], 4)
     finally:
         conn.close()
     return {
