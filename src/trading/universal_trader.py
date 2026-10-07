@@ -2489,6 +2489,8 @@ class UniversalTrader:
                     done, entry_id, h, started
                 )
             )
+        if entry_price is None:
+            return  # no entry baseline: G-marks need an anchor too
         watch = asyncio.create_task(
             self._graduation_watch(token_info, entry_id, started)
         )
