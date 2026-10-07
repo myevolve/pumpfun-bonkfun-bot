@@ -2629,6 +2629,7 @@ class UniversalTrader:
         """
         try:
             deadline = started + 960
+            graduated = False
             while monotonic() < deadline:
                 remaining = deadline - monotonic()
                 try:
@@ -2636,19 +2637,23 @@ class UniversalTrader:
                         (
                             state,
                             _,
-                            _,
-                            _,
                         ) = await self.platform_implementations.curve_manager.get_pool_state_and_token_program(
                             token_info.bonding_curve,
                             token_info.mint,
                             commitment="processed",
                         )
                     if state.get("complete") is True:
+                        graduated = True
                         break
                 except (TimeoutError, ValueError, TypeError, AttributeError):
-                    pass  # migration race / transient: poll again
+                    # The strict decoder rejects a zeroed completed curve (the
+                    # whale swept it) before reporting complete. Check the raw
+                    # bytes: complete=1 plus a readable pool prices the open.
+                    if await self._completed_curve_pool_price(token_info, remaining):
+                        graduated = True
+                        break
                 await asyncio.sleep(2.0)
-            else:
+            if not graduated:
                 return  # never graduated inside the watch window
             grad_elapsed = monotonic() - started
             pool_price = await self._graduated_pool_price(
