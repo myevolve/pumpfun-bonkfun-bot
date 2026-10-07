@@ -557,6 +557,17 @@ SOL and climbing toward the 60 gate. The promotion case's cohort threshold
 (~30 pool-priced outcomes) is roughly an hour away at this rate; the
 duration gate (24-48h of sealed snapshots) remains the longest pole.
 
+## Pool exit price read retry (2026-10-07 01:23Z)
+
+The overnight run's graduated coins (CITED, GOLDBONER, SDOGE) censored
+their marks with TypeError because the pool/vault accounts were briefly
+unreadable mid-migration — the same transient race the shadow's
+pool_unreadable handles. Verified live: CITED's pool reads fine minutes
+after the same migration (650B base tokens, 0.010 SOL quote — the whale
+took the SOL, the honest exit price is a loss). The pool price read now
+settles 2s and retries once on TimeoutError/ValueError/TypeError before
+censoring — bounded by the mark's own budget. 830 tests pass.
+
 ## First overnight evidence (2026-10-07 00:38Z, 14h autonomous)
 
 The paper arm ran 14 hours unattended and produced the first real evidence
