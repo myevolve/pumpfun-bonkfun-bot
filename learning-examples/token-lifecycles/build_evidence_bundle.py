@@ -236,6 +236,21 @@ def audit_lessons(db: Path) -> dict:
             (time.strftime("%Y-%m-%dT%H", time.gmtime(time.time() - 3600)) + ":00",),
         ).fetchone()[0]
         marks = conn.execute("SELECT COUNT(*) FROM paper_marks").fetchone()[0]
+        # Avg realized hold, from resolved marks only (exit_price present).
+        # Hold policy is condition-driven; this reports what exits actually
+        # took, it is not a hold target. Censored rows have no elapsed time.
+        holds = {
+            reason: {"avg_s": avg_s, "n": n}
+            for reason, avg_s, n in conn.execute(
+                "SELECT reason, ROUND(AVG(elapsed_s), 1), COUNT(*)"
+                " FROM paper_marks WHERE exit_price IS NOT NULL"
+                " GROUP BY reason ORDER BY 3 DESC"
+            ).fetchall()
+        }
+        avg_hold_s = conn.execute(
+            "SELECT ROUND(AVG(elapsed_s), 1), COUNT(*) FROM paper_marks"
+            " WHERE exit_price IS NOT NULL"
+        ).fetchone()
         decisions = dict(
             conn.execute(
                 "SELECT decision, COUNT(*) FROM lessons"
@@ -249,6 +264,9 @@ def audit_lessons(db: Path) -> dict:
         "lessons_last_hour": recent,
         "paper_marks_total": marks,
         "decisions_last_24h": decisions,
+        "avg_hold_s": avg_hold_s[0],
+        "resolved_marks": avg_hold_s[1],
+        "avg_hold_by_reason": holds,
     }
 
 
@@ -317,6 +335,12 @@ def main() -> None:
             f"journal: {journal['lessons_total']} lessons, "
             f"{journal['paper_marks_total']} paper marks"
         )
+        if journal.get("resolved_marks"):
+            print(
+                f"avg realized hold: {journal['avg_hold_s']}s over "
+                f"{journal['resolved_marks']} resolved marks "
+                f"(condition-driven; by reason: {journal['avg_hold_by_reason']})"
+            )
 
 
 if __name__ == "__main__":

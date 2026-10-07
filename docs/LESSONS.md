@@ -557,6 +557,20 @@ SOL and climbing toward the 60 gate. The promotion case's cohort threshold
 (~30 pool-priced outcomes) is roughly an hour away at this rate; the
 duration gate (24-48h of sealed snapshots) remains the longest pole.
 
+## Hold policy: conditions rule, never a timeline (2026-10-07, user directive)
+
+Holds are **dynamic and condition-driven** — never a fixed timeline. The
+strategy holds until conditions say exit (TP/SL bands, graduation, flow or
+liquidity deterioration), bounded only by a safety cap (max_hold_time,
+stop-loss) that prevents losing more than the edge pays — a backstop, not
+a target. The 60/300/900s paper-mark horizons are **measurement
+scaffolding**: they record the decay curve so an exit rule can be designed
+from evidence; they are not the policy, and no config forces a minimum
+hold. What we report is **average realized hold** — the elapsed time of
+resolved exits, by reason — now in every evidence bundle
+(`avg_hold_s`, `avg_hold_by_reason`) so the hold statistics accumulate
+with the rest of the honest record.
+
 ## First complete pool-priced whale-ride cycle (2026-10-07 02:29Z)
 
 CLAUDIA (lesson 62158): accepted 02:14:04Z at real_sol 60.54 (in-band),
