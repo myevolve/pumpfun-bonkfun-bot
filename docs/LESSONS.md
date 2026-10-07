@@ -557,6 +557,26 @@ SOL and climbing toward the 60 gate. The promotion case's cohort threshold
 (~30 pool-priced outcomes) is roughly an hour away at this rate; the
 duration gate (24-48h of sealed snapshots) remains the longest pole.
 
+## First complete pool-priced whale-ride cycle (2026-10-07 02:29Z)
+
+CLAUDIA (lesson 62158): accepted 02:14:04Z at real_sol 60.54 (in-band),
+graduated within minutes, and all three horizons priced off the canonical
+pool under the fixed code — 60s **−74.99%**, 300s **−80.0%**, 900s
+**−83.74%**, every mark `graduated_pool_exit`, journaled without crash
+or censor. The mark path works end to end: gate accept → graduation
+→ pool-priced honest exit → journal.
+
+The honest pattern so far (n=3 complete records): PUP −91% (mid-band),
+SPILL −9.5/−29/−75% (on-curve death), CLAUDIA −75/−80/−84%
+(pool decay). All heavy losses. The tape's +94–165% graduator mean is
+entry-at-sweep-start; the paper arm enters when it sees the accept —
+mid-sweep, after the first wave. That entry-timing gap is precisely the
+question the instrument exists to answer, and the answer accumulating is:
+at retail latency, accepting at the visible accept loses heavily. The
+coupling indicator's ACTIVE band says whales beat the curve up through 60;
+it does not say a follower can enter after the fact and survive the
+pool-open decay. Both facts now live in the same honest ledger.
+
 ## The fatal root cause, closed (2026-10-07 02:10Z)
 
 The 'Failed to initialize or start trader' crashes at 17:55Z and 21:57Z
