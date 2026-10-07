@@ -572,6 +572,28 @@ operator restarts must kill the keeper first, or never spawn a second
 supervisor. The stale child also explains why some pre-dawn censoring
 patterns looked inconsistent: two gates were observing the same sweep.
 
+## The four-record rollover cohort (2026-10-07 20:0xZ)
+
+FOMOPUP (64087, accepted 78.56 SOL, graduated 3.4s): peak +14.6% at
+G+~14s, rollover caught G+14.6s — exit captured +14.6%; the grace was
+shorter than the detection latency. PEA (64220, accepted 60.40 SOL,
+graduated 28.3s): pool NEVER rose (below open at G+5s), rollover at
+G+6.1s captured −11.2%. The 900s timeline marks: −93.88% and
+−70.99% — the dump is universal, only the grace period differs.
+
+Cohort table (rollover exit vs best timeline mark):
+ELONPHIL +87.9% (timeline 60s +212.5%), Sentients +180.4% (900s
+−92.35%), FOMOPUP +14.6% (900s −93.88%), PEA −11.2% (900s
+−70.99%). The rollover rule's floor holds (3 of 4 crush the timeline;
+the fourth loses little); its ceiling is set by the grace-vs-latency
+race, which is the same latency frontier — the faster the pool dies,
+the less any follower exit captures.
+
+The measurable refinement stands: a rollover-threshold sweep (exit on
+>N% drop from peak, N in 2/5/10) over the recorded price paths. The
+grace-period distribution is the strategy's real parameter, and the
+G-clock is accumulating it.
+
 ## Sentients: slow graduations and false rollovers (2026-10-07 15:0xZ)
 
 Third rollover-capable record, first under the continuous detector:
