@@ -572,6 +572,24 @@ operator restarts must kill the keeper first, or never spawn a second
 supervisor. The stale child also explains why some pre-dawn censoring
 patterns looked inconsistent: two gates were observing the same sweep.
 
+## First dual-clock record: rise then dump (2026-10-07 06:22Z)
+
+poopcat's complete picture (both clocks on one coin): the pool rose
++101% by the 60s mark (G+51s, +40% above open at G+2min), rolled over by
+the 300s mark (−39%), and dumped to −91.5% by the 900s mark. The
+post-graduation liquidity window is real but brief: **~2 minutes of
+rise, then the crash** — the tape's 18s half-life was the dump-type
+without a grace period.
+
+The condition-driven exit rule the data defines: **hold while the pool
+rises, exit the moment it rolls over.** The G-clock's samples (G+5/30/
+120s) measure the rise; the accept-anchored marks measure the rollover
+and dump. A live rule would watch the pool price path and exit on the
+first lower sample — dynamic, condition-driven, no timeline. Every
+coin eventually dumps to −90%+: the rise window is the only exit
+opportunity, and missing it is the difference between +101% and −91.5%
+on the same coin.
+
 ## First complete G-record: the pool fate is bimodal (2026-10-07 06:09Z)
 
 poopcat (entry 62798): accepted 06:06:13Z at real_sol 60.01, graduation
