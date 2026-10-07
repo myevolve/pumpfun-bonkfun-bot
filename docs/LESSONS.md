@@ -572,6 +572,29 @@ operator restarts must kill the keeper first, or never spawn a second
 supervisor. The stale child also explains why some pre-dawn censoring
 patterns looked inconsistent: two gates were observing the same sweep.
 
+## The whale census: the self-sweep fee annuity (2026-10-07 09:0xZ)
+
+Wallet-level census of 477 whale-swept graduations (24h tape): **66.2%
+of sweeps are SELF-SWEEPS — the whale is the creator.** Cashback is not
+the driver (1.5%). The remainder splits into a scripted launch-service
+class (four wallets × 2 coins × exactly 170 SOL, all self-sweeps) and
+serial snipers who never create (top: 15 coins, 392 SOL).
+
+**The business model is a fee annuity**: median self-sweep 85 SOL buys
+a graduated pool with median 1,858 SOL/24h volume; at creator-set fee
+bps (≈50–90) that pays ~9–17 SOL/day — **payback in 5–9 days**. The
+creator never sells because the POOL IS THE ASSET: the followers' churn
+is the fee stream. This explains the whale's refusal to sell (0/476),
+the pool's decay (churn pays the creator), and the manufactured-dump
+pattern (volume for the annuity). The serial snipers (never creators)
+are a paid launch-service class — the creator pays off-chain to have
+their coin graduated.
+
+The follower's whale-ride is dead at latency; the creator's game is
+owning the fee stream. Open question for the follower: can a non-creator
+own the stream (LP into graduated pools — fee share × liquidity share)?
+Measurable without funds via simulation against the observed volumes.
+
 ## First dual-clock record: rise then dump (2026-10-07 06:22Z)
 
 poopcat's complete picture (both clocks on one coin): the pool rose
