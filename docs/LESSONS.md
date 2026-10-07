@@ -572,6 +572,27 @@ operator restarts must kill the keeper first, or never spawn a second
 supervisor. The stale child also explains why some pre-dawn censoring
 patterns looked inconsistent: two gates were observing the same sweep.
 
+## The latency frontier: the promotion question answered (2026-10-07 05:4xZ)
+
+Measured on 215–273 graduated coins with slot-level trades: the entry
+price is **+25–56% above the X crossing by the time a realistic accept
+lands (1–2 trades/slots)**, settling to +9–14% by +10 trades. Lower
+gates are worse — crossing X=40 earlier means more sweep ahead:
+X=40 +1 trade **+56%**, X=50 **+55%**, X=60 **+25%**.
+
+EV arithmetic (coupling EV at the crossing ÷ 1-trade drift):
+X=60 **−9.4%**, X=50 **−28.9%**, X=40 **−31.8%**. Even the p25 tail
+eats 5–17%. **At retail latency the whale-ride entry is dead at every
+gate level** — the +13.3% theoretical EV exists only at the crossing
+price, which is unreachable. The live marks' honest losses (PUP −91%,
+SPILL −75%, CLAUDIA −84%) are this drift, measured, not bad luck.
+
+The edge exists only for same-slot execution (the whale's own game:
+colocated infra + priority-fee advantage). That is an infrastructure
+decision requiring explicit approval, not a strategy change. The
+instrument stays live: if the regime changes or infra upgrades, the
+G-clock and the sealed bundles re-open the question with evidence.
+
 ## The whale never sells: exit condition found in the tape (2026-10-07 03:0xZ)
 
 Analysis of 476 whale-swept graduations (20+ SOL sweeps, 24h tape,
