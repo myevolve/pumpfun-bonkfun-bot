@@ -719,6 +719,26 @@ captured-of-peak while minimizing false-fire giveback is the design answer;
 4 paths is too few to declare it, but the sweep can run on every new record
 as the instrument accumulates paths.
 
+## The threshold sweep: closed, no-threshold wins (2026-10-07 16:1xZ)
+
+16 rollover-capable coins under the continuous detector. The no-threshold fire
+(exit at the first poll below the running peak) beat the 900s timeline on 13,
+tied on 2 already-dead coins, and lost once: WICK's fire caught +13% and the
+pool rebounded to +152%. The fire beats the timeline by +1,865 points in
+aggregate (Sentients +272.7, CAPYWIFGUN +349.4, solcat +200.6, butter +168.7,
+FOMOPUP +145.2, PAHC +132.7, CAPES +120.2, PEA +100.8, SWORDPEPE +50.3,
+MEMENCY +33.2, TARDTANK +29.2, Mishu +0.1, WICK -139.2).
+
+The drop-from-peak distribution spans -75.2% (MEMENCY) to -1.8% (WIFAUTON).
+The sweep asks: does a skip-threshold keep WICK without losing a crusher? To
+skip WICK's -5.5% fire the threshold must exceed 5.5%, which also skips
+CAPES (-5.2, +27 vs -93) and Sentients (-2.4, +180 vs -92). Sentients proves
+small dips DO predict crushers: the same ~2% dip led Sentients to +180 and
+WICK to +152. The best curve-fit threshold (~5.3%) keeps WICK by +152 but is
+supported by exactly one coin - optimizing noise against +1,865. The
+no-threshold fire is the measured default; the rebound counter-archetype
+(WICK) is its known, quantified cost.
+
 ## Sentients: slow graduations and false rollovers (2026-10-07 15:0xZ)
 
 Third rollover-capable record, first under the continuous detector:
