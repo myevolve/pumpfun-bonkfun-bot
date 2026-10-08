@@ -615,6 +615,58 @@ The measurable refinement stands: a rollover-threshold sweep (exit on
 grace-period distribution is the strategy's real parameter, and the
 G-clock is accumulating it.
 
+## The rollover cohort at 12: every archetype and both failure modes (2026-10-08 14:5xZ)
+
+Twelve rollover-capable graduations since the continuous detector went live.
+The detector polls the pool every 2s from graduation open; the exit fires on the
+first poll below the running peak. Outcomes vs curve entry (all rolls captured
+from the same G-clock samples):
+
+| coin | grad delay | peak vs entry | roll exit | timeline exit (60/300/900) | archetype |
+|------|-----------|---------------|-----------|---------------------------|-----------|
+| FOMOPUP | 3.4s | +1.9% | +51.3% | — | small wave |
+| PEA | 28.3s | +2.4% | +29.8% | — | small wave |
+| WIFAUTON | 2.5s | +1.3% | +35.8% | — | small wave |
+| MIMI | 29.5s | +7.5% | +15.0% | — | small wave |
+| PAHC | 7.0s | +6.3% | +41.9% | — | small wave |
+| CAPES | 15.6s | +1.9% | +27.2% | — | small wave |
+| poopcat | 8.6s | +8.6% | +58.0% | — | small wave |
+| ELONPHIL | 2.7s | +16.5% | +87.9% | 60s +212.5% | blind rise |
+| Sentients | 261.8s | +194.0% | +180.4% | 900s -92.4% | slow grad, false roll |
+| butter | 38.7s | +98.9% | +76.4% | 900s -92.3% | slow grad (censored row) |
+| solcat | 2.3s | +250.1% | +108.0% | 300s +221.6%, 900s -92.6% | false roll, rising pool |
+| Mishu | 11.0s | +2.3% | -98.4% | all -98.5% | instant death |
+| CAPYWIFGUN | 2.6s | +401.0% | +256.6% | 60s +264.8%, 900s -92.8% | big wave (4x) |
+| TARDTANK | 2.4s | +0.9% | -64.2% | 900s -93.4% | instant collapse |
+
+(the table has 14 rows: 12 records + 2 earlier records; FOMOPUP..CAPES and
+poopcat/ELONPHIL predate the full timeline marks - their fixed-horizon rows are
+in the sqlite, not the table. The 5 Oct-8 records have the full picture.)
+
+**The distribution:** 9 positive (+15% to +257%), 3 negative (-64%, -98%).
+The rule wins on rise-then-decline (CAPYWIFGUN: fire near the peak captures 4x),
+loses on instant collapse (Mishu, TARDTANK: the dump happens between polls - no
+exit rule beats it; the exit happens at the first post-collapse poll regardless).
+
+**Both failure modes measured:**
+1. **False rollover** (Sentients, solcat): a dip in a rising pool fires early -
+   the exit captures half or less of the true peak (solcat +108% vs the 300s
+   peak +221.6%). The pool kept rising after the fire.
+2. **Instant collapse** (Mishu, TARDTANK): the pool's first post-open poll
+   already read collapsed - the detector never saw the open. TARDTANK's entry
+   was the highest curve ever accepted (78.5 SOL); the pool opened at 0.9% above
+   entry and collapsed to -64% within one poll.
+
+**The bimodal fate confirmed on 5 more coins:** all 5 dumped at 900s
+(-92.3% to -98.5%). The pool's fate: rise-then-dump is the modal shape.
+
+**The threshold is now a measurable parameter.** A >N%-drop-from-peak condition
+would delay the false rollovers (solcat's pool kept rising - a 10% threshold
+would have captured the +221.6% peak) while CAPYWIFGUN's true rollover was an
+11.2% drop (a 10% threshold still fires; 15% doesn't). The G-clock's 2s price
+paths can sweep the threshold per coin. The current threshold: any drop (the
+most sensitive setting).
+
 ## Sentients: slow graduations and false rollovers (2026-10-07 15:0xZ)
 
 Third rollover-capable record, first under the continuous detector:
