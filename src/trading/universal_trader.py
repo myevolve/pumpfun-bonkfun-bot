@@ -2670,7 +2670,7 @@ class UniversalTrader:
                 return
             grad_at = monotonic()
             pending = {5: "p5", 30: "p30", 120: "p120"}
-            peak = (0.0, 0.0)  # (price, elapsed_s)
+            peak = (pool_price[0] if pool_price else 0.0, 0.0)  # (price, elapsed_s)
             rollover = None
             while monotonic() < deadline and not (rollover and not pending):
                 await asyncio.sleep(2.0)
