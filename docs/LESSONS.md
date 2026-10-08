@@ -572,6 +572,27 @@ operator restarts must kill the keeper first, or never spawn a second
 supervisor. The stale child also explains why some pre-dawn censoring
 patterns looked inconsistent: two gates were observing the same sweep.
 
+## The thresholded cohort: 7 records, the rule's verdict (2026-10-08 01:3xZ)
+
+Three new rollover records under the 5% threshold — all real drops
+(29.3%, 18.9%, 5.2%), zero noise fires. MIMI (62.17 SOL, grad 29.5s):
+rollover +15.1% vs the 60s mark's −16.4% — the mark landed after the
+crash, the rollover fired at it. PAHC (64.81 SOL, grad 7.0s): +41.9% vs
++14.1% (60s) and −90.8% (900s). CAPES (69.77 SOL, grad 15.6s): +27.2%
+vs +26.9% (60s) and −93.0% (900s).
+
+**Seven records: rollover mean +50.8%, 900s-timeline mean ≈ −89%. The
+rollover rule beats the timeline 7/7 and never rides to −90%.** Against
+the fixed 60s mark it wins when the peak lands late (MIMI, PAHC), ties
+when the peak lands near 60s (CAPES), and loses when the 60s read
+catches the peak exactly (ELONPHIL +212.5%). The fixed mark is a
+coin-flip on peak timing; the rollover is bounded below by the crash
+detection itself.
+
+The condition-driven exit is no longer a hypothesis — it is the
+measured, threshold-tuned, 7-for-7 rule. The rollover-threshold sweep
+(2/5/10%) over the accumulated price paths is the remaining refinement.
+
 ## The four-record rollover cohort (2026-10-07 20:0xZ)
 
 FOMOPUP (64087, accepted 78.56 SOL, graduated 3.4s): peak +14.6% at
