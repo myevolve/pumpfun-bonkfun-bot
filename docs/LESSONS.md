@@ -739,6 +739,34 @@ supported by exactly one coin - optimizing noise against +1,865. The
 no-threshold fire is the measured default; the rebound counter-archetype
 (WICK) is its known, quantified cost.
 
+## The 2% trailing exit is dead: five live samples (2026-10-07 17:0xZ)
+
+The condition-driven exit (2% dip from running peak, fires at most once per
+graduation) now has five rollover-capable live records. Against each coin's
+best fixed-horizon mark:
+
+| coin | rollover exit | best fixed mark | outcome |
+|---|---|---|---|
+| poopcat | +427.9% | 60s +433.0% | matched |
+| ELONPHIL | +87.9% | 60s +212.5% | lost 2.4x |
+| Sentients | +180.4% | 300s +198.4% | lost |
+| TARDTANK | -64.2% | 300s +24.5% | lost to a positive mark |
+| WICK | +13.0% | 300s +193.9% | lost 15x |
+
+It never beat the best fixed mark. The 2% dip fires on noise: it exits
+rising pools' dips (WICK: exit +13.0% while the pool reached +193.9% at
+300s) and rising pools' crash-starts (TARDTANK: exit -64.2% while the pool
+rebounded to +24.5% at 300s). The dump-type rollover (TARDTANK) is the only
+record where the exit caught a crash it could not avoid - and even there
+the 300s mark was positive.
+
+The trailing-stop design question is real but the sweep needs the full
+price path: the G-clock detector polls every 2 seconds through the
+post-graduation window yet stores only p5/p30/p120/peak/rollover today.
+Follow-up: store the detector's sample array per graduation, then sweep
+rollover thresholds (2/5/10/20% dips) on the real paths. The five live
+samples already bound the 2% exit: on this cohort it is a loser.
+
 ## Sentients: slow graduations and false rollovers (2026-10-07 15:0xZ)
 
 Third rollover-capable record, first under the continuous detector:
