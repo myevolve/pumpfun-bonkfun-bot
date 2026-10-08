@@ -688,6 +688,37 @@ would have captured the +221.6% peak) while CAPYWIFGUN's true rollover was an
 paths can sweep the threshold per coin. The current threshold: any drop (the
 most sensitive setting).
 
+## SWORDPEPE: the instant-graduation archetype (2026-10-07 19:3xZ)
+
+Fourth rollover-capable record. The 60-crossing led graduation by 5s (instant
+sweep: vs poopcat 8.6s, ELONPHIL 2.7s, Sentients 4m24s), and the G-clock caught
+the pool open within 3.1s. The pool then: open 43.0 -> 47.9 (G+6s, +11%) ->
+dip 44.2 (G+33s) -> ROSE to 83.5 by G+300s (+94% above open) -> dumped to
+34.0 by G+900s (-3.8% vs entry). A rising pool with a mid-course dip.
+
+The rollover fired at G+19.3s on an -11.2% drop from the running peak
+(58.3 -> 51.7) - a false-early fire: the pool rose +60% above the exit price
+over the next minutes (60s mark 46.3, 300s mark 83.5). But the dump came
+anyway: the 900s fixed-horizon exit was -3.8% vs entry. The rollover exit
+captured +46.6% vs entry - it beat the 900s horizon by 50 points and LOST to
+the eventual peak (+136.6% at 300s) by 90 points.
+
+Cohort vs the 900s fixed horizon (rollover / fixed-900, all vs entry):
+- poopcat: +249% / +181%
+- ELONPHIL: +87.9% / +212.5%
+- Sentients: +180.4% / -92.35%
+- SWORDPEPE: +46.6% / -3.8%
+3 of 4 favor the rule; ELONPHIL lost (fired late on a fast-peak coin). Mean
+rollover exit 141% vs mean fixed-900 exit 74.3% - on 4 coins, with the
+giveback-to-peak the tuning question: Sentients gave back 14 points,
+SWORDPEPE 90, poopcat 42, ELONPHIL 125 (the fast-peak coins give back the
+most). The next measurable step is a threshold sweep: replay each G-clock
+price path at 5/10/20/50% drop-from-peak thresholds and compare the exit to
+the eventual peak and the fixed horizons. The threshold that maximizes
+captured-of-peak while minimizing false-fire giveback is the design answer;
+4 paths is too few to declare it, but the sweep can run on every new record
+as the instrument accumulates paths.
+
 ## Sentients: slow graduations and false rollovers (2026-10-07 15:0xZ)
 
 Third rollover-capable record, first under the continuous detector:
