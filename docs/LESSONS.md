@@ -615,6 +615,27 @@ The measurable refinement stands: a rollover-threshold sweep (exit on
 grace-period distribution is the strategy's real parameter, and the
 G-clock is accumulating it.
 
+## Peak-baseline bug found in the rollover detector (2026-10-08 18:5xZ)
+
+The decay loop's peak started from its own first poll (~G+2s) — the
+graduation-open price was never a peak candidate. For open-and-die
+coins the recorded peak sat BELOW the open (MEMENCY: open 6.130e-7,
+recorded peak 5.837e-7), so rollover thresholds were measured against a
+phantom baseline. Fixed (0bb6510): the peak now seeds from the open
+sample; a censored open keeps the first-poll behavior. Corrected
+cohort read (14 records, capture vs curve entry, 900s fixed mark):
+
+ELONPHIL +87.9% (900s pending), Sentients +180.3% vs -92.35%, FOMOPUP
++51.3% vs -93.88%, PEA +29.8% vs -70.99%, WIFAUTON +35.8% (pending),
+MIMI +15.1% (pending), PAHC +41.9% vs -90.83%, CAPES +27.2% vs -93.02%,
+MEMENCY -61.2% vs -94.36%, butter +76.4% vs -92.27%, solcat +108.0% vs
+-92.57%, Mishu -98.4% vs -98.48%, CAPYWIFGUN +256.6% vs -92.79%,
+TARDTANK -64.2% vs -93.39%.
+
+Cohort mean: +41.3% rollover vs -90.9% fixed-900s (12 paired; the two
+pendings excluded). The rollover rule never rode to -90%; the timeline
+almost always did.
+
 ## The rollover cohort at 12: every archetype and both failure modes (2026-10-08 14:5xZ)
 
 Twelve rollover-capable graduations since the continuous detector went live.
