@@ -1,3 +1,5 @@
+# ruff: noqa: TRY003, PLR2004 - layout offsets are the constants; long
+# SystemExit messages are the point of a verify script.
 """Read the live LaunchLab fee configuration — READ-ONLY, no funds.
 
 The pump.fun endgame is measured: creator self-sweep -> fee annuity, LP
@@ -95,7 +97,7 @@ def decode_platform(buf: bytes) -> dict:
     }
 
 
-async def main() -> None:
+async def main() -> None:  # noqa: PLR0912, PLR0915, C901 - one linear census
     parser = argparse.ArgumentParser()
     parser.add_argument("--rpc", default=None, help="RPC endpoint override")
     args = parser.parse_args()
@@ -143,7 +145,7 @@ async def main() -> None:
                         sig.signature, max_supported_transaction_version=version
                     )
                     break
-                except Exception:  # noqa: BLE001 - provider wants v1, core wants v0
+                except Exception:  # noqa: BLE001, S112 - provider wants v1, core wants v0
                     continue
             if tx is None:
                 continue
