@@ -719,6 +719,38 @@ captured-of-peak while minimizing false-fire giveback is the design answer;
 4 paths is too few to declare it, but the sweep can run on every new record
 as the instrument accumulates paths.
 
+## The letsbonk migration census: 85.0 sweeps, locked LP, invisible on aggregators (2026-10-09 12:1xZ)
+
+The pool-fate collector (`letsbonk-buy-sell/collect_cpmm_fate.py`) plus
+on-chain traces answered the migration mechanics. All read-only:
+
+- **Cohort**: 17,878 migrated LaunchLab pools; 11,097 WSOL-quoted (62%);
+  the rest USD1 (2,010), the Trump token (776), and meme coins. The
+  non-WSOL "fund raising" numbers are in junk-token units — a 22.4M
+  figure is 22.4M tokens, not SOL. WSOL-only is the real cohort.
+- **The 85.0 SOL signature, cross-venue**: WSOL migrated pools' top fund
+  is 86.1, then a wall of EXACTLY 85.0 — the same whale self-sweep median
+  measured on pump.fun, and the same number the pump forward-test
+  observed as max real_quote. 170/300 sampled WSOL migrated pools (57%)
+  are exactly-85 whale self-sweeps.
+- **Migration mechanics** (verified in a migration tx):
+  `migrate_to_cpswap` creates the Raydium CPMM pool + LP mint (2
+  CPMM-owned accounts), LOCKS the LP via Raydium Lock (LockrWmn), and
+  mints the rights NFT via Metaplex. Post-migration the LaunchLab vaults
+  are empty; platform_scale 100% = StonkFun holds the LP-rights NFT.
+  Failed migrations show LaunchLab 6006 (MigrateTypeNotMatch).
+- **Fate**: every sampled whale-band coin has ZERO DexScreener pairs
+  (60+ mint queries). Either the aggregator drops them or the pools
+  trade in the dark — post-migration volume is unmeasured from here.
+
+The LP verdict updates: the route is **permissionless** (anyone can join
+the migrated CPMM; fees accrue to LPs pro-rata) and the seed LP is
+**locked** (no platform rug of the base liquidity — a real structural
+difference from PumpSwap's 0-bps-for-LPs design). But zero aggregator
+visibility on 57% whale self-sweeps means the post-migration volume —
+the annuity's income — could not be read from the aggregator; it needs
+the on-chain G-clock extension on the CPMM pools directly.
+
 ## The letsbonk fee census: no annuity, an open LP door (2026-10-08 19:4xZ)
 
 The cross-venue expansion question: does the pump.fun endgame transplant to
