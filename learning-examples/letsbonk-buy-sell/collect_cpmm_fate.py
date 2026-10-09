@@ -1,3 +1,5 @@
+# ruff: noqa: TRY003, PLR2004, S310 - the fixed https endpoint is literal,
+# layout offsets are the constants, long SystemExit text is the point.
 """Collect migrated letsbonk pool fate snapshots — READ-ONLY, no funds.
 
 The letsbonk fee census measured: creator 0 bps, migration LP 100% to the
