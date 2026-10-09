@@ -719,6 +719,45 @@ captured-of-peak while minimizing false-fire giveback is the design answer;
 4 paths is too few to declare it, but the sweep can run on every new record
 as the instrument accumulates paths.
 
+## The letsbonk fee census: no annuity, an open LP door (2026-10-08 19:4xZ)
+
+The cross-venue expansion question: does the pump.fun endgame transplant to
+letsbonk (Raydium LaunchLab)? Measured live
+(`letsbonk-buy-sell/verify_fee_config.py`, read-only; layouts re-derived
+against the on-chain bytes - LaunchLab accounts carry an 8-byte anchor and
+the platform config is 944 bytes with 184 undecoded trailing bytes):
+
+- Curve trade fee: **25 bps (0.25%)** (GlobalConfig.trade_fee_rate = 2500)
+- Platform fee: **1.00%**, **creator fee 0.00%**
+- **Migration LP split: platform 100% / creator 0% / burn 0%** - the
+  graduated pool's entire migrated liquidity goes to the platform's NFT
+  (StonkFun, the letsbonk.fun operator; the fallback discovery config
+  "Spots.fun" has the identical shape)
+
+Three verdicts fall out:
+
+1. **The pump endgame does NOT transplant.** No creator annuity exists on
+   letsbonk - the creator earns 0 bps on the curve and holds 0% of the
+   migrated pool. The self-sweep playbook measured on pump (66% of whale
+   sweeps; ~15-day payback at 30 bps) has no letsbonk equivalent: a
+   creator there is donating their sweep to the platform.
+2. **The LP route is mechanically OPEN on letsbonk's migrated pools.** The
+   migration type is CPSWAP into a Raydium CPMM pool, where trade fees
+   accrue to LPs pro-rata - the first venue in the census where a follower
+   can own a share of the fee stream (PumpSwap's fee config gives LPs 0
+   bps; LaunchLab's curve has no LPs at all). The economics remain
+   unmeasured: the pool-fate decay that killed the pump LP math is a
+   pump-side measurement; bonk-side decay and post-migration volume are
+   open rows.
+3. **The platform is the fee annuity holder on letsbonk** - the mirror of
+   the pump creator. StonkFun earns 1% of curve volume plus 100% of the
+   migrated pool's liquidity rights.
+
+The instrument extension that closes verdict 2: a bonk-side pool-fate
+tracker (decay + fee accrual on N migrated pools over 24h, the
+simulate_lp_income transplant). Until it runs, the letsbonk LP route is
+"mechanically open, economically unmeasured".
+
 ## The threshold sweep: closed, no-threshold wins (2026-10-07 16:1xZ)
 
 16 rollover-capable coins under the continuous detector. The no-threshold fire
