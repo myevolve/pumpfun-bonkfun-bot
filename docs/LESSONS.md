@@ -719,6 +719,41 @@ captured-of-peak while minimizing false-fire giveback is the design answer;
 4 paths is too few to declare it, but the sweep can run on every new record
 as the instrument accumulates paths.
 
+## The letsbonk CPMM decay census: the LP route measured dead (2026-10-09 12:3xZ)
+
+The aggregator was blind, so the decay was read on-chain. The CPMM pool
+PDA is derivable: `["pool", amm_config, quote_mint, base_mint]` under the
+CPMM program — amm_config sits at offset 8 of the pool account (the live
+one for this cohort: D4FPEruKEHrG5TenZ2mpDGEfu1iUvTiqBxvpU8HLBvC2), the
+WSOL vault at offset 72. Verified against a known pool.
+
+Cohort: 197 WSOL migrated pools on the current epoch (byte-9 >= 0x04),
+171 with fund >= 40 SOL, 21 with a CPMM pool on the D4FPE config (the
+other 150 migrated under a different amm_config — a sampling bias, not
+an absence). Their WSOL vault balances today vs the fund raised:
+
+| fund | SOL side now | decay |
+|-----:|-----:|-----:|
+| 85.0 | 108.00 | +27.1% |
+| 85.0 | 61.45 | -27.7% |
+| 159.9-164.5 | 63.9-65.5 | -59% to -61% |
+| 2620.8 | 904.3 | -65.5% |
+| 85.0 (x9) | 18.6-30.4 | -64% to -78% |
+
+**Mean SOL-side ratio 0.352, median 0.271** — the migrated pool's SOL
+side loses ~73% (median) of its liquidity post-graduation. An LP who
+joined at migration is down ~73% before fees; the CPMM fee stream would
+have to exceed that to break even. The one +27% riser (1 of 21) is the
+familiar bimodality cross-venue.
+
+**The letsbonk LP route is mechanically open and economically dead.** The
+expansion map's last open lead closes with data: every follower role is
+now measured dead on BOTH venues (entry at latency, PumpSwap LP 0 bps,
+letsbonk LP -73% decay, news/LLM pipelines structurally too slow). The
+only measured +EV roles remain supply-side: the pump creator annuity
+(~15-day payback, requires real funds and explicit approval) and the
+platforms' fee streams. The instrument keeps measuring on both venues.
+
 ## The letsbonk migration census: 85.0 sweeps, locked LP, invisible on aggregators (2026-10-09 12:1xZ)
 
 The pool-fate collector (`letsbonk-buy-sell/collect_cpmm_fate.py`) plus
