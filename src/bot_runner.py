@@ -303,7 +303,9 @@ def _gate_rules_from_config(cfg: dict) -> GateRules | None:
     defaults = GateRules()
     return GateRules(
         mayhem_only=section.get("mayhem_only", defaults.mayhem_only),
+        exclude_mayhem=section.get("exclude_mayhem", defaults.exclude_mayhem),
         min_buyers=section.get("min_buyers", defaults.min_buyers),
+        max_buyers=section.get("max_buyers", defaults.max_buyers),
         max_real_sol=section.get("max_real_sol", defaults.max_real_sol),
         min_real_sol=section.get("min_real_sol", defaults.min_real_sol),
         require_creator_holding=section.get(
@@ -403,7 +405,7 @@ async def start_bot(
         raise RuntimeError(f"Bot '{cfg['name']}' is disabled")
     legacy_state = legacy_cwd_state_conflict()
     if legacy_state is not None:
-        raise RuntimeError(  # noqa: TRY003
+        raise RuntimeError(
             f"A working-directory state tree at {legacy_state} predates "
             "root-anchored durable state. Its positions, unresolved wires and "
             "session risk belong to the previous state model: stop the bot, "

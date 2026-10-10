@@ -495,7 +495,9 @@ class GateRules:
     """
 
     mayhem_only: bool = True
+    exclude_mayhem: bool = False  # measured clue: every mayhem accept lost 80%+
     min_buyers: int = 1  # distinct non-creator buyers required before we buy
+    max_buyers: int | None = None  # measured sweet band: 2-3 buyers at accept
     max_real_sol: float | None = 0.5  # skip if the curve already holds more
     min_real_sol: float = 0.1
     require_creator_holding: bool = True  # any creator sell => skip
@@ -509,6 +511,12 @@ class GateRules:
             or self.min_buyers < 0
         ):
             raise ValueError("min_buyers must be a non-negative integer")
+        if isinstance(self.max_buyers, bool) or not isinstance(
+            self.max_buyers, int | None
+        ):
+            raise ValueError("max_buyers must be a non-negative integer or None")
+        if self.max_buyers is not None and self.max_buyers < self.min_buyers:
+            raise ValueError("max_buyers must be >= min_buyers")
         if self.max_real_sol is not None and (
             isinstance(self.max_real_sol, bool)
             or not isinstance(self.max_real_sol, int | float)
@@ -596,11 +604,13 @@ class EntryGate:
             and event.user != MAYHEM_SOL_VAULT
         ):
             self.buyers.add(event.user)
-        if len(self.buyers) >= rules.min_buyers:
-            if event.real_sol_reserves < rules.min_real_sol * _LAMPORTS_PER_SOL:
-                return None  # wait for more liquidity within the window
-            return self._decision(True, "buyers_present", event)
-        return None
+        if len(self.buyers) < rules.min_buyers:
+            return None
+        if rules.max_buyers is not None and len(self.buyers) > rules.max_buyers:
+            return self._decision(False, "too_many_buyers", event)
+        if event.real_sol_reserves < rules.min_real_sol * _LAMPORTS_PER_SOL:
+            return None  # wait for more liquidity within the window
+        return self._decision(True, "buyers_present", event)
 
     def timed_out(self) -> GateDecision:
         return self._decision(False, "timeout", self.last_event)

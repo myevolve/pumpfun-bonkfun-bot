@@ -719,6 +719,54 @@ captured-of-peak while minimizing false-fire giveback is the design answer;
 4 paths is too few to declare it, but the sweep can run on every new record
 as the instrument accumulates paths.
 
+## Success leaves clues: the buyer-count census, the first survivors (2026-10-09 14:5xZ)
+
+The reverse-engineering study ran with the threshold-miner discipline
+(`token-lifecycles/analyze_accept_clues.py`): cohort = 37 resolved accepts;
+TRAIN = first 24 by time, LOCK = last 13; 12 pre-registered candidates
+counted; survivors must confirm sign-consistently on LOCK.
+
+**The buyer-count clue survived — the first census survivor:**
+
+| buyers at accept | n | mean r60 | mean r900 |
+|---|---|---|---|
+| 1 | 2 | -92.0% | -92.0% |
+| 2-3 | 8 | **+102.5%** | **+30.0%** |
+| 4-10 | 21 | -10.4% | -45.1% |
+| >10 | 6 | -23.1% | -86.2% |
+
+TRAIN: sweet 2-3 = +1.07 vs others -0.25. LOCK: sweet 2-3 = +0.98 vs
+others -0.06. Same sign, similar magnitude, both halves (n=4+4).
+
+**The clues, read mechanically:**
+1. **buyers = 1 is instant death** (the whale swept alone - no crowd to
+   sell to). Both such coins died -92% by 60s.
+2. **buyers 2-3 is the sweet spot** - the sweep landed AND a small crowd
+   was already in; room to grow.
+3. **buyers >= 4 decays monotonically** - the accept is late; the
+   position IS the exit liquidity (buyers=50: -89%).
+4. **mayhem = independent killer**: all 4 mayhem accepts lost 80-98% at
+   every horizon, regardless of buyer count (even a 2-buyer mayhem
+   lost -80%, breaking the sweet rule for mayhem).
+5. The one rank survivor (real_sol x r900, negative both halves) is
+   weak; the bucket clue is the real one.
+6. 68368 (Oct 9): the largest resolved outcome yet - the rollover fired
+   at G+10.2s (+98% vs entry) but the pool kept rising to **+742% at
+   900s**. The WICK class in reverse: the fixed timeline won on this
+   one. Buyer count 3, fund 63.2, non-mayhem - the sweet-spot profile.
+
+**The gate change (implemented, not armed)**: `entry_gate.min_buyers/
+max_buyers/exclude_mayhem` now supported end-to-end (validation,
+translation, 4 new tests, 834 green). The operator's config still reads
+min_buyers: 0 - arming the band rule (min 2, max 3, exclude mayhem) is
+the operator's call; the instrument then re-measures under the new gate
+and the clue either confirms live or dies.
+
+**A Jev gap found**: accepted entries carry NO jev scores - the
+admissible Jev-quality-vs-PnL test (declared pending in the ecosystem
+survey) is blocked by missing scores, not by analysis. The shadow
+config should enable the scorer.
+
 ## The strategy inventory: verdicts are conditional, not terminal (2026-10-09 13:5xZ)
 
 The operator's thesis: hold a large inventory of measured strategies, each

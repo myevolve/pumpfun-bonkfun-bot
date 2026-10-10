@@ -114,7 +114,9 @@ ALLOWED_CONFIG_KEYS: dict[str, set[str] | None] = {
     "entry_gate": {
         "enabled",
         "mayhem_only",
+        "exclude_mayhem",
         "min_buyers",
+        "max_buyers",
         "max_real_sol",
         "min_real_sol",
         "require_creator_holding",
@@ -155,6 +157,7 @@ BOOLEAN_FIELDS = {
     "flow_exit.creator_sell",
     "entry_gate.enabled",
     "entry_gate.mayhem_only",
+    "entry_gate.exclude_mayhem",
     "entry_gate.require_creator_holding",
 }
 
@@ -477,6 +480,13 @@ def validate_config(config: dict[str, Any]) -> None:
         present, value = _optional_nested_value(config, path)
         if present and not isinstance(value, bool):
             raise ValueError(f"{path} must be a boolean")
+
+    present, max_buyers = _optional_nested_value(config, "entry_gate.max_buyers")
+    if present and max_buyers is not None:
+        if isinstance(max_buyers, bool) or not isinstance(max_buyers, int):
+            raise ValueError("entry_gate.max_buyers must be an integer or null")
+        if not 0 <= max_buyers <= 50:
+            raise ValueError("entry_gate.max_buyers must be between 0 and 50")
 
     for path, limits in INTEGER_RANGES.items():
         present, value = _optional_nested_value(config, path)

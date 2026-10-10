@@ -361,3 +361,65 @@ async def test_history_loss_rejects_entry_and_disables_flow_exit(
     assert position.is_active
     assert trader._flow_signals == {}
     assert not trader._flow_wakeups[MINT].is_set()
+
+
+def test_gate_max_buyers_vetoes_crowded_accepts() -> None:
+    third = str(Pubkey.from_bytes(bytes([4]) * 32))
+    gate = _gate(min_buyers=0, max_buyers=2)
+    assert gate.observe(
+        _event(user=OTHER, real=200_000_000, slot=CREATION_SLOT + 1)
+    ).accept
+    assert gate.observe(
+        _event(
+            user=str(Pubkey.from_bytes(bytes([3]) * 32)),
+            real=300_000_000,
+            slot=CREATION_SLOT + 2,
+        )
+    ).accept
+    decision = gate.observe(
+        _event(user=third, real=400_000_000, slot=CREATION_SLOT + 3)
+    )
+    assert decision is not None and not decision.accept
+    assert decision.reason == "too_many_buyers"
+
+
+def test_gate_max_buyers_none_is_unbounded() -> None:
+    gate = _gate(min_buyers=0)
+    users = (
+        OTHER,
+        str(Pubkey.from_bytes(bytes([3]) * 32)),
+        str(Pubkey.from_bytes(bytes([4]) * 32)),
+    )
+    decision = None
+    for i, user in enumerate(users):
+        decision = gate.observe(
+            _event(user=user, real=200_000_000 + i, slot=CREATION_SLOT + 1 + i)
+        )
+    assert decision is not None and decision.accept
+
+
+def test_gate_max_buyers_validation() -> None:
+    with pytest.raises(ValueError):
+        GateRules(max_buyers=-1)
+    with pytest.raises(ValueError):
+        GateRules(min_buyers=3, max_buyers=2)
+    assert GateRules(min_buyers=2, max_buyers=3).max_buyers == 3
+    assert GateRules().max_buyers is None
+
+
+def test_gate_rules_exclude_mayhem_field() -> None:
+    assert GateRules(exclude_mayhem=True).exclude_mayhem is True
+    assert GateRules().exclude_mayhem is False
+
+
+def test_gate_max_buyers_validation() -> None:
+    with pytest.raises(ValueError):
+        GateRules(max_buyers=-1)
+    with pytest.raises(ValueError):
+        GateRules(min_buyers=3, max_buyers=2)
+    assert GateRules(min_buyers=2, max_buyers=3).max_buyers == 3
+
+
+def test_gate_rules_exclude_mayhem_field() -> None:
+    assert GateRules(exclude_mayhem=True).exclude_mayhem is True
+    assert GateRules().exclude_mayhem is False

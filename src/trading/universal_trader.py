@@ -2988,6 +2988,9 @@ class UniversalTrader:
         if rules.mayhem_only and not token_info.is_mayhem_mode:
             logger.info("Gate skip %s: not_mayhem", token_info.symbol)
             return GateDecision(False, "not_mayhem", 0, None, 0)
+        if rules.exclude_mayhem and token_info.is_mayhem_mode:
+            logger.info("Gate skip %s: mayhem_excluded", token_info.symbol)
+            return GateDecision(False, "mayhem_excluded", 0, None, 0)
         token_key = str(token_info.mint)
         queue = self._gate_queues.get(token_key)
         if queue is None or token_info.slot is None:
