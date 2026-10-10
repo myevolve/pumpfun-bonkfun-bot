@@ -767,6 +767,39 @@ admissible Jev-quality-vs-PnL test (declared pending in the ecosystem
 survey) is blocked by missing scores, not by analysis. The shadow
 config should enable the scorer.
 
+## The wallet census + the net regime re-test (2026-10-09 14:9xZ)
+
+Two deliverables from the "success leaves clues" directive.
+
+**The wallet census** (`token-lifecycles/census_wallet_pnl.py`, n=24,015
+coins, 101,672 wallets, exact constant-product valuation at pre-trade
+reserves, 1.25% fee per side, mayhem vault excluded, tape-gap coins
+flagged): realized-positive 19,513, realized-negative 57,605 - most
+wallets lose, matching the public Dune aggregate. The top 20 by realized
+PnL share one signature: **median first-trade dslot = 0** - they enter at
+the CREATION SLOT across 43-114 launches each, flip in 17-209 slots,
+win 42/43, 43/44, 54/54. These are the launch-inside complex (creator
+side wallets, launch services, bundled snipers) - the same cohort the
+whale census found on the supply side. Outside followers cannot copy the
+dslot-0 entry: it is part of the launch bundle itself.
+
+**The net regime re-test** (the queued entry-verdict re-check; all 38
+resolved accepts are within the instrument's 3-day life, so the window
+is the full record; net = gross minus the measured 1.25% x 2 sides):
+- All accepts (n=38): r60 +12.13% gross = **+9.63% net**; r900 -27.6%
+  gross = -30.1% net. The 60s window is net-positive on average in the
+  current regime; the 900s hold is not.
+- The buyer band (2-3 buyers, non-mayhem, n=7): r60 +128.5% gross =
+  **+126.0% net**; r900 +45.7% gross = **+43.2% net**. Net-positive at
+  BOTH horizons, consistent with the TRAIN/LOCK split.
+
+The crossing-entry verdict upgrades from "dead in moderate regime" to
+**conditionally alive in the current regime, gated by the buyer band**
+(n=7 - the >=30-cohort referee still applies; slippage on exits is not
+modeled; one regime is one sample). The inventory entry 3 is now the
+measured follower-entry candidate; arming the band gate is the
+operator's call.
+
 ## The strategy inventory: verdicts are conditional, not terminal (2026-10-09 13:5xZ)
 
 The operator's thesis: hold a large inventory of measured strategies, each
