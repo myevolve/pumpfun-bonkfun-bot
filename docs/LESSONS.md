@@ -719,6 +719,29 @@ captured-of-peak while minimizing false-fire giveback is the design answer;
 4 paths is too few to declare it, but the sweep can run on every new record
 as the instrument accumulates paths.
 
+## The strategy inventory: verdicts are conditional, not terminal (2026-10-09 13:5xZ)
+
+The operator's thesis: hold a large inventory of measured strategies, each
+with pre-registered regime conditions, and deterministically strike when a
+strategy's risk is acceptable. Adopted - with two disciplines that keep it
+honest:
+
+1. Inventory entries are MEASURED-CONDITIONAL, not hypothesis-stocked
+   (the threshold-miner lesson: a wide net of untested candidates is an
+   overfitting factory, not an arsenal).
+2. Every entry ships a pre-registered deterministic regime detector -
+   no discretionary "it feels hot" switches.
+
+The artifact: `docs/STRATEGIES.md` - 7 strategies (2 measured-live, 3
+measured-dead-with-detectors-armed, 1 dead-by-architecture, 1 forbidden),
+the regime panel (volume, fee configs, riser-share, net marks, coupling),
+and the queued censuses that widen the net.
+
+The reframe this adopts: the week's verdicts were CONDITIONAL all along -
+"crossing-entry dead" meant "dead in a moderate regime"; "LP dead" meant
+"dead at the current fee config / riser mix." The regime panel makes the
+conditions explicit and the re-arming deterministic.
+
 ## The leaderboard challenge: house revenue vs trader distribution (2026-10-09 13:2xZ)
 
 The user's challenge: thousands of pump.fun users profit daily, the
