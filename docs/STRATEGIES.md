@@ -53,28 +53,32 @@ This file is the inventory. Rules:
 - **Worst case**: the WICK giveback (~139 points on one coin of 13) and
   the instant-collapse class where no exit rule helps (dump between
   2-second polls).
-- **Status**: MEASURED-LIVE — deployed in the paper instrument, 29
-  records and counting.
-
-## 3. Crossing-entry sniping (in-band 60–85 SOL accept)
+## 3. Crossing-entry sniping (in-band 60–85 SOL accept) — band-gated
 
 - **Mechanism**: accept a coin at the 60-SOL crossing, ride to graduation,
-  exit via the rollover rule.
-- **Measured**: EV-negative at retail latency in a MODERATE regime
-  (latency drift +25–56% within 1–2 trades; accept price vs the
-  achievable crossing price consumed the edge). BUT the gross 60s marks
-  were positive on several coins, and the platform-wide trader
-  distribution is regime-conditional: 73.3% of pump.fun traders were
-  monthly-profitable in April 2026 (the recorded ATH) versus
-  majority-red across 2024–25.
-- **Regime detector**: the trailing-30-day net-of-cost accept marks —
-  the queued re-test. Pre-registered form: if the 30-day net mean of the
-  60s marks ≥ 0 after slippage/fees, the strategy is conditionally
-  alive; below, it stays disarmed.
-- **Worst case**: the measured latency drift; plus crowding (hot regimes
-  are visible to everyone).
-- **Status**: MEASURED-DEAD in moderate regime — REGIME-CONDITIONAL
-  RE-TEST QUEUED (the marks exist; the re-test is cheap).
+  exit via the rollover rule — gated by the measured buyer band:
+  **2–3 distinct non-creator buyers at accept, non-mayhem**.
+- **Measured** (the buyer-count census, n=37, TRAIN/LOCK split):
+
+  | buyers at accept | n | mean r60 | mean r900 |
+  |---|---|---|---|
+  | 1 | 2 | −92.0% | −92.0% |
+  | **2–3** | **8** | **+102.5%** | **+30.0%** |
+  | 4–10 | 21 | −10.4% | −45.1% |
+  | >10 | 6 | −23.1% | −86.2% |
+
+  The band survives the split: TRAIN +1.07 vs −0.25 others; LOCK +0.98
+  vs −0.06 others. Mayhem is an independent killer (all 4 mayhem accepts
+  lost 80–98% regardless of buyers) — hence `exclude_mayhem`.
+- **Regime detector**: same as before — the trailing-30-day net-of-cost
+  marks re-test. The band rule is now implemented in the gate
+  (`min_buyers`/`max_buyers`/`exclude_mayhem`) and re-measures live once
+  armed; the clue either confirms on the next cohort or dies.
+- **Worst case**: the measured latency drift inside the band; the
+  WICK/68368 rebound class (the rollover exit gave back +98% while the
+  timeline ran to +742% on the largest resolved winner).
+- **Status**: MEASURED-CONDITIONAL — gate support shipped; arming is the
+  operator's call.
 
 ## 4. Follower LP — PumpSwap graduated pools
 
