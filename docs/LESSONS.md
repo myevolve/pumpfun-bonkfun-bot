@@ -719,6 +719,51 @@ captured-of-peak while minimizing false-fire giveback is the design answer;
 4 paths is too few to declare it, but the sweep can run on every new record
 as the instrument accumulates paths.
 
+## The leaderboard challenge: house revenue vs trader distribution (2026-10-09 13:2xZ)
+
+The user's challenge: thousands of pump.fun users profit daily, the
+leaderboard shows it, the platform makes fees daily - so "no one wins"
+cannot be right, and the research must reconcile with it. Researched
+(external sources, Oct 2026):
+
+- **House revenue**: pump.fun ~$1.1M/day (Sep 2026; Fomo briefly beat it
+  at $1.76M), $50M daily volume / 905k transactions on the mobile app
+  (Aug 2026). Curve fee 1% per trade. The house wins ~$1M/day
+  REGARDLESS of which traders win - the market does not require the
+  average trader to profit, it requires the house's tax on every trade.
+- **Trader distribution** (Dune, 6-month cohort): median trader ~$0,
+  bottom 25% negative, top 10% >$557, top 1% >$22,471. 99.6% never
+  locked >$10k. So "thousands win daily" = the visible top tail; the
+  median is flat and the bottom funds it.
+- **The regime fact**: 73.3% of pump.fun traders were monthly-profitable
+  in April 2026 (CoinGecko/Dune ATH) after ~2 years of majority-red
+  months. Profitability is regime-conditional: in a sustained pump
+  regime the MEDIAN follower wins monthly; in chop the median loses.
+
+Reconciliation with this instrument's verdicts:
+
+1. "No one ever won" was never the finding. The finding is narrower:
+   specific follower MECHANISMS (crossing-entry at retail latency,
+   follower LP on both venues) are EV-negative. The winners the
+   leaderboard shows are creators (our measured +EV role), launch
+   services, and insiders - the census cohorts.
+2. The challenge corrects one scope error: the entry verdict was
+   measured in a moderate regime ($1.1M/day, post-peak). The 60s/300s
+   gross marks were POSITIVE on several coins; net-of-cost EV is the
+   question, and it is regime-conditional. A trailing-30-day net mark
+   re-test is cheap and due.
+3. The leaderboard is an untapped census: the top-100 consistent
+   winners' behavior (entry timing vs creation, hold time, coin
+   selection) is measurable from the same tape the whale census used.
+4. "We can't figure out a consistent way" - the instrument already
+   found it: the creator annuity (measured +EV, ~15-day payback). What
+   is pending is capital and approval, not understanding. The AI
+   advantage built the thing that identified it; the binding constraint
+   on the trading roles was latency and structure, not model quality.
+
+Added to the roadmap: the regime re-test (net marks over 30 days) and
+the leaderboard winner census.
+
 ## The letsbonk CPMM decay census: the LP route measured dead (2026-10-09 12:3xZ)
 
 The aggregator was blind, so the decay was read on-chain. The CPMM pool
