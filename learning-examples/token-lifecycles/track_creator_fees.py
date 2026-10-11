@@ -167,6 +167,7 @@ async def main() -> None:
                 {
                     "ts": now,
                     "pool": str(pool),
+                    "mint": _mint_str,
                     "vault_sol": round(bal, 6),
                     "delta_sol": round(bal - prev[str(pool)], 6)
                     if str(pool) in prev
