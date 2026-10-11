@@ -138,17 +138,18 @@ async def main() -> None:
                     else 0.0  # never funded: creator collected nothing
                 )
         now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-        for pool, (mint_str, coin_creator) in by_pool.items():
+        for pool, (_mint_str, coin_creator) in by_pool.items():
             cv = PumpSwapAddresses.derive_creator_vault(coin_creator)
             bal = vault_bal[cv]
             rows.append(
                 {
                     "ts": now,
                     "pool": str(pool),
-                    "mint": mint_str,
-                    "coin_creator": str(coin_creator)[:10],
                     "vault_sol": round(bal, 6),
-                    "delta_sol": round(bal - prev[pool], 6) if pool in prev else None,
+                    "delta_sol": round(bal - prev[str(pool)], 6)
+                    if str(pool) in prev
+                    else None,
+                    "coin_creator": str(coin_creator)[:10],
                 }
             )
         STATE.parent.mkdir(parents=True, exist_ok=True)
