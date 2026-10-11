@@ -768,6 +768,16 @@ survey) is blocked by missing scores, not by analysis. The shadow
 config should enable the scorer.
 
 ## Phase 0 live: the creator annuity measured on real pools (2026-10-11)
+**Snapshot 2 (same day, ~15 min later — the per-interval rate, not daily
+yet)**: the two accreting pools confirmed and accelerated — INTENTS
++2.89 SOL, SPOOD +0.58, SEED +0.006 (the rest zero). INTENTS' vault now
+3.30 SOL total, SPOOF 5.05, SEED 14.22 (collected earlier). Mean
+interval accrual 0.139 SOL across 25 pools. The distribution is
+extremely heavy-tailed: 2 of 25 pools earn essentially everything —
+matching the whale census's structure (few pools hold the volume). The
+daily cadence continues; the payback fit waits for a true 24h delta.
+
+
 
 The Phase 0 tracker (`token-lifecycles/track_creator_fees.py`) is live on
 25 recent graduated pools (the instrument's own grad_marks cohort, fund
