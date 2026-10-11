@@ -1,3 +1,5 @@
+# ruff: noqa: TRY003, PLR2004, C901, PTH123 - censoring paths are
+# the point; thresholds are layout constants; one linear census.
 """Creator annuity tracker — READ-ONLY, no funds.
 
 Phase 0 of the creator pilot design
@@ -23,6 +25,7 @@ import argparse
 import asyncio
 import json
 import sqlite3
+import statistics
 import struct
 import sys
 from datetime import UTC, datetime
@@ -155,8 +158,6 @@ async def main() -> None:
         deltas = [r["delta_sol"] for r in rows if r["delta_sol"] is not None]
         print(f"snapshot: {len(rows)} pools ({len(deltas)} with a previous baseline)")
         if deltas:
-            import statistics
-
             print(
                 f"daily creator-fee accrual: median "
                 f"{statistics.median(deltas):.4f} SOL, mean "
