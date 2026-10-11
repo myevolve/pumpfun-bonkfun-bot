@@ -35,6 +35,10 @@ REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "src"))
 
+from spl.token.instructions import (  # noqa: E402
+    get_associated_token_address,
+)
+
 from core.client import SolanaClient  # noqa: E402
 from platforms.pumpfun.pumpswap import (  # noqa: E402
     WSOL_MINT,
@@ -84,13 +88,23 @@ def cohort_pools() -> list[dict]:
         if 60 <= rsol <= 1000:
             mints.add(d["mint"])
     db = sqlite3.connect(str(REPO / ".state/learning/lessons.sqlite3"))
-    for (mint,) in db.execute(
-        "SELECT DISTINCT l.mint FROM lessons l JOIN grad_marks g ON g.entry_id=l.id"
-        " WHERE g.open_price IS NOT NULL"
-    ):
-        mints.add(mint)
+    grad_mints = {
+        r[0]
+        for r in db.execute(
+            "SELECT DISTINCT l.mint FROM lessons l JOIN grad_marks g ON"
+            " g.entry_id=l.id WHERE g.open_price IS NOT NULL"
+        )
+    }
     db.close()
-    return [{"mint": m} for m in sorted(mints)]
+    # The whale-band tape coins are 2026-09 vintage: their creator vaults
+    # have long since been swept by the creators (fee collection). The
+    # annuity question is about RECENT migrations - prioritize the
+    # instrument's own grad_marks (accepted coins, fund >= 60, Oct 7-11),
+    # then the newest tape coins.
+    recent = sorted(grad_mints, reverse=True) + [
+        m for m in sorted(mints, reverse=True) if m not in grad_mints
+    ]
+    return [{"mint": m} for m in recent]
 
 
 async def main() -> None:
@@ -124,8 +138,14 @@ async def main() -> None:
                 except ValueError:
                     continue
                 by_pool[pool] = (mint_str, decoded.coin_creator)
+        # Fees accrue as WSOL in the vault PDA's associated token account,
+        # not lamports in the PDA itself (verified on CAPYWIFGUN: PDA 0,
+        # ATA 0.0149 WSOL).
         vault_keys = [
-            PumpSwapAddresses.derive_creator_vault(cc) for _, cc in by_pool.values()
+            get_associated_token_address(
+                PumpSwapAddresses.derive_creator_vault(cc), WSOL_MINT
+            )
+            for _, cc in by_pool.values()
         ]
         vault_bal = {}
         for i in range(0, len(vault_keys), 100):
@@ -139,8 +159,10 @@ async def main() -> None:
                 )
         now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         for pool, (_mint_str, coin_creator) in by_pool.items():
-            cv = PumpSwapAddresses.derive_creator_vault(coin_creator)
-            bal = vault_bal[cv]
+            ata = get_associated_token_address(
+                PumpSwapAddresses.derive_creator_vault(coin_creator), WSOL_MINT
+            )
+            bal = vault_bal[ata]
             rows.append(
                 {
                     "ts": now,
