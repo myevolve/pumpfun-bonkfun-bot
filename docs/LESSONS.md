@@ -767,6 +767,30 @@ admissible Jev-quality-vs-PnL test (declared pending in the ecosystem
 survey) is blocked by missing scores, not by analysis. The shadow
 config should enable the scorer.
 
+## Phase 0 live: the creator annuity measured on real pools (2026-10-11)
+
+The Phase 0 tracker (`token-lifecycles/track_creator_fees.py`) is live on
+25 recent graduated pools (the instrument's own grad_marks cohort, fund
+>= 60 SOL, Oct 7-11). Three implementation lessons were paid to get real
+numbers:
+
+1. Creator fees accrue as **WSOL in the creator-vault PDA's associated
+   token account**, not lamports in the PDA (CAPYWIFGUN: PDA 0.0,
+   ATA 0.0149). The first two snapshots read the wrong account and
+   measured zero.
+2. The fee_config confirmed live: `creator_fee_bps=30` on every tier
+   (flat + regular), lp 0 / protocol 95 - the census config unchanged.
+3. The cohort must be RECENT migrations: the tape's Sep whale-band
+   creators collected long ago (0 funded vaults in the first 25).
+
+First deltas (one ~4-minute window, n=25): median 0.0000, mean 0.0082,
+max 0.1036 SOL - two pools accruing (~0.10/day each), eighteen at zero.
+Two real data points, not yet a curve: the 15-day payback hypothesis
+needs ~85 SOL/15d = 5.7 SOL/day on the median pool, and the measured
+top is 0.10/day on the best pool. Early signal points well below the
+survivorship estimate - the daily cadence continues, and the Phase 0
+gate (payback > 45 days -> STOP) will decide on data, not hope.
+
 ## The wallet census + the net regime re-test (2026-10-09 14:9xZ)
 
 Two deliverables from the "success leaves clues" directive.
