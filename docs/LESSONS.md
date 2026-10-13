@@ -768,6 +768,25 @@ survey) is blocked by missing scores, not by analysis. The shadow
 config should enable the scorer.
 
 ## Phase 0 live: the creator annuity measured on real pools (2026-10-11)
+**Phase 0 result, 54 hours of tracking (25 pools, 22 snapshots, through
+Oct 13)**: creators actively collect — three pools were drained to zero
+mid-tracking (INTENTS peak 22.68 -> 0.03; SEED 15.09 -> 0.005; DYtVmeMV
+peak 22.15 -> 1.76). Peak vault = fees earned while tracked:
+
+- INTENTS: 22.68 SOL on a 60.7 fund in 54h -> **payback ~6 days**
+- SPOOF: 22.15 on 60.2 -> ~6 days
+- SEED: 15.09 on 70.0 -> ~9 days
+- 4 of 25 pools earned >1 SOL (16%); the median pool earned ~0.
+
+The measured picture replaces both earlier estimates: the annuity is NOT
+the uniform 15-day payback the census suggested, and NOT the ~50x-below
+fear the first 15-minute window suggested. It is a **lottery among
+launches**: ~16% of graduates earn material fees (payback ~6-9 days,
+better than estimated), the rest earn ~nothing. The creator pilot's
+economics therefore hinge entirely on coin quality — the Jev
+pre-launch screen is no longer optional, it is the whole game.
+
+
 **Snapshot 2 (same day, ~15 min later — the per-interval rate, not daily
 yet)**: the two accreting pools confirmed and accelerated — INTENTS
 +2.89 SOL, SPOOD +0.58, SEED +0.006 (the rest zero). INTENTS' vault now
