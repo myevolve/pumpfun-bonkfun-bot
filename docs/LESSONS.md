@@ -791,14 +791,16 @@ survey) is blocked by missing scores, not by analysis. The shadow
 config should enable the scorer.
 
 ## Phase 0 live: the creator annuity measured on real pools (2026-10-11)
-**Phase 0 result, 72.6 hours of tracking (25 snapshots through `2026-10-14 11:08Z`, now covering all 49 graduated `grad_marks` pools plus 11 tape pools)**: creators actively collect mid-tracking (INTENTS `22.68 -> 0.009`; SPOOF `22.15 -> 2.01`; SEED `15.09 -> 0.008`), and expanding the tracker to all 49 `grad_marks` pools uncovered a fourth whale-volume fee earner (`IOF` `73272`: **`19.04 SOL`** in creator vault). Cumulative observed fees (initial + positive interval deltas):
+**Phase 0 result, 78.6 hours of tracking (26 snapshots through `2026-10-14 17:08Z`, covering all 49 graduated `grad_marks` pools + 11 tape pools)**: creators actively collect mid-tracking, and `SNIFFR` (`76580`, `72.8 SOL` fund, `grad_elapsed = 21.2s`) accrued **`2.993 SOL`** in its creator vault within `~2 hours` of graduation (`~998 SOL` of PumpSwap churn). Top cumulative fee earners:
 
-- `SPOOF` (`71452`, `60.2 SOL` fund): **`28.27 SOL`** (`22.15 SOL` peak + `6.12 SOL` post-drain re-accrual) -> **payback ~9 days**
-- `INTENTS` (`73896`, `60.7 SOL` fund): **`25.54 SOL`** (`22.68 SOL` peak + `2.86 SOL` re-accrual) -> **payback ~10 days**
-- `IOF` (`73272`, `64.0 SOL` fund): **`19.04 SOL`** currently in creator vault (`~6,346 SOL` pool volume) -> **payback ~13 days**
+- `SPOOF` (`71452`, `60.2 SOL` fund): **`28.27 SOL`** cumulative (`22.15 SOL` peak + re-accrual; creator drained another `-1.81 SOL` in the last 6h) -> **payback ~9 days**
+- `INTENTS` (`73896`, `60.7 SOL` fund): **`25.54 SOL`** cumulative -> **payback ~10 days**
+- `IOF` (`73272`, `64.0 SOL` fund): **`19.12 SOL`** (`+0.085 SOL` in last 6h) -> **payback ~13 days**
 - `SEED` (`70989`, `70.0 SOL` fund): **`15.09 SOL`** -> **payback ~14 days**
-- **4 of 49 graduated `grad_marks` pools earned >15 SOL (`8.2%`, `87.94 SOL` combined)**; `9/49` (`18.4%`) hold `≥0.01 SOL`; the median pool earned `~0.0001 SOL`.
+- `SNIFFR` (`76580`, `72.8 SOL` fund, paced `21.2s` sweep): **`2.993 SOL`** in `<2h` -> **payback ~4 days** if initial velocity holds
+- **5 of 49 graduated `grad_marks` pools earned ≥3.0 SOL (`10.2%`, `90.93 SOL` combined)**; `9/49` (`18.4%`) hold `≥0.01 SOL`.
 
+**Paced-sweep validation confirmed on fresh live coin**: `SNIFFR`'s paced `21.2s` sweep (`grad_elapsed >= 8s`) generated `2.993 SOL` of creator fees within 2 hours, whereas all 5 instant sweeps today (`2.4–5.8s`) generated `0.000000..0.000480 SOL` (`6,200x` difference). Pacing is the active driver of post-graduation pool churn.
 
 **Sweep-pacing determinant across all 49 graduated pools (2026-10-14)**:
 - **Paced sweeps (`grad_elapsed_s >= 8s`, `n=13`)**: `3/13` (`23.1%`) earned `>15 SOL`, `6/13` (`46.2%`) earned `≥0.1 SOL`, mean **`5.40 SOL`**, median **`0.0150 SOL`**.

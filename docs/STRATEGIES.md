@@ -36,9 +36,7 @@ This file is the inventory. Rules:
   compressing the payback, the creator's own pool dump risk (the churn
   that pays the annuity also craters the price — the position is the fee
   stream, not the tokens).
-- **Status**: MEASURED-LIVE — Phase 0 live tracker running (`72.6h` / `25` snapshots across all `49` graduated `grad_marks` pools: `4/49` pools earned `15.1..28.3 SOL` each, `87.9 SOL` total across the top 4; median pool `~0.0001 SOL`), Phase 1 launch + self-sweep mechanics & dry-run simulator shipped (`simulate_creator_pilot_launch.py`). Phase 2 blocked on capital (~86 SOL) + explicit operator approval.
-
-## 2. Rollover condition-driven exit (graduated pool)
+- **Status**: MEASURED-LIVE — Phase 0 live tracker running (`78.6h` / `26` snapshots across all `49` graduated `grad_marks` pools: `5/49` pools earned `3.0..28.3 SOL` each, with `SNIFFR` `76580` accruing **`2.993 SOL`** in creator fees within `~2 hours` of its paced graduation; `90.9 SOL` combined across the top 5), Phase 1 launch + self-sweep mechanics & dry-run simulator shipped (`simulate_creator_pilot_launch.py`). Phase 2 blocked on capital (~86 SOL) + explicit operator approval.
 
 - **Mechanism**: hold the pool position; exit when the pool drops ≥5%
   below its running peak, with `peak` seeded at graduation `open_price`
