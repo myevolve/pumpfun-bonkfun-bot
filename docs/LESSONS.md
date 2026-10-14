@@ -557,6 +557,30 @@ SOL and climbing toward the 60 gate. The promotion case's cohort threshold
 (~30 pool-priced outcomes) is roughly an hour away at this rate; the
 duration gate (24-48h of sealed snapshots) remains the longest pole.
 
+## Focused 6-hour rollover test (2026-10-14 05:06Z, closed)
+
+Relaunched the paper collector (`keep_whaleride_paper.py`) at `2026-10-13 23:05Z`
+after it had been down since Oct 11 (`74587` baseline, 42 prior rollovers) and
+ran a bounded 6-hour live window (`23:06Z` → `05:06Z`, 736 decisions: 354
+`window_expired`, 191 `creator_sold`, 187 `timeout`, **4 `buyers_present`**).
+All 4 accepted coins were `buyers == 3`, non-mayhem, `real_sol 60.50..63.47`,
+and all 4 graduated within `2.5..5.8s` and resolved across 60s/300s/900s:
+
+| ID | UTC | Symbol | Curve SOL | Grad Open | Peak (G+s) | **Rollover (G+s)** | Fixed 60s | Fixed 300s | Fixed 900s | **Edge vs 60s** | **Edge vs 900s** |
+|---:|:---|:---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 74705 | `00:05Z` | `SEALYS` | 60.50 | −20.6% | −14.7% (37.4s) | **−43.7%** (57.8s) | −43.7% | −44.2% | −91.4% | **+0.0 pts** | **+47.7 pts** |
+| 74727 | `00:17Z` | `CLAUSDIA` | 63.45 | +81.3% | +107.9% (10.3s) | **+83.7%** (19.4s) | −56.4% | −54.9% | −91.3% | **+140.1 pts** | **+175.0 pts** |
+| 74974 | `02:21Z` | `VRAXTARD` | 63.47 | +112.6% | +112.6% (0.0s) | **+89.3%** (2.0s) | −59.8% | −56.8% | −91.3% | **+149.0 pts** | **+180.5 pts** |
+| 75143 | `03:41Z` | `BUPE` | 60.94 | +62.2% | +71.8% (10.2s) | **+45.8%** (14.2s) | +77.6% | +119.0% | −91.7% | −31.9 pts | **+137.5 pts** |
+
+- **6-hour window verdict (n=4)**:
+  - **Rollover exit (5% drop, peak seeded with `open_price`)**: **3W / 1L**, **+175.1 aggregate points** (**+43.8% mean**, **+64.8% median**).
+  - **Fixed 60s**: **1W / 3L**, **−82.2 points** (−20.6% mean) → rollover beats/ties **3/4** by **+257.3 points** (+64.3 pts/coin).
+  - **Fixed 300s**: **1W / 3L**, **−37.0 points** (−9.2% mean) → rollover beats/ties **3/4** by **+212.0 points** (+53.0 pts/coin).
+  - **Fixed 900s**: **0W / 4L**, **−365.7 points** (−91.4% mean) → rollover beats **4/4** by **+540.7 points** (+135.2 pts/coin).
+- **`VRAXTARD` (74974) validated the peak-seed fix (`bbb6510`) live**: `open_price` (+112.6%) was the all-time high; the pool dumped straight through `G+5s` (+67.8%) and `G+30s` (−60.1%). Seeding peak with `open_price` fired rollover on the first poll (`G+2.0s`) at **+89.3%** instead of riding to −59.8% at 60s (+149.0 pts saved).
+- **Cumulative post-fix 5% rollover cohort (`id >= 66872`, n=32 clean resolved, excluding `IOF` 73272 vault squeeze)**: **30W / 2L (93.8% win rate)**, **+2,070.5 aggregate points** (**+64.7% mean**, **+46.9% median**), beating 60s (+1,574.4 pts, 24W/8L) by **+496.1 points** and 900s (+818.6 pts, 11W/21L, −91.2% median) by **+1,251.9 points**.
+
 ## Duplicate-writer incident (2026-10-07 04:14Z, resolved)
 
 Two bot_runner processes wrote the same journal for ~6 hours: the paper

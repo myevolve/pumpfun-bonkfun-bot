@@ -41,18 +41,24 @@ This file is the inventory. Rules:
 
 ## 2. Rollover condition-driven exit (graduated pool)
 
-- **Mechanism**: hold the pool position; exit at the first poll below
-  the running peak (no threshold — the 2%/5% trailing variants measured
-  dead; poll noise produces sub-2% dips).
-- **Measured**: beats the fixed 900s timeline on 12/13 resolved coins,
-  +1,865 points aggregate; the WICK rebound class is the quantified cost
-  (fire at +13%, pool ran to +152%).
+- **Mechanism**: hold the pool position; exit when the pool drops ≥5%
+  below its running peak, with `peak` seeded at graduation `open_price`
+  (`bbb6510`) so open-and-dump pools trigger on the first poll.
+- **Measured**:
+  - **Cumulative post-fix 5% cohort (`id >= 66872`, n=32 clean resolved)**:
+    **30W / 2L (93.8%)**, **+2,070.5 points** (+64.7% mean, +46.9% median)
+    vs +1,574.4 pts at 60s (24W/8L) and +818.6 pts at 900s (11W/21L, −91.2% median).
+  - **Focused 6-hour live test (2026-10-14, n=4)**: **3W / 1L**, **+175.1 points**
+    (+43.8% mean) vs −82.2 pts at 60s (1W/3L), −37.0 pts at 300s (1W/3L), and
+    −365.7 pts at 900s (0W/4L) — **+257.3 pts** over 60s and **+540.7 pts** over 900s.
 - **Regime detector**: none needed — it is per-position and
   self-arming. Requires an ENTRY to exit from (any of the below, or an
   operator-directed position).
-- **Worst case**: the WICK giveback (~139 points on one coin of 13) and
-  the instant-collapse class where no exit rule helps (dump between
-  2-second polls).
+- **Worst case**:
+  - Second-wave continuation giveback (`BUPE` 75143: exited +45.8% at G+14.2s,
+    ran to +119.0% at 300s before crashing to −91.7% at 900s; `QUANTUMJAK` 68368).
+  - Below-entry graduation open (`SEALYS` 74705: opened at −20.6%, exited −43.7%
+    at G+57.8s; all 4 historical `open_price < entry_price` graduations lost).
 ## 3. Crossing-entry sniping (in-band 60–85 SOL accept) — band-gated
 
 - **Mechanism**: accept a coin at the 60-SOL crossing, ride to graduation,
