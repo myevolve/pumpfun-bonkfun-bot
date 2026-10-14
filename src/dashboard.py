@@ -247,7 +247,9 @@ def load_grad_decay() -> dict:
     conn = sqlite3.connect(f"file:{LESSON_DB}?mode=ro", uri=True, timeout=5)
     try:
         row = conn.execute(
-            "SELECT COUNT(*), AVG(open_price), AVG(p5), AVG(p30), AVG(p120)"
+            "SELECT COUNT(*), AVG(open_price), AVG(p5), AVG(p30), AVG(p120),"
+            " COUNT(rollover_price), AVG(rollover_price / open_price - 1.0),"
+            " AVG(rollover_elapsed_s)"
             " FROM grad_marks WHERE open_price IS NOT NULL"
         ).fetchone()
     except sqlite3.OperationalError:
@@ -259,9 +261,14 @@ def load_grad_decay() -> dict:
     return {
         "n": row[0],
         "open": row[1],
-        "p5_over_open": row[2] / row[1] if row[2] else None,
-        "p30_over_open": row[3] / row[1] if row[3] else None,
-        "p120_over_open": row[4] / row[1] if row[4] else None,
+        "p5_over_open": round(row[2] / row[1], 3) if row[2] else None,
+        "p30_over_open": round(row[3] / row[1], 3) if row[3] else None,
+        "p120_over_open": round(row[4] / row[1], 3) if row[4] else None,
+        "rollover_n": row[5] or 0,
+        "rollover_vs_open_pct": (
+            round(row[6] * 100.0, 2) if row[6] is not None else None
+        ),
+        "rollover_elapsed_s": round(row[7], 1) if row[7] is not None else None,
     }
 
 
@@ -1069,6 +1076,12 @@ with tab_learning:
                 "censored horizons are excluded, not zero-filled. The tape's "
                 "median liquidity half-life after peak is 18s."
             )
+            if gdec.get("rollover_n"):
+                st.caption(
+                    f"Rollover exit (`5%` peak drop, n={gdec['rollover_n']}): "
+                    f"**{gdec['rollover_vs_open_pct']:+.2f}%** vs pool open "
+                    f"(mean trigger **G+{gdec['rollover_elapsed_s']}s**)."
+                )
 
         if lstats["pnl_by_quality"]:
             st.subheader("Live outcome associations by raw Jev quality")

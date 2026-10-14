@@ -15,6 +15,7 @@ import sqlite3
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+
 from utils.paths import state_path
 
 DB = state_path("learning", "lessons.sqlite3")
@@ -142,6 +143,20 @@ def _paper_evidence(conn: sqlite3.Connection) -> dict:
             WHERE p.horizon_s!=60 GROUP BY p.horizon_s ORDER BY p.horizon_s"""
         )
     ]
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='grad_marks'"
+    ).fetchone():
+        g_cols = {row[1] for row in conn.execute("PRAGMA table_info(grad_marks)")}
+        if "rollover_price" in g_cols:
+            out["grad_marks"] = dict(
+                conn.execute(
+                    """SELECT COUNT(*) AS graduated_n,
+                        COUNT(rollover_price) AS rollover_n,
+                        AVG(rollover_price / open_price - 1.0) AS mean_rollover_vs_open,
+                        AVG(rollover_elapsed_s) AS mean_rollover_elapsed_s
+                    FROM grad_marks WHERE open_price IS NOT NULL"""
+                ).fetchone()
+            )
     return out
 
 
@@ -323,6 +338,17 @@ def _print_paper_evidence(data: dict) -> None:
         for row in data["paper_censors"]:
             print(
                 f"  {row['horizon_s']}s {row['reason']}: {row['n']} — {row['next_step']}"
+            )
+    gm = data.get("grad_marks")
+    if gm and gm.get("graduated_n"):
+        print(
+            f"\n--- Graduation & rollover marks (n={gm['graduated_n']} graduated,"
+            f" {gm['rollover_n']} rollover) ---"
+        )
+        if gm["rollover_n"] and gm["mean_rollover_vs_open"] is not None:
+            print(
+                f"  rollover vs pool-open: {gm['mean_rollover_vs_open']:+.4f}"
+                f" (mean trigger G+{gm['mean_rollover_elapsed_s']:.1f}s)"
             )
 
 

@@ -88,29 +88,29 @@ def cohort_pools() -> list[dict]:
         if 60 <= rsol <= 1000:
             mints.add(d["mint"])
     db = sqlite3.connect(str(REPO / ".state/learning/lessons.sqlite3"))
-    grad_mints = {
+    grad_mints = [
         r[0]
         for r in db.execute(
-            "SELECT DISTINCT l.mint FROM lessons l JOIN grad_marks g ON"
+            "SELECT l.mint FROM lessons l JOIN grad_marks g ON"
             " g.entry_id=l.id WHERE g.open_price IS NOT NULL"
+            " GROUP BY l.mint ORDER BY MAX(l.id) DESC"
         )
-    }
+    ]
     db.close()
     # The whale-band tape coins are 2026-09 vintage: their creator vaults
     # have long since been swept by the creators (fee collection). The
     # annuity question is about RECENT migrations - prioritize the
     # instrument's own grad_marks (accepted coins, fund >= 60, Oct 7-11),
     # then the newest tape coins.
-    recent = sorted(grad_mints, reverse=True) + [
-        m for m in sorted(mints, reverse=True) if m not in grad_mints
-    ]
+    grad_set = set(grad_mints)
+    recent = grad_mints + [m for m in sorted(mints, reverse=True) if m not in grad_set]
     return [{"mint": m} for m in recent]
 
 
 async def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--rpc", default=None)
-    parser.add_argument("--limit", type=int, default=25)
+    parser.add_argument("--limit", type=int, default=60)
     args = parser.parse_args()
     rpc = args.rpc or rpc_from_env()
     pools = cohort_pools()[: args.limit]

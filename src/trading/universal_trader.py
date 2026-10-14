@@ -2495,7 +2495,11 @@ class UniversalTrader:
         watch = asyncio.create_task(
             self._graduation_watch(token_info, entry_id, started)
         )
-        self._paper_tasks.add(watch)
+        watch_tasks = getattr(self, "_watch_tasks", None)
+        if watch_tasks is None:
+            watch_tasks = set()
+            self._watch_tasks = watch_tasks
+        watch_tasks.add(watch)
         watch.add_done_callback(
             lambda done: self._paper_mark_finished(done, entry_id, -1, started)
         )
@@ -2504,15 +2508,18 @@ class UniversalTrader:
         self, task: asyncio.Task, entry_id: int, horizon_s: int, started: float
     ) -> None:
         self._paper_tasks.discard(task)
+        if hasattr(self, "_watch_tasks"):
+            self._watch_tasks.discard(task)
         self._position_tasks.discard(task)
         try:
             if task.cancelled():
-                self.lesson_journal.finish_paper_mark(
-                    entry_id,
-                    horizon_s,
-                    elapsed_s=monotonic() - started,
-                    reason="cancelled",
-                )
+                if horizon_s > 0:
+                    self.lesson_journal.finish_paper_mark(
+                        entry_id,
+                        horizon_s,
+                        elapsed_s=monotonic() - started,
+                        reason="cancelled",
+                    )
             elif task.exception() is not None:
                 self._fatal_monitor_errors.put_nowait(task.exception())
         except Exception as exc:  # noqa: BLE001 - forward persistence failures to shutdown
@@ -2523,6 +2530,11 @@ class UniversalTrader:
         tasks = tuple(getattr(self, "_paper_tasks", ()))
         if tasks:
             await asyncio.gather(*tasks)
+        watches = tuple(getattr(self, "_watch_tasks", ()))
+        for watch in watches:
+            watch.cancel()
+        if watches:
+            await asyncio.gather(*watches, return_exceptions=True)
 
     async def _completed_curve_pool_price(
         self, token_info: TokenInfo, remaining: float
@@ -2533,7 +2545,7 @@ class UniversalTrader:
         completed curve before reporting `complete`); complete=1 routes to
         the pool exit, anything else stays censored.
         """
-        if remaining <= 0:
+        if remaining <= 0 or getattr(self, "solana_client", None) is None:
             return None
         try:
             async with asyncio.timeout(remaining):
@@ -2561,7 +2573,7 @@ class UniversalTrader:
         shape); any miss is a censored mark, never an invented price. Bounded
         by the mark's remaining wall budget.
         """
-        if remaining <= 0:
+        if remaining <= 0 or getattr(self, "solana_client", None) is None:
             return None
         # Migration race: the pool/vault accounts can be briefly unreadable
         # (the 14h-run's TypeError censoring). A short settle delay catches
