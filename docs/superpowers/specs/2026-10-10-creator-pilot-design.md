@@ -77,6 +77,11 @@ Gate: PASSED (`uv run learning-examples/token-lifecycles/simulate_creator_pilot_
 - **Abort**: any failure, timeout, or unknown outcome stops the flow
   permanently (the standing rule). The position after graduation is
   held, not traded.
+- **Sweep-pacing rule (measured in Phase 0 across 49 graduated pools, 2026-10-14)**:
+  - **Paced sweeps (`grad_elapsed_s >= 8s`, `n=13`)**: **3 of 13 (`23.1%`)** earned `>15 SOL` (`SPOOF` `62.7s` → `28.27 SOL`; `INTENTS` `52.7s` → `25.54 SOL`; `SEED` `10.9s` → `15.09 SOL`; `Incognijak` `45.4s` → `0.72 SOL`; `PEA` `28.3s` → `0.39 SOL`), **`6 / 13` (`46.2%`)** earned `≥0.1 SOL`, mean **`5.40 SOL`**, median **`0.0150 SOL`** (`405x` higher median than atomic sweeps).
+  - **Atomic/instant sweeps (`grad_elapsed_s < 8s`, `n=36`)**: **1 of 36 (`2.8%`)** earned `>1 SOL` (`IOF`), **`3 / 36` (`8.3%`)** earned `≥0.1 SOL`, mean **`0.54 SOL`**, median **`0.000037 SOL`**.
+  - **Post-graduation retention**: **4 of 28 (`14.3%`)** pools that held `≥50%` of `open_price` at `G+120s` earned `>15 SOL` (mean `3.16 SOL`), vs **`0 of 20 (0%)`** pools that dumped `<50%` by `G+120s` (mean `0.05 SOL`).
+  - **Implication for Phase 2**: space the 4 self-sweep tranches across **15–60 seconds** (`4–15s` between tranches) rather than bundling them in a single slot, so the rising curve remains visible on the bonding-curve feed before migrating to PumpSwap.
 
 ## Risks
 

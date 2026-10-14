@@ -800,6 +800,12 @@ config should enable the scorer.
 - `SEED` (`70989`, `70.0 SOL` fund): **`15.09 SOL`** -> **payback ~14 days**
 - **4 of 49 graduated `grad_marks` pools earned >15 SOL (`8.2%`, `87.94 SOL` combined)**; `9/49` (`18.4%`) hold `≥0.01 SOL`; the median pool earned `~0.0001 SOL`.
 
+
+**Sweep-pacing determinant across all 49 graduated pools (2026-10-14)**:
+- **Paced sweeps (`grad_elapsed_s >= 8s`, `n=13`)**: `3/13` (`23.1%`) earned `>15 SOL`, `6/13` (`46.2%`) earned `≥0.1 SOL`, mean **`5.40 SOL`**, median **`0.0150 SOL`**.
+- **Instant sweeps (`grad_elapsed_s < 8s`, `n=36`)**: `1/36` (`2.8%`) earned `>1 SOL`, `3/36` (`8.3%`) earned `≥0.1 SOL`, mean **`0.54 SOL`**, median **`0.000037 SOL`** (`405x` lower median).
+- **G+120s retention**: `4/28` (`14.3%`) pools holding `≥50%` of `open_price` at `G+120s` earned `>15 SOL` (mean `3.16 SOL`) vs `0/20` (`0%`) pools that dumped `<50%` by `G+120s` (mean `0.05 SOL`).
+- **Actionable Phase 2 design rule**: pace the 4 self-sweep tranches over `15–60s` (`4–15s` per tranche) rather than a single-slot bundle so organic followers discover the rising curve before migration.
 The measured picture replaces both earlier estimates: the annuity is NOT
 the uniform 15-day payback the census suggested, and NOT the ~50x-below
 fear the first 15-minute window suggested. It is a **lottery among
