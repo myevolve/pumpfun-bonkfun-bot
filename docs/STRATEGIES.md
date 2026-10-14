@@ -132,24 +132,24 @@ This file is the inventory. Rules:
 
 ---
 
-## Untested hypotheses — the widening net (queued censuses)
+## Completed hypothesis censuses (measured 2026-10-14, `lifecycles_24h.jsonl`, n=24,015 coins)
 
-Each enters the inventory only with a measured conditional verdict:
+All four queued hypotheses have been measured on the 24,015-coin exact-CPMM tape with strict out-of-sample (TRAIN first 12,007 coins → LOCK last 12,008 coins) evaluation:
 
-- **Leaderboard winner census**: profile the top-100 consistent
-  winners' behavior (entry timing vs coin age, hold time, coin
-  selection, position size) from the same on-chain tape the whale
-  census used. Their pattern, if mechanizable, becomes candidate
-  entries.
-- **Creation-window re-test by regime**: the Sep 4–5 tape measured
-  first-10-slot entries negative OOS — in one mayhem burst. The
-  verdict is regime-conditional; re-test in the current regime.
-- **Buyback fee stream**: pump's BuybackFeeRecipient — an unexplored
-  supply-side stream.
-- **Serial-sniper clone**: the 15-coin sniper who never sells (off-chain
-  settlement — likely a paid service). If the entry pattern is visible
-  on-chain, the entry half may be cloneable.
-
+- **Leaderboard winner census** (top-100 consistent realized-cashflow winners, `≥10` coins bought, unsold bags valued at `0 SOL`):
+  - **31/100** (`+1,662.8 SOL`): slot-0 bundled launch insiders (`med_dslot = 0.0`, `65.3%` median win rate). Inaccessible to external followers.
+  - **1/100** (`+19.4 SOL`): `dslot 1..2` ultra-early sniper (`20.6%` win rate).
+  - **15/100** (`+292.2 SOL`): Mayhem `sol_vault` (`BwWK17cb…`) automated buyback scalpers (`med_dslot = 90.5`, `med_rsol = 1.15 SOL`, `50.0%` win rate). Cloning at retail latency (`dslot 40..75`, `0.5..5.0 SOL`) yields `+2.99%` median on LOCK (`55.2%` win rate, `n=882`) but **`−4.16%` mean** due to left-tail dumps when the automated buyback doesn't fire.
+  - **53/100** (`+460.3 SOL`): non-Mayhem mid-curve cluster traders (`med_dslot = 41.5`, `med_rsol = 15.29 SOL`, `58.8%` win rate). Selecting the 161 profitable non-Mayhem wallets strictly on TRAIN and following `≥2` wallets buying within 3 slots on LOCK (`n=209`) collapses out-of-sample: **`29.7%` win rate, `−4.33%` mean, `−10.67%` median**. **Verdict: MEASURED-DEAD OOS** (in-sample survivorship + follower latency penalty).
+- **Creation-window re-test by regime** (`dslot 1..3`, `4..10`, `11..25` at `+15` / `+50` / `+150` slots, exact CPMM reserves + `1.25%` fee/side + `65k` lamports tx fees):
+  - **Non-Mayhem (`14,950` coins)**: negative across all 9 cells (`dslot 1..3`: `−8.08%` mean / `−3.20%` median at `+15sl`, `−10.84%` / `−3.20%` at `+50sl`, `−16.57%` / `−7.00%` at `+150sl`, win rates `19.4%..24.7%`).
+  - **Mayhem (`9,065` coins)**: even worse (`−12.26%` to `−47.80%` mean, `−16.00%` to `−88.52%` median).
+  - **Verdict: MEASURED-DEAD in both non-Mayhem and Mayhem regimes.** Creation-window sniping at retail latency (`dslot >= 1`) is structurally negative regardless of Mayhem mode.
+- **Buyback fee stream** (`BUYBACK_FEE_RECIPIENTS` / `update_buyback_config` in `pump_fun_idl.json`):
+  - **Verdict: NOT CREATOR-ACCESSIBLE.** The 8 `BUYBACK_FEE_RECIPIENTS` are hardcoded protocol-authority accounts (`authority` on `Global`), not creator-owned PDAs, and execute `0` curve trades on the 24h tape. The only creator-owned fee stream is `creator_vault` (30 bps PumpSwap / curve creator fee, already tracked in Strategy #1).
+- **Serial-sniper clone** (`50` wallets with `≥10` coins bought and `0` on-chain curve sells):
+  - Splits into two populations: (a) slot-0 graduation bundlers (`6A59APPs…` 32/32 graduated, `HT3WHerj…` 23/23 graduated, `med_dslot = 0.0`, `med_rsol = 82.5..85.0 SOL`) that sweep their own launches and exit or hold on PumpSwap, and (b) high-volume retail-slot buyers (`7JCe3GHw…` 779 coins, `7iVCXQn4…` 776 coins, `Em8J3gBW…` 756 coins, `med_dslot = 158..174`) that transfer tokens off-wallet rather than selling directly.
+  - Cloning the top 8 non-slot-0 never-selling snipers at `+15` / `+50` / `+150` slots loses across every wallet (`−1.87%` to `−44.80%` mean, `−3.19%` to `−84.62%` median, `9.4%..28.2%` win rate). **Verdict: MEASURED-DEAD for follower cloning.**
 ---
 
 ## The regime panel (the deterministic "what conditions are we in")

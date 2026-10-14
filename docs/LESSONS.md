@@ -1538,3 +1538,17 @@ distinct tokens per coin, confirmed by reading their BondingCurve accounts).
 The WSOL-only whale-ride cohort is therefore smaller than the tape's coin
 population; rate comparisons against the tape should use WSOL-paired
 denominators on both sides.
+
+## Four queued hypothesis censuses completed (2026-10-14)
+
+Closed all four queued censuses in `docs/STRATEGIES.md` against the 24,015-coin exact-CPMM tape (`lifecycles_24h.jsonl`) with strict TRAIN (`0..12,006`) → LOCK (`12,007..24,014`) out-of-sample evaluation:
+
+1. **Leaderboard winner census (top-100 realized-cashflow winners, `≥10` coins, unsold bags = 0 SOL)**:
+   - `31/100` (`+1,662.8 SOL`) are slot-0 bundled insiders (`med_dslot = 0.0`); `1/100` (`+19.4 SOL`) is a `dslot 1..2` sniper; `15/100` (`+292.2 SOL`) scalp Mayhem `sol_vault` (`BwWK17cb…`) automated buybacks (`+2.99%` LOCK median, `−4.16%` LOCK mean); `53/100` (`+460.3 SOL`) trade non-Mayhem mid-curve clusters (`med_dslot = 41.5`, `med_rsol = 15.29 SOL`).
+   - Selecting the 161 profitable non-Mayhem retail-latency wallets strictly on TRAIN and following `≥2` wallets buying within 3 slots on LOCK (`n=209`) fails out-of-sample: **`29.7%` win rate, `−4.33%` mean, `−10.67%` median**.
+2. **Creation-window re-test by regime (`dslot 1..3`, `4..10`, `11..25` at `+15` / `+50` / `+150` slots)**:
+   - Non-Mayhem (`14,950` coins) is negative across every cell (`−8.08%` to `−19.45%` mean, `−3.20%` to `−64.56%` median). Mayhem (`9,065` coins) is deeper negative (`−12.26%` to `−47.80%` mean, `−16.00%` to `−88.52%` median). Creation-window sniping at `dslot >= 1` is dead in both regimes.
+3. **Buyback fee stream (`BUYBACK_FEE_RECIPIENTS`)**:
+   - Protocol-owned (`Global.authority`), not creator-accessible, and 0 curve trades on the 24h tape.
+4. **Serial-sniper clone (`50` wallets with `≥10` coins bought and `0` curve sells)**:
+   - Either slot-0 graduation bundlers (`100%` grad rate at `85 SOL`, `med_dslot = 0`) or multi-wallet token routers (`756..779` coins, `5.4%..7.3%` grad rate). Following the top 8 non-slot-0 never-sellers loses in every cell (`−1.87%` to `−44.80%` mean, `−3.19%` to `−84.62%` median).
