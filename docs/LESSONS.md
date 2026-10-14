@@ -792,15 +792,13 @@ survey) is blocked by missing scores, not by analysis. The shadow
 config should enable the scorer.
 
 ## Phase 0 live: the creator annuity measured on real pools (2026-10-11)
-**Phase 0 result, 54 hours of tracking (25 pools, 22 snapshots, through
-Oct 13)**: creators actively collect — three pools were drained to zero
-mid-tracking (INTENTS peak 22.68 -> 0.03; SEED 15.09 -> 0.005; DYtVmeMV
-peak 22.15 -> 1.76). Peak vault = fees earned while tracked:
+**Phase 0 result, 72.6 hours of tracking (25 snapshots through `2026-10-14 11:08Z`, now covering all 49 graduated `grad_marks` pools plus 11 tape pools)**: creators actively collect mid-tracking (INTENTS `22.68 -> 0.009`; SPOOF `22.15 -> 2.01`; SEED `15.09 -> 0.008`), and expanding the tracker to all 49 `grad_marks` pools uncovered a fourth whale-volume fee earner (`IOF` `73272`: **`19.04 SOL`** in creator vault). Cumulative observed fees (initial + positive interval deltas):
 
-- INTENTS: 22.68 SOL on a 60.7 fund in 54h -> **payback ~6 days**
-- SPOOF: 22.15 on 60.2 -> ~6 days
-- SEED: 15.09 on 70.0 -> ~9 days
-- 4 of 25 pools earned >1 SOL (16%); the median pool earned ~0.
+- `SPOOF` (`71452`, `60.2 SOL` fund): **`28.27 SOL`** (`22.15 SOL` peak + `6.12 SOL` post-drain re-accrual) -> **payback ~9 days**
+- `INTENTS` (`73896`, `60.7 SOL` fund): **`25.54 SOL`** (`22.68 SOL` peak + `2.86 SOL` re-accrual) -> **payback ~10 days**
+- `IOF` (`73272`, `64.0 SOL` fund): **`19.04 SOL`** currently in creator vault (`~6,346 SOL` pool volume) -> **payback ~13 days**
+- `SEED` (`70989`, `70.0 SOL` fund): **`15.09 SOL`** -> **payback ~14 days**
+- **4 of 49 graduated `grad_marks` pools earned >15 SOL (`8.2%`, `87.94 SOL` combined)**; `9/49` (`18.4%`) hold `≥0.01 SOL`; the median pool earned `~0.0001 SOL`.
 
 The measured picture replaces both earlier estimates: the annuity is NOT
 the uniform 15-day payback the census suggested, and NOT the ~50x-below
