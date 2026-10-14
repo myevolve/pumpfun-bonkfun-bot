@@ -36,8 +36,10 @@ This file is the inventory. Rules:
   compressing the payback, the creator's own pool dump risk (the churn
   that pays the annuity also craters the price — the position is the fee
   stream, not the tokens).
-- **Status**: MEASURED-LIVE — blocked on capital + explicit approval.
-  The bot's create plumbing exists.
+- **Status**: MEASURED-LIVE — Phase 0 live tracker running (66.6h / 24 snapshots),
+  Phase 1 launch + self-sweep mechanics & dry-run simulator shipped
+  (`simulate_creator_pilot_launch.py`). Phase 2 blocked on capital (~86 SOL) +
+  explicit operator approval.
 
 ## 2. Rollover condition-driven exit (graduated pool)
 

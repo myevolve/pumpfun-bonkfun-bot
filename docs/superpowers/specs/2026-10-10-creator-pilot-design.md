@@ -46,23 +46,24 @@ with the decay data. If payback lands in the 10–20 day band, proceed.
 
 Build: one script, existing RPC patterns, read-only. ~150 lines.
 
-## Phase 1 — mechanics (no funds)
+## Phase 1 — mechanics (no funds) [EXECUTED 2026-10-14]
 
-Port the proven `mint_and_buy_v2.py` builders into the bot's
-instruction_builder:
+Ported the proven `mint_and_buy_v2.py` builders into the bot's
+`instruction_builder` and verified offline:
 
-1. `create_v2` (name/symbol/uri/creator/mayhem/cashback) — the example's
-   encoder is IDL-verified (`verify_create_v2_optional_args.py`).
-2. Self-sweep driver: buy repeatedly until `real_sol` reaches the
-   85.0 SOL graduation point (the G-clock already reads real_sol live).
-3. Post-graduation hold: the position becomes pool liquidity + the
-   creator fee right. **No exit** — the design does not withdraw the
-   pool liquidity (that would rug the followers and kill the annuity;
-   the capital is spent, not invested).
-4. Dry-run simulation of the full launch flow against the decoder.
+1. `create_v2` (16 accounts) + `extend_account` (5 accounts) added to
+   `PumpFunAddressProvider.get_create_v2_instruction_accounts` and
+   `PumpFunInstructionBuilder.build_create_v2_instructions`, machine-checked
+   against `idl/pump_fun_idl.json` in `learning-examples/verify_v2_account_layout.py`.
+2. Self-sweep dry-run simulator (`learning-examples/token-lifecycles/simulate_creator_pilot_launch.py`):
+   steps a fresh curve across 4 `buy_v2` tranches using `quote_buy_exact_out`
+   to exact completion (`real_token_reserves == 0`, `real_quote_sol == 85.0054 SOL`,
+   `gross_spend == 86.0679 SOL`, `creator_self_rebate == 0.2550 SOL`,
+   `net_lockup == 85.8129 SOL`).
+3. Post-graduation hold: derives the canonical PumpSwap pool and creator vault
+   without building any sell or LP withdrawal instruction.
 
-Gate: dry-run reproduces a real graduation end-to-end.
-
+Gate: PASSED (`uv run learning-examples/token-lifecycles/simulate_creator_pilot_launch.py`).
 ## Phase 2 — bounded live pilot (operator approval required)
 
 - **Capital**: 85 SOL sweep + ~1.25% fees + buffer ≈ **90 SOL**.

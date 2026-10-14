@@ -48,6 +48,18 @@ class PumpFunAddresses:
     FEE_PROGRAM: Final[Pubkey] = Pubkey.from_string(
         "pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ"
     )
+    MINT_AUTHORITY: Final[Pubkey] = Pubkey.from_string(
+        "TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM"
+    )
+    MAYHEM_PROGRAM: Final[Pubkey] = Pubkey.from_string(
+        "MAyhSmzXzV1pTf7LsNkrNwkWKTo4ougAJ1PPg47MD4e"
+    )
+    MAYHEM_GLOBAL_PARAMS: Final[Pubkey] = Pubkey.from_string(
+        "13ec7XdrjF3h3YcqBTFDSReRcUFwbCnJaAQspM4j6DDJ"
+    )
+    MAYHEM_SOL_VAULT: Final[Pubkey] = Pubkey.from_string(
+        "BwWK17cbHxwWBKZkUYvzxLcNQ1YVyaFezduWbtm2de6s"
+    )
     # 8 normal fee recipients — use one as fee_recipient for non-mayhem coins.
     # See FEE_RECIPIENTS.md in the pump-fun public docs repository.
     NORMAL_FEE_RECIPIENTS: ClassVar[list[Pubkey]] = [
@@ -181,6 +193,24 @@ class PumpFunAddresses:
             PumpFunAddresses.FEE_PROGRAM,
         )
         return derived_address
+
+    @staticmethod
+    def find_mayhem_state(mint: Pubkey) -> Pubkey:
+        """Derive the Mayhem state PDA (`["mayhem-state", mint]`) under the Mayhem program."""
+        derived_address, _ = Pubkey.find_program_address(
+            [b"mayhem-state", bytes(mint)],
+            PumpFunAddresses.MAYHEM_PROGRAM,
+        )
+        return derived_address
+
+    @staticmethod
+    def find_mayhem_token_vault(mint: Pubkey) -> Pubkey:
+        """Derive the Mayhem token vault ATA (Token-2022 ATA owned by MAYHEM_SOL_VAULT)."""
+        return get_associated_token_address(
+            PumpFunAddresses.MAYHEM_SOL_VAULT,
+            mint,
+            SystemAddresses.TOKEN_2022_PROGRAM,
+        )
 
 
 class PumpFunAddressProvider(AddressProvider):
@@ -566,6 +596,33 @@ class PumpFunAddressProvider(AddressProvider):
             Dictionary of account addresses for the sell_v2 instruction
         """
         return self._get_v2_common_accounts(token_info, user)
+
+    def get_create_v2_instruction_accounts(
+        self, mint: Pubkey, user: Pubkey
+    ) -> dict[str, Pubkey]:
+        """Get all 16 IDL accounts needed for a create_v2 instruction."""
+        bonding_curve = self.derive_pool_address(mint)
+        associated_bonding_curve = self.derive_associated_bonding_curve(
+            mint, bonding_curve, SystemAddresses.TOKEN_2022_PROGRAM
+        )
+        return {
+            "mint": mint,
+            "mint_authority": PumpFunAddresses.MINT_AUTHORITY,
+            "bonding_curve": bonding_curve,
+            "associated_bonding_curve": associated_bonding_curve,
+            "global": PumpFunAddresses.GLOBAL,
+            "user": user,
+            "system_program": SystemAddresses.SYSTEM_PROGRAM,
+            "token_program": SystemAddresses.TOKEN_2022_PROGRAM,
+            "associated_token_program": SystemAddresses.ASSOCIATED_TOKEN_PROGRAM,
+            "mayhem_program_id": PumpFunAddresses.MAYHEM_PROGRAM,
+            "global_params": PumpFunAddresses.MAYHEM_GLOBAL_PARAMS,
+            "sol_vault": PumpFunAddresses.MAYHEM_SOL_VAULT,
+            "mayhem_state": PumpFunAddresses.find_mayhem_state(mint),
+            "mayhem_token_vault": PumpFunAddresses.find_mayhem_token_vault(mint),
+            "event_authority": PumpFunAddresses.EVENT_AUTHORITY,
+            "program": PumpFunAddresses.PROGRAM,
+        }
 
     def get_fee_recipient(self, token_info: TokenInfo) -> Pubkey:
         """Get the correct fee recipient based on mayhem mode.

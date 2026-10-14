@@ -69,6 +69,34 @@ _SELL_V2_ACCOUNTS: list[tuple[str, bool]] = [
     entry for entry in _BUY_V2_ACCOUNTS if entry[0] != "global_volume_accumulator"
 ]
 
+# Account order for create_v2 (16 accounts) and extend_account (5 accounts).
+_CREATE_V2_ACCOUNTS: list[tuple[str, bool]] = [
+    ("mint", True),
+    ("mint_authority", False),
+    ("bonding_curve", True),
+    ("associated_bonding_curve", True),
+    ("global", False),
+    ("user", True),
+    ("system_program", False),
+    ("token_program", False),
+    ("associated_token_program", False),
+    ("mayhem_program_id", True),
+    ("global_params", False),
+    ("sol_vault", True),
+    ("mayhem_state", True),
+    ("mayhem_token_vault", True),
+    ("event_authority", False),
+    ("program", False),
+]
+
+_EXTEND_ACCOUNT_ACCOUNTS: list[tuple[str, bool]] = [
+    ("account", True),
+    ("user", False),
+    ("system_program", False),
+    ("event_authority", False),
+    ("program", False),
+]
+
 _SUPPORTED_TOKEN_PROGRAMS = frozenset(
     (SystemAddresses.TOKEN_PROGRAM, SystemAddresses.TOKEN_2022_PROGRAM)
 )
@@ -95,6 +123,12 @@ class PumpFunInstructionBuilder(InstructionBuilder):
         self._sell_discriminator = discriminators["sell"]
         self._buy_v2_discriminator = discriminators["buy_v2"]
         self._sell_v2_discriminator = discriminators["sell_v2"]
+        self._create_v2_discriminator = discriminators.get(
+            "create_v2", bytes([214, 144, 76, 236, 95, 139, 49, 180])
+        )
+        self._extend_account_discriminator = discriminators.get(
+            "extend_account", bytes([234, 102, 194, 203, 150, 72, 62, 229])
+        )
 
         logger.info(
             "Pump.Fun instruction builder initialized with injected IDL parser "
@@ -856,3 +890,72 @@ class PumpFunInstructionBuilder(InstructionBuilder):
         # PumpSwap sells may also create the user's quote ATA. Keep a single
         # conservative sell budget for both bonding-curve and migrated exits.
         return 160_000
+
+    def build_create_v2_instructions(
+        self,
+        *,
+        mint: Pubkey,
+        user: Pubkey,
+        name: str,
+        symbol: str,
+        uri: str,
+        address_provider: AddressProvider,
+        creator: Pubkey | None = None,
+        is_mayhem_mode: bool = False,
+        is_cashback_enabled: bool | None = False,
+    ) -> list[Instruction]:
+        """Build the pump.fun create_v2 + extend_account launch instructions.
+
+        Both mint and user must sign the transaction. All 16 IDL accounts are
+        included on create_v2 in canonical IDL order.
+        """
+        if not name or not symbol:
+            raise ValueError("Token name and symbol must be non-empty")  # noqa: TRY003
+        effective_creator = creator if creator is not None else user
+        accounts_info = address_provider.get_create_v2_instruction_accounts(mint, user)
+        create_metas = [
+            AccountMeta(
+                pubkey=accounts_info[acc_name],
+                is_signer=acc_name in {"mint", "user"},
+                is_writable=is_writable,
+            )
+            for acc_name, is_writable in _CREATE_V2_ACCOUNTS
+        ]
+
+        def _enc_str(val: str) -> bytes:
+            raw = val.encode("utf-8")
+            return struct.pack("<I", len(raw)) + raw
+
+        data = (
+            self._create_v2_discriminator
+            + _enc_str(name)
+            + _enc_str(symbol)
+            + _enc_str(uri)
+            + bytes(effective_creator)
+            + struct.pack("<?", bool(is_mayhem_mode))
+        )
+        if is_cashback_enabled is not None:
+            data += struct.pack("<?", bool(is_cashback_enabled))
+
+        extend_info = {
+            "account": accounts_info["bonding_curve"],
+            "user": user,
+            "system_program": accounts_info["system_program"],
+            "event_authority": accounts_info["event_authority"],
+            "program": accounts_info["program"],
+        }
+        extend_metas = self._build_account_metas(
+            _EXTEND_ACCOUNT_ACCOUNTS, extend_info, user
+        )
+        return [
+            Instruction(
+                program_id=accounts_info["program"],
+                data=data,
+                accounts=create_metas,
+            ),
+            Instruction(
+                program_id=accounts_info["program"],
+                data=self._extend_account_discriminator,
+                accounts=extend_metas,
+            ),
+        ]

@@ -34,7 +34,10 @@ from platforms.pumpfun.address_provider import (  # noqa: E402
 )
 from platforms.pumpfun.instruction_builder import (  # noqa: E402
     _BUY_V2_ACCOUNTS,
+    _CREATE_V2_ACCOUNTS,
+    _EXTEND_ACCOUNT_ACCOUNTS,
     _SELL_V2_ACCOUNTS,
+    PumpFunInstructionBuilder,
 )
 
 IDL_PATH = PROJECT_ROOT / "idl" / "pump_fun_idl.json"
@@ -93,10 +96,11 @@ def check_layout(name: str, layout: list[tuple[str, bool]]) -> list[str]:
                 f"{name}[{index}] {our_name}: writable={our_writable} "
                 f"!= IDL writable={idl_writable}"
             )
-        if idl_account.get("signer") and our_name != "user":
+        expected_signers = {"user", "mint"} if name == "create_v2" else {"user"}
+        if idl_account.get("signer") and our_name not in expected_signers:
             problems.append(
                 f"{name}[{index}] {our_name}: IDL marks this a signer but only "
-                f"`user` is expected to sign"
+                f"{sorted(expected_signers)} are expected to sign"
             )
 
     return problems
@@ -753,6 +757,55 @@ def check_examples_toolkit() -> list[str]:
     return problems
 
 
+def check_create_v2_roundtrip() -> list[str]:
+    """Verify build_create_v2_instructions matches IDL accounts and decodes via IDLParser."""
+    from utils.idl_parser import IDLParser
+
+    problems: list[str] = []
+    parser = IDLParser(str(IDL_PATH))
+    builder = PumpFunInstructionBuilder(parser)
+    provider = PumpFunAddressProvider()
+    mint = Pubkey.new_unique()
+    user = Pubkey.new_unique()
+
+    ixs = builder.build_create_v2_instructions(
+        mint=mint,
+        user=user,
+        name="Pilot Coin",
+        symbol="PILOT",
+        uri="https://example.com/pilot.json",
+        address_provider=provider,
+        is_mayhem_mode=False,
+        is_cashback_enabled=False,
+    )
+    if len(ixs) != 2:
+        return [f"expected 2 instructions (create_v2 + extend_account), got {len(ixs)}"]
+    create_ix, extend_ix = ixs
+    if len(create_ix.accounts) != len(_CREATE_V2_ACCOUNTS):
+        problems.append(f"create_v2 account count {len(create_ix.accounts)} != 16")
+    if len(extend_ix.accounts) != len(_EXTEND_ACCOUNT_ACCOUNTS):
+        problems.append(f"extend_account account count {len(extend_ix.accounts)} != 5")
+    signers = {a.pubkey for a in create_ix.accounts if a.is_signer}
+    if signers != {mint, user}:
+        problems.append(f"create_v2 signers {signers} != {{mint, user}}")
+    keys = [bytes(a.pubkey) for a in create_ix.accounts]
+    decoded = parser.decode_instruction(
+        bytes(create_ix.data), keys, list(range(len(keys)))
+    )
+    if not decoded or decoded.get("instruction_name") != "create_v2":
+        problems.append(f"create_v2 failed IDLParser round-trip: {decoded}")
+    else:
+        args = decoded["args"]
+        if (
+            args.get("name") != "Pilot Coin"
+            or args.get("symbol") != "PILOT"
+            or args.get("creator") != str(user)
+            or args.get("is_mayhem_mode") is not False
+        ):
+            problems.append(f"create_v2 decoded args mismatch: {args}")
+    return problems
+
+
 def main() -> int:
     """Run all layout and derivation checks.
 
@@ -761,7 +814,12 @@ def main() -> int:
     """
     all_problems = []
 
-    for name, layout in (("buy_v2", _BUY_V2_ACCOUNTS), ("sell_v2", _SELL_V2_ACCOUNTS)):
+    for name, layout in (
+        ("buy_v2", _BUY_V2_ACCOUNTS),
+        ("sell_v2", _SELL_V2_ACCOUNTS),
+        ("create_v2", _CREATE_V2_ACCOUNTS),
+        ("extend_account", _EXTEND_ACCOUNT_ACCOUNTS),
+    ):
         problems = check_layout(name, layout)
         status = "OK" if not problems else f"{len(problems)} PROBLEM(S)"
         print(f"{name}: {len(layout)} accounts vs IDL -> {status}")
@@ -782,6 +840,7 @@ def main() -> int:
         ),
         ("quote config resolution", check_quote_config),
         ("learning-examples pump_v2 toolkit", check_examples_toolkit),
+        ("create_v2 + extend_account IDL round-trip", check_create_v2_roundtrip),
     ):
         problems = check()
         status = "OK" if not problems else f"{len(problems)} PROBLEM(S)"
