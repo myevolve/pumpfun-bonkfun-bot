@@ -578,9 +578,8 @@ and all 4 graduated within `2.5..5.8s` and resolved across 60s/300s/900s:
   - **Fixed 60s**: **1W / 3L**, **−82.2 points** (−20.6% mean) → rollover beats/ties **3/4** by **+257.3 points** (+64.3 pts/coin).
   - **Fixed 300s**: **1W / 3L**, **−37.0 points** (−9.2% mean) → rollover beats/ties **3/4** by **+212.0 points** (+53.0 pts/coin).
   - **Fixed 900s**: **0W / 4L**, **−365.7 points** (−91.4% mean) → rollover beats **4/4** by **+540.7 points** (+135.2 pts/coin).
-- **`VRAXTARD` (74974), `CLAUDAI` (75787), `SNIFFR` (76580), and `CARTON` (76959) validated the armed gate & peak-seed rollover live**: `CARTON` (`17:40Z`, `buyers=3`, `real_sol=64.49`) opened at **`+159.3%`**, dropped `5.7%` by `G+2.0s` triggering rollover at **`+144.6%` net**; the pool reached `+174.3%` at 60s but crashed to **`−36.9%`** of entry (`−75.6%` of open) by `G+120s`. Peak-seeding at open locked in `+144.6%` and completely avoided the post-open crash.
-- **Cumulative post-fix 5% rollover cohort (`id >= 66872`, n=35 clean resolved, excluding `IOF` 73272 vault squeeze)**: **33W / 2L (94.3% win rate)**, **+2,301.1 aggregate points** (**+65.7% mean**, **+47.1% median**), beating 60s (+1,725.7 pts, 26W/9L) by **+575.4 points**.
-
+- **`VRAXTARD` (74974), `CLAUDAI` (75787), `SNIFFR` (76580), `CARTON` (76959), and `RTM` (77848) validated the armed gate & peak-seed rollover live**: on `RTM` (`23:53Z`, `buyers=3`, `real_sol=60.55`), open was `+20.7%`, peak reached `+22.4%` at `G+21.8s`, and rollover exited at `G+26.6s` for **`+10.3%` net**, avoiding the dip to **`−24.7%` at 60s** (**`+35.0 pts`** saved vs 60s).
+- **Cumulative post-fix 5% rollover cohort (`id >= 66872`, n=36 clean resolved, excluding `IOF` 73272 vault squeeze)**: **34W / 2L (94.4% win rate)**, **+2,311.4 aggregate points** (**+64.2% mean**, **+46.9% median**), beating 60s (+1,701.0 pts, 26W/10L) by **+610.4 points**.
 Two bot_runner processes wrote the same journal for ~6 hours: the paper
 keeper's child (spawned 21:59Z) survived every operator-managed restart
 because the operator's proc-service kills never touched the keeper's
