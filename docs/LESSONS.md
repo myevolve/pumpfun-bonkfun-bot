@@ -578,9 +578,8 @@ and all 4 graduated within `2.5..5.8s` and resolved across 60s/300s/900s:
   - **Fixed 60s**: **1W / 3L**, **−82.2 points** (−20.6% mean) → rollover beats/ties **3/4** by **+257.3 points** (+64.3 pts/coin).
   - **Fixed 300s**: **1W / 3L**, **−37.0 points** (−9.2% mean) → rollover beats/ties **3/4** by **+212.0 points** (+53.0 pts/coin).
   - **Fixed 900s**: **0W / 4L**, **−365.7 points** (−91.4% mean) → rollover beats **4/4** by **+540.7 points** (+135.2 pts/coin).
-- **`VRAXTARD` (74974) and `CLAUDAI` (75787) validated the peak-seed fix (`bbb6510`) live**: on `VRAXTARD`, `open_price` (+112.6%) was the all-time high and rollover fired at `G+2.0s` (**+89.3%** vs −59.8% at 60s, +149.0 pts saved); on `CLAUDAI` (`08:48Z`), `open_price` (+83.0%) was also the all-time high and rollover fired at `G+10.6s` (**+67.1%** vs −60.6% at 60s, −63.8% at 300s, −91.5% at 900s, +127.7 pts saved vs 60s).
-- **Cumulative post-fix 5% rollover cohort (`id >= 66872`, n=33 clean resolved, excluding `IOF` 73272 vault squeeze)**: **31W / 2L (93.9% win rate)**, **+2,137.6 aggregate points** (**+64.8% mean**, **+47.1% median**), beating 60s (+1,513.8 pts, 24W/9L) by **+623.8 points** and 900s (+727.1 pts, 11W/22L, −91.3% median) by **+1,410.5 points**.
-
+- **`VRAXTARD` (74974), `CLAUDAI` (75787), and `SNIFFR` (76580) validated the armed gate & peak-seed rollover live**: `SNIFFR` (`15:01Z`, `buyers=3`, `real_sol=72.84`, paced `21.2s` sweep) opened at `+18.6%`, peaked at `+26.5%` (`G+2.0s`), and rolled over at `G+31.2s` for **`+18.9%` net** (pool held `+37.7%` at 60s, `+27.0%` at 300s, `+24.6%` at 900s).
+- **Cumulative post-fix 5% rollover cohort (`id >= 66872`, n=34 clean resolved, excluding `IOF` 73272 vault squeeze)**: **32W / 2L (94.1% win rate)**, **+2,156.5 aggregate points** (**+63.4% mean**, **+46.9% median**), beating 60s (+1,551.4 pts, 25W/9L) by **+605.1 points** and 900s (+751.6 pts, 12W/22L, −91.2% median) by **+1,404.9 points**.
 ## Duplicate-writer incident (2026-10-07 04:14Z, resolved)
 
 Two bot_runner processes wrote the same journal for ~6 hours: the paper
