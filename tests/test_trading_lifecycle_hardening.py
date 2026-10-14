@@ -3895,6 +3895,86 @@ async def test_graduation_strategy_sells_when_pool_status_flips() -> None:
     assert position.exit_reason is ExitReason.GRADUATED
 
 
+@pytest.mark.asyncio
+async def test_rollover_strategy_holds_pool_rise_and_sells_on_five_percent_drop() -> (
+    None
+):
+    """Rollover exit seeds peak at pool open, holds while price rises or dips <5%,
+    and sells on the first poll >=5% below the running peak (or immediately if
+    pool open <= entry_price)."""
+    trader = object.__new__(UniversalTrader)
+    token = _token(Platform.PUMP_FUN)
+    token.creator = Pubkey.new_unique()
+    token.pool_status = "funding"
+    position = Position.create_from_buy_result(
+        mint=token.mint,
+        symbol=token.symbol,
+        entry_price=1.0,
+        quantity=2.0,
+        quantity_raw=2_000_000,
+        quote_amount_raw=100_000,
+        buy_fee_lamports=40_000,
+        position_id="buy-signature",
+    )
+    trader._shutdown_event = asyncio.Event()
+    trader.exit_strategy = "rollover"
+    trader.price_check_interval = 0.001
+    trader.max_exit_sell_attempts = 1
+    trader.price_read_outage_budget = 300.0
+    trader.flow_rules = None
+    trader._flow_signals = {}
+    trader._flow_wakeups = {}
+    trader._gate_queues = {}
+
+    # Poll 1: pool open at 1.80 (seeds peak=1.80)
+    # Poll 2: pool rises to 2.00 (updates peak=2.00)
+    # Poll 3: 2% dip to 1.96 (<5% noise, holds)
+    # Poll 4: 6% drop from peak to 1.88 (triggers rollover exit!)
+    prices = iter([1.80, 2.00, 1.96, 1.88])
+
+    async def read_pool_path(*_args: object, **_kwargs: object) -> float:
+        token.pool_status = "pumpswap"
+        return next(prices)
+
+    calculate_token_price = AsyncMock(side_effect=read_pool_path)
+    trader.platform_implementations = SimpleNamespace(
+        curve_manager=SimpleNamespace(calculate_token_price=calculate_token_price)
+    )
+    trader.seller = SimpleNamespace(
+        execute=AsyncMock(
+            return_value=TradeResult(
+                success=True,
+                platform=Platform.PUMP_FUN,
+                tx_signature="sell-signature",
+                amount=2.0,
+                amount_raw=2_000_000,
+                price=1.88,
+                status=TransactionStatus.SUCCESS.value,
+            )
+        )
+    )
+    trader.solana_client = SimpleNamespace()
+    trader.wallet = SimpleNamespace()
+    trader.priority_fee_manager = SimpleNamespace()
+    trader.cleanup_mode = None
+    trader.cleanup_with_priority_fee = False
+    trader.cleanup_force_close_with_burn = False
+    trader._get_pool_address = lambda token_info: token_info.bonding_curve
+    trader._persist_position = lambda token_info, active_position: None
+    trader._log_trade = lambda *args, **kwargs: None
+    trader._remove_position = lambda mint: None
+
+    import trading.universal_trader as ut
+
+    ut.handle_cleanup_after_sell = AsyncMock(return_value=None)
+
+    await asyncio.wait_for(trader._monitor_position_until_exit(token, position), 5)
+
+    assert calculate_token_price.await_count == 4
+    assert position.is_active is False
+    assert position.exit_reason is ExitReason.GRADUATED
+    assert position.exit_price == 1.88
+
 
 @pytest.mark.asyncio
 async def test_crossing_gate_waits_for_min_real_sol_instead_of_creating() -> None:

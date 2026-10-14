@@ -34,7 +34,8 @@ trade:
   buy_amount: 0.01
   buy_slippage: 0.3
   sell_slippage: 0.3
-  # hold through graduation; the graduation trigger sells into the pool
+  # hold through graduation; options: "graduation" (sell at pool open) or
+  # "rollover" (hold pool rise, sell on >=5% drop from running peak)
   exit_strategy: "graduation"
   # backstop only: if the coin never graduates, time-based exits for the
   # whale-ride are NOT the strategy — the shadow's non-graduate arm is the
@@ -64,7 +65,9 @@ filters:
 entry_gate:
   enabled: true
   mayhem_only: false
-  min_buyers: 0
+  # exclude_mayhem: true  # measured: 0/4 mayhem accepts won (-80% to -98%)
+  min_buyers: 0           # measured sweet band: min_buyers: 2, max_buyers: 3
+  # max_buyers: 3
   min_real_sol: 50
   max_real_sol: 80
   max_wait_slots: 75

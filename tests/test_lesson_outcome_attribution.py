@@ -8,12 +8,13 @@ decision, and the score associations counted the wrong row.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from solders.pubkey import Pubkey
 
 from core.pubkeys import WSOL_MINT
-from learning.journal import LessonJournal, LessonObservation
+from learning.journal import GateSnapshot, JevScorer, LessonJournal, LessonObservation
 from learning.report import load_report
 from trading.position import Position
 
@@ -72,3 +73,34 @@ def test_position_keeps_its_lesson_identity_across_a_restart() -> None:
 
     assert restored.entry_lesson_id == 42
     assert _position(None).entry_lesson_id is None
+
+
+def test_jev_scorer_disables_after_402_credit_exhaustion() -> None:
+    """A 402/401/403 billing or auth failure must disable the scorer instead of burning 190ms/token forever."""
+
+    class _BillingError(Exception):
+        status_code = 402
+
+    class _FakeClient:
+        calls = 0
+
+        async def system_one(self, **_kwargs: object) -> object:
+            self.calls += 1
+            raise _BillingError
+
+    scorer = JevScorer(env_file=None)
+    client = _FakeClient()
+    scorer._client = client  # noqa: SLF001
+    gate = GateSnapshot(buyers=3, real_sol=62.0)
+
+    first = asyncio.run(
+        scorer.score_candidate(name="Tok", symbol="TOK", mayhem=False, gate=gate)
+    )
+    second = asyncio.run(
+        scorer.score_candidate(name="Tok2", symbol="TOK2", mayhem=False, gate=gate)
+    )
+
+    assert first is None
+    assert second is None
+    assert not scorer.enabled
+    assert client.calls == 1

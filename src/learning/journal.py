@@ -569,8 +569,16 @@ class JevScorer:
                     },
                 },
             )
-        except Exception:
-            logger.exception("Jev scoring failed (non-fatal, proceeding)")
+        except Exception as exc:
+            if getattr(exc, "status_code", None) in {401, 402, 403}:
+                logger.warning(
+                    "Jev scorer disabled after HTTP %s (%s)",
+                    getattr(exc, "status_code", None),
+                    exc,
+                )
+                self._client = None
+            else:
+                logger.exception("Jev scoring failed (non-fatal, proceeding)")
             return None
         out: dict[str, Any] = {}
         try:

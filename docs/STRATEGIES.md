@@ -52,8 +52,9 @@ This file is the inventory. Rules:
     (+43.8% mean) vs −82.2 pts at 60s (1W/3L), −37.0 pts at 300s (1W/3L), and
     −365.7 pts at 900s (0W/4L) — **+257.3 pts** over 60s and **+540.7 pts** over 900s.
 - **Regime detector**: none needed — it is per-position and
-  self-arming. Requires an ENTRY to exit from (any of the below, or an
-  operator-directed position).
+  self-arming (`exit_strategy: "rollover"` in `UniversalTrader`, with
+  `max_hold_time` curve-stall backstop and immediate `open_price <= entry_price`
+  protection). Requires an ENTRY to exit from.
 - **Worst case**:
   - Second-wave continuation giveback (`BUPE` 75143: exited +45.8% at G+14.2s,
     ran to +119.0% at 300s before crashing to −91.7% at 900s; `QUANTUMJAK` 68368).

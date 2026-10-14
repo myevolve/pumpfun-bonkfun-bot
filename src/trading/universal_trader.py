@@ -156,9 +156,9 @@ def _validate_exit_config(
     if not isinstance(exit_strategy, str):
         raise ValueError("exit_strategy must be a string")
     strategy = exit_strategy.lower()
-    if strategy not in {"tp_sl", "time_based", "manual", "graduation"}:
+    if strategy not in {"tp_sl", "time_based", "manual", "graduation", "rollover"}:
         raise ValueError(
-            "exit_strategy must be one of: tp_sl, time_based, manual, graduation"
+            "exit_strategy must be one of: tp_sl, time_based, manual, graduation, rollover"
         )
     if (
         isinstance(price_check_interval, bool)
@@ -3096,7 +3096,7 @@ class UniversalTrader:
             self.take_profit_percentage if self.exit_strategy == "tp_sl" else None
         )
         stop_loss = self.stop_loss_percentage if self.exit_strategy == "tp_sl" else None
-        if self.exit_strategy == "tp_sl":
+        if self.exit_strategy in {"tp_sl", "graduation", "rollover"}:
             max_hold_time = self.max_hold_time
         elif self.exit_strategy == "time_based":
             max_hold_time = self.wait_time_after_buy
@@ -3607,7 +3607,7 @@ class UniversalTrader:
         curve_manager = self.platform_implementations.curve_manager
         exit_sell_attempts = 0
         price_outage_started: float | None = None
-
+        pool_peak_price: float = 0.0
         while position.is_active and not self._shutdown_event.is_set():
             try:
                 if position.pending_exit_signature is not None:
@@ -3786,15 +3786,25 @@ class UniversalTrader:
                     # A flow rule is an unconditional exit like stop-loss: it
                     # must not be gated by the take-profit net-ROI target.
                     should_exit, exit_reason = True, ExitReason.TRADE_FLOW
-                if (
-                    getattr(self, "exit_strategy", None) == "graduation"
-                    and token_info.pool_status == "pumpswap"
-                ):
-                    # Whale-ride exit: the curve completed and the price read
-                    # above came from the migrated PumpSwap pool. Unconditional
-                    # like the flow exit — the strategy's whole point is to
-                    # sell into the pool's opening liquidity.
-                    should_exit, exit_reason = True, ExitReason.GRADUATED
+                if token_info.pool_status == "pumpswap":
+                    strategy = getattr(self, "exit_strategy", None)
+                    if strategy == "graduation":
+                        # Whale-ride exit: the curve completed and the price read
+                        # above came from the migrated PumpSwap pool. Unconditional
+                        # like the flow exit — the strategy's whole point is to
+                        # sell into the pool's opening liquidity.
+                        should_exit, exit_reason = True, ExitReason.GRADUATED
+                    elif strategy == "rollover":
+                        if pool_peak_price <= 0:
+                            pool_peak_price = current_price
+                            if current_price <= position.entry_price:
+                                should_exit, exit_reason = True, ExitReason.GRADUATED
+                        elif current_price < pool_peak_price * (
+                            1 - ROLLOVER_EXIT_DROP_FRACTION
+                        ):
+                            should_exit, exit_reason = True, ExitReason.GRADUATED
+                        elif current_price > pool_peak_price:
+                            pool_peak_price = current_price
                 if should_exit and exit_reason:
                     exit_sell_attempts += 1
                     if (
