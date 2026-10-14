@@ -410,16 +410,3 @@ def test_gate_max_buyers_validation() -> None:
 def test_gate_rules_exclude_mayhem_field() -> None:
     assert GateRules(exclude_mayhem=True).exclude_mayhem is True
     assert GateRules().exclude_mayhem is False
-
-
-def test_gate_max_buyers_validation() -> None:
-    with pytest.raises(ValueError):
-        GateRules(max_buyers=-1)
-    with pytest.raises(ValueError):
-        GateRules(min_buyers=3, max_buyers=2)
-    assert GateRules(min_buyers=2, max_buyers=3).max_buyers == 3
-
-
-def test_gate_rules_exclude_mayhem_field() -> None:
-    assert GateRules(exclude_mayhem=True).exclude_mayhem is True
-    assert GateRules().exclude_mayhem is False
