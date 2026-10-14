@@ -11,7 +11,9 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import httpx2
 from solders.pubkey import Pubkey
+from typesafe_sdk._core.errors import TypeSafeAPIError
 
 from core.pubkeys import WSOL_MINT
 from learning.journal import GateSnapshot, JevScorer, LessonJournal, LessonObservation
@@ -78,15 +80,12 @@ def test_position_keeps_its_lesson_identity_across_a_restart() -> None:
 def test_jev_scorer_disables_after_402_credit_exhaustion() -> None:
     """A 402/401/403 billing or auth failure must disable the scorer instead of burning 190ms/token forever."""
 
-    class _BillingError(Exception):
-        status_code = 402
-
     class _FakeClient:
         calls = 0
 
         async def system_one(self, **_kwargs: object) -> object:
             self.calls += 1
-            raise _BillingError
+            raise TypeSafeAPIError(402, None, httpx2.Headers())
 
     scorer = JevScorer(env_file=None)
     client = _FakeClient()

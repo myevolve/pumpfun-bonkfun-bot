@@ -570,12 +570,9 @@ class JevScorer:
                 },
             )
         except Exception as exc:
-            if getattr(exc, "status_code", None) in {401, 402, 403}:
-                logger.warning(
-                    "Jev scorer disabled after HTTP %s (%s)",
-                    getattr(exc, "status_code", None),
-                    exc,
-                )
+            status = getattr(exc, "status", None) or getattr(exc, "status_code", None)
+            if status in {401, 402, 403}:
+                logger.warning("Jev scorer disabled after HTTP %s (%s)", status, exc)
                 self._client = None
             else:
                 logger.exception("Jev scoring failed (non-fatal, proceeding)")
