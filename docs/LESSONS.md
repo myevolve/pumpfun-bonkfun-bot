@@ -578,9 +578,8 @@ and all 4 graduated within `2.5..5.8s` and resolved across 60s/300s/900s:
   - **Fixed 60s**: **1W / 3L**, **−82.2 points** (−20.6% mean) → rollover beats/ties **3/4** by **+257.3 points** (+64.3 pts/coin).
   - **Fixed 300s**: **1W / 3L**, **−37.0 points** (−9.2% mean) → rollover beats/ties **3/4** by **+212.0 points** (+53.0 pts/coin).
   - **Fixed 900s**: **0W / 4L**, **−365.7 points** (−91.4% mean) → rollover beats **4/4** by **+540.7 points** (+135.2 pts/coin).
-- **`VRAXTARD` (74974), `CLAUDAI` (75787), and `SNIFFR` (76580) validated the armed gate & peak-seed rollover live**: `SNIFFR` (`15:01Z`, `buyers=3`, `real_sol=72.84`, paced `21.2s` sweep) opened at `+18.6%`, peaked at `+26.5%` (`G+2.0s`), and rolled over at `G+31.2s` for **`+18.9%` net** (pool held `+37.7%` at 60s, `+27.0%` at 300s, `+24.6%` at 900s).
-- **Cumulative post-fix 5% rollover cohort (`id >= 66872`, n=34 clean resolved, excluding `IOF` 73272 vault squeeze)**: **32W / 2L (94.1% win rate)**, **+2,156.5 aggregate points** (**+63.4% mean**, **+46.9% median**), beating 60s (+1,551.4 pts, 25W/9L) by **+605.1 points** and 900s (+751.6 pts, 12W/22L, −91.2% median) by **+1,404.9 points**.
-## Duplicate-writer incident (2026-10-07 04:14Z, resolved)
+- **`VRAXTARD` (74974), `CLAUDAI` (75787), `SNIFFR` (76580), and `CARTON` (76959) validated the armed gate & peak-seed rollover live**: `CARTON` (`17:40Z`, `buyers=3`, `real_sol=64.49`) opened at **`+159.3%`**, dropped `5.7%` by `G+2.0s` triggering rollover at **`+144.6%` net**; the pool reached `+174.3%` at 60s but crashed to **`−36.9%`** of entry (`−75.6%` of open) by `G+120s`. Peak-seeding at open locked in `+144.6%` and completely avoided the post-open crash.
+- **Cumulative post-fix 5% rollover cohort (`id >= 66872`, n=35 clean resolved, excluding `IOF` 73272 vault squeeze)**: **33W / 2L (94.3% win rate)**, **+2,301.1 aggregate points** (**+65.7% mean**, **+47.1% median**), beating 60s (+1,725.7 pts, 26W/9L) by **+575.4 points**.
 
 Two bot_runner processes wrote the same journal for ~6 hours: the paper
 keeper's child (spawned 21:59Z) survived every operator-managed restart
