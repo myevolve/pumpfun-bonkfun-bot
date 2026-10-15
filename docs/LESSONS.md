@@ -578,8 +578,8 @@ and all 4 graduated within `2.5..5.8s` and resolved across 60s/300s/900s:
   - **Fixed 60s**: **1W / 3L**, **−82.2 points** (−20.6% mean) → rollover beats/ties **3/4** by **+257.3 points** (+64.3 pts/coin).
   - **Fixed 300s**: **1W / 3L**, **−37.0 points** (−9.2% mean) → rollover beats/ties **3/4** by **+212.0 points** (+53.0 pts/coin).
   - **Fixed 900s**: **0W / 4L**, **−365.7 points** (−91.4% mean) → rollover beats **4/4** by **+540.7 points** (+135.2 pts/coin).
-- **`VRAXTARD` (74974), `CLAUDAI` (75787), `SNIFFR` (76580), `CARTON` (76959), `RTM` (77848), `LONGPOS` (77886), and `ROBINJEAN` (77960) validated the armed gate & peak-seed rollover live**: `ROBINJEAN` (`00:45Z`, `buyers=3`, `real_sol=63.0`) opened below entry at `−43.9%` (`1.507e-07` vs entry `2.687e-07`), confirming the documented worst-case (`open_price < entry_price`, 5/5 lost; live UniversalTrader stops out immediately on open).
-- **Cumulative post-fix 5% rollover cohort (`id >= 66872`, n=38 clean resolved, excluding `IOF` 73272 vault squeeze)**: **35W / 3L (92.1% win rate)**, **+2,307.7 aggregate points** (**+60.7% mean**, **+46.9% median**), beating 60s (+1,757.3 pts, 27W/11L) by **+550.4 points**.
+- **`VRAXTARD` (74974), `CLAUDAI` (75787), `SNIFFR` (76580), `CARTON` (76959), `RTM` (77848), `LONGPOS` (77886), `ROBINJEAN` (77960), and `BIGPEPPA` (79111) validated the armed gate & peak-seed rollover live**: on `BIGPEPPA` (`08:52Z`, `buyers=3`, `real_sol=61.75`), open was `+67.2%`, peak hit `+74.9%` (`G+10.3s`), and an abrupt block dump dropped price past the 5% threshold, triggering rollover exit at `G+22.7s` for `−47.0%` (fixed 60s `−42.8%`, G+120s `−46.2%`, 300s `−42.6%`).
+- **Cumulative post-fix 5% rollover cohort (`id >= 66872`, n=39 clean resolved, excluding `IOF` 73272 vault squeeze)**: **35W / 4L (89.7% win rate)**, **+2,260.7 aggregate points** (**+58.0% mean**, **+46.7% median**), beating 60s (+1,714.5 pts, 27W/12L) by **+546.2 points**.
 because the operator's proc-service kills never touched the keeper's
 lineage. SQLite's WAL serialized the writes (no corruption), but the
 one-writer-by-convention invariant was violated and the position JSON
