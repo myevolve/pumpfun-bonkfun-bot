@@ -787,18 +787,16 @@ survey) is blocked by missing scores, not by analysis. The shadow
 config should enable the scorer.
 
 ## Phase 0 live: the creator annuity measured on real pools (2026-10-11)
-**Phase 0 result, 84.6 hours of tracking (27 snapshots through `2026-10-14 23:08Z`, covering all 49 graduated `grad_marks` pools + 11 tape pools)**: creators actively collect mid-tracking (SNIFFR creator drained the entire `2.993 SOL` accrued earlier today: `2.993 -> 0.0`), while `Mishu` (`65703`) surged by `+1.364 SOL` to `1.369 SOL`. Top cumulative fee earners:
+**Phase 0 result, 102.6 hours of tracking (31 snapshots through `2026-10-15 17:08Z`, covering all 49 graduated `grad_marks` pools + 11 tape pools)**: creators actively collect mid-tracking (`DOMP` creator drained the entire `1.284 SOL` accrued after graduation: `1.284 -> 0.0`), while `IOF` (`73272`) rose to `19.481 SOL` (`+0.264 SOL` since snapshot 27). Top cumulative fee earners:
 
-- `SPOOF` (`71452`, `60.2 SOL` fund): **`28.37 SOL`** cumulative (`22.15 SOL` peak + re-accrual; `+0.104 SOL` in last 6h) -> **payback ~9 days**
-- `INTENTS` (`73896`, `60.7 SOL` fund): **`25.75 SOL`** cumulative (`+0.207 SOL` in last 6h) -> **payback ~10 days**
-- `IOF` (`73272`, `64.0 SOL` fund): **`19.22 SOL`** (`+0.096 SOL` in last 6h) -> **payback ~13 days**
+- `SPOOF` (`71452`, `60.2 SOL` fund): **`28.60 SOL`** cumulative (`22.15 SOL` peak + re-accrual; `+0.232 SOL` across recent snapshots) -> **payback ~9 days**
+- `INTENTS` (`73896`, `60.7 SOL` fund): **`25.79 SOL`** cumulative -> **payback ~10 days**
+- `IOF` (`73272`, `64.0 SOL` fund): **`19.48 SOL`** (`+0.264 SOL` across recent snapshots; `19.48 SOL` in vault) -> **payback ~13 days**
 - `SEED` (`70989`, `70.0 SOL` fund): **`15.09 SOL`** -> **payback ~14 days**
-- `SNIFFR` (`76580`, `72.8 SOL` fund, paced `21.2s` sweep): **`2.993 SOL`** accrued in `<2h` (collected by creator at `23:08Z`) -> **payback ~4 days**
-- `Mishu` (`65703`, `60.8 SOL` fund, `grad_elapsed = 11.0s` paced sweep): **`1.571 SOL`** (`+1.364 SOL` in last 6h)
-- **6 of 49 graduated `grad_marks` pools earned ≥1.3 SOL (`12.2%`, `92.99 SOL` combined)**; `17/85` (`20.0%`) hold `≥0.01 SOL`.
-
-**Paced-sweep validation confirmed on fresh live coin**: `SNIFFR`'s paced `21.2s` sweep (`grad_elapsed >= 8s`) generated `2.993 SOL` of creator fees within 2 hours, whereas all 5 instant sweeps today (`2.4–5.8s`) generated `0.000000..0.000480 SOL` (`6,200x` difference). Pacing is the active driver of post-graduation pool churn.
-
+- `SNIFFR` (`76580`, `72.8 SOL` fund, paced `21.2s` sweep): **`2.993 SOL`** (drained by creator) -> **payback ~4 days**
+- `Mishu` (`65703`, `60.8 SOL` fund, paced `11.0s` sweep): **`1.572 SOL`** (`1.369 SOL` in vault)
+- `DOMP` (`79349`, `63.2 SOL` fund): **`1.284 SOL`** (drained by creator)
+- **7 of 49 graduated `grad_marks` pools earned ≥1.28 SOL (`14.3%`, `94.80 SOL` combined)**; `18/90` (`20.0%`) hold `≥0.01 SOL`.
 **Sweep-pacing determinant across all 49 graduated pools (2026-10-14)**:
 - **Paced sweeps (`grad_elapsed_s >= 8s`, `n=13`)**: `3/13` (`23.1%`) earned `>15 SOL`, `6/13` (`46.2%`) earned `≥0.1 SOL`, mean **`5.40 SOL`**, median **`0.0150 SOL`**.
 - **Instant sweeps (`grad_elapsed_s < 8s`, `n=36`)**: `1/36` (`2.8%`) earned `>1 SOL`, `3/36` (`8.3%`) earned `≥0.1 SOL`, mean **`0.54 SOL`**, median **`0.000037 SOL`** (`405x` lower median).
