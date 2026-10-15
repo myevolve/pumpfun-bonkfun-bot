@@ -42,9 +42,9 @@ This file is the inventory. Rules:
   below its running peak, with `peak` seeded at graduation `open_price`
   (`bbb6510`) so open-and-dump pools trigger on the first poll.
 - **Measured**:
-  - **Cumulative post-fix 5% cohort (`id >= 66872`, n=39 clean resolved)**:
-    **35W / 4L (89.7%)**, **+2,260.7 points** (+58.0% mean, +46.7% median)
-    vs +1,714.5 pts at 60s (27W/12L) and +2,274.0 pts at 300s (20W/19L).
+  - **Cumulative post-fix 5% cohort (`id >= 66872`, n=40 clean resolved)**:
+    **36W / 4L (90.0%)**, **+2,369.5 points** (+59.2% mean, +46.9% median)
+    vs +1,898.3 pts at 60s (28W/12L), +2,250.9 pts at 300s (20W/20L), and +200.1 pts at 900s (12W/28L).
   - **Focused 6-hour live test (2026-10-14, n=4)**: **3W / 1L**, **+175.1 points**
     (+43.8% mean) vs −82.2 pts at 60s (1W/3L), −37.0 pts at 300s (1W/3L), and
     −365.7 pts at 900s (0W/4L) — **+257.3 pts** over 60s and **+540.7 pts** over 900s.
