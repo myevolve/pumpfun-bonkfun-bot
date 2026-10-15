@@ -578,9 +578,8 @@ and all 4 graduated within `2.5..5.8s` and resolved across 60s/300s/900s:
   - **Fixed 60s**: **1W / 3L**, **−82.2 points** (−20.6% mean) → rollover beats/ties **3/4** by **+257.3 points** (+64.3 pts/coin).
   - **Fixed 300s**: **1W / 3L**, **−37.0 points** (−9.2% mean) → rollover beats/ties **3/4** by **+212.0 points** (+53.0 pts/coin).
   - **Fixed 900s**: **0W / 4L**, **−365.7 points** (−91.4% mean) → rollover beats **4/4** by **+540.7 points** (+135.2 pts/coin).
-- **`VRAXTARD` (74974), `CLAUDAI` (75787), `SNIFFR` (76580), `CARTON` (76959), and `RTM` (77848) validated the armed gate & peak-seed rollover live**: on `RTM` (`23:53Z`, `buyers=3`, `real_sol=60.55`), open was `+20.7%`, peak reached `+22.4%` at `G+21.8s`, and rollover exited at `G+26.6s` for **`+10.3%` net**, avoiding the dip to **`−24.7%` at 60s** (**`+35.0 pts`** saved vs 60s).
-- **Cumulative post-fix 5% rollover cohort (`id >= 66872`, n=36 clean resolved, excluding `IOF` 73272 vault squeeze)**: **34W / 2L (94.4% win rate)**, **+2,311.4 aggregate points** (**+64.2% mean**, **+46.9% median**), beating 60s (+1,701.0 pts, 26W/10L) by **+610.4 points**.
-Two bot_runner processes wrote the same journal for ~6 hours: the paper
+- **`VRAXTARD` (74974), `CLAUDAI` (75787), `SNIFFR` (76580), `CARTON` (76959), `RTM` (77848), and `LONGPOS` (77886) validated the armed gate & peak-seed rollover live**: on `LONGPOS` (`00:11Z`, `buyers=3`, `real_sol=60.55`), open was `+76.9%`, peak reached `+107.4%` at `G+10.8s`, and rollover exited at `G+14.9s` for **`+87.8%` net**, avoiding the catastrophic crash to **`−12.4%` at 300s** (**`+100.2 pts`** saved vs 300s).
+- **Cumulative post-fix 5% rollover cohort (`id >= 66872`, n=37 clean resolved, excluding `IOF` 73272 vault squeeze)**: **35W / 2L (94.6% win rate)**, **+2,399.2 aggregate points** (**+64.8% mean**, **+47.1% median**), beating 60s (+1,848.8 pts, 27W/10L) by **+550.4 points**.
 keeper's child (spawned 21:59Z) survived every operator-managed restart
 because the operator's proc-service kills never touched the keeper's
 lineage. SQLite's WAL serialized the writes (no corruption), but the
