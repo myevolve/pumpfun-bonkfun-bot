@@ -787,16 +787,21 @@ survey) is blocked by missing scores, not by analysis. The shadow
 config should enable the scorer.
 
 ## Phase 0 live: the creator annuity measured on real pools (2026-10-11)
-**Phase 0 result, 114.6 hours of tracking (33 snapshots through `2026-10-16 05:08Z`, covering all 49 graduated `grad_marks` pools + 11 tape pools)**: creators actively collect mid-tracking, and `SPOOF` (`71452`) re-accrued an additional `+3.585 SOL` in the last 6h (`vault: 1.854 -> 5.438 SOL`), crossing **`33.84 SOL`** cumulative. Top cumulative fee earners:
+**Phase 0 result, 120.6 hours of tracking (34 snapshots through `2026-10-16 11:08Z`, covering all 49 graduated `grad_marks` pools + 11 tape pools)**: creators actively collect mid-tracking, and `SPOOF` (`71452`) re-accrued an additional `+0.955 SOL` in the last 6h (`vault: 5.438 -> 6.394 SOL`), crossing **`34.79 SOL`** cumulative. Top cumulative fee earners:
 
-- `SPOOF` (`71452`, `60.2 SOL` fund): **`33.84 SOL`** cumulative (`22.15 SOL` peak + re-accrual; `+3.585 SOL` in last 6h, `5.438 SOL` in vault) -> **payback ~7 days**
+- `SPOOF` (`71452`, `60.2 SOL` fund): **`34.79 SOL`** cumulative (`22.15 SOL` peak + re-accrual; `+0.955 SOL` in last 6h, `6.394 SOL` in vault) -> **payback ~7 days**
 - `INTENTS` (`73896`, `60.7 SOL` fund): **`25.79 SOL`** cumulative -> **payback ~10 days**
-- `IOF` (`73272`, `64.0 SOL` fund): **`19.67 SOL`** (`+0.092 SOL` in last 6h; `19.67 SOL` in vault) -> **payback ~13 days**
+- `IOF` (`73272`, `64.0 SOL` fund): **`19.74 SOL`** (`+0.072 SOL` in last 6h; `19.74 SOL` in vault) -> **payback ~13 days**
 - `SEED` (`70989`, `70.0 SOL` fund): **`15.09 SOL`** -> **payback ~14 days**
 - `SNIFFR` (`76580`, `72.8 SOL` fund, paced `21.2s` sweep): **`2.993 SOL`** (drained by creator) -> **payback ~4 days**
-- `Mishu` (`65703`, `60.8 SOL` fund, paced `11.0s` sweep): **`1.572 SOL`** (`1.369 SOL` in vault)
+- `Mishu` (`65703`, `60.8 SOL` fund, paced `11.0s` sweep): **`1.572 SOL`** (`1.369 SOL` peak)
 - `DOMP` (`79349`, `63.2 SOL` fund): **`1.284 SOL`** (drained by creator)
-- **7 of 49 graduated `grad_marks` pools earned ≥1.28 SOL (`14.3%`, `100.14 SOL` combined)**; `19/91` (`20.9%`) hold `≥0.01 SOL`.
+- **7 of 49 graduated `grad_marks` pools earned ≥1.28 SOL (`14.3%`, `101.10 SOL` combined)**; `19/92` (`20.7%`) hold `≥0.01 SOL`.
+
+**Sweep-pacing determinant across all 49 graduated pools (2026-10-14)**:
+- **Paced sweeps (`grad_elapsed_s >= 8s`, `n=13`)**: `3/13` (`23.1%`) earned `>15 SOL`, `6/13` (`46.2%`) earned `≥0.1 SOL`, mean **`5.40 SOL`**, median **`0.0150 SOL`**.
+- **Instant sweeps (`grad_elapsed_s < 8s`, `n=36`)**: `1/36` (`2.8%`) earned `>1 SOL`, `3/36` (`8.3%`) earned `≥0.1 SOL`, mean **`0.54 SOL`**, median **`0.000037 SOL`** (`405x` lower median).
+- **G+120s retention**: `4/28` (`14.3%`) pools holding `≥50%` of `open_price` at `G+120s` earned `>15 SOL` (mean `3.16 SOL`) vs `0/20` (`0%`) pools that dumped `<50%` by `G+120s` (mean `0.05 SOL`).
 - **Actionable Phase 2 design rule**: pace the 4 self-sweep tranches over `15–60s` (`4–15s` per tranche) rather than a single-slot bundle so organic followers discover the rising curve before migration.
 The measured picture replaces both earlier estimates: the annuity is NOT
 the uniform 15-day payback the census suggested, and NOT the ~50x-below
