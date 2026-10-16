@@ -42,9 +42,9 @@ This file is the inventory. Rules:
   below its running peak, with `peak` seeded at graduation `open_price`
   (`bbb6510`) so open-and-dump pools trigger on the first poll.
 - **Measured**:
-  - **Cumulative post-fix 5% cohort (`id >= 66872`, n=40 clean resolved)**:
-    **36W / 4L (90.0%)**, **+2,369.5 points** (+59.2% mean, +46.9% median)
-    vs +1,898.3 pts at 60s (28W/12L), +2,250.9 pts at 300s (20W/20L), and +200.1 pts at 900s (12W/28L).
+  - **Cumulative post-fix 5% cohort (`id >= 66872`, n=41 clean resolved)**:
+    **36W / 5L (87.8%)**, **+2,278.5 points** (+55.6% mean, +46.7% median)
+    vs +1,807.4 pts at 60s (28W/13L) and +2,159.9 pts at 300s (20W/21L).
   - **Focused 6-hour live test (2026-10-14, n=4)**: **3W / 1L**, **+175.1 points**
     (+43.8% mean) vs −82.2 pts at 60s (1W/3L), −37.0 pts at 300s (1W/3L), and
     −365.7 pts at 900s (0W/4L) — **+257.3 pts** over 60s and **+540.7 pts** over 900s.
@@ -56,9 +56,9 @@ This file is the inventory. Rules:
   - Second-wave continuation giveback (`BUPE` 75143: exited +45.8% at G+14.2s,
     ran to +119.0% at 300s before crashing to −91.7% at 900s; `QUANTUMJAK` 68368).
   - Below-entry graduation open (`SEALYS` 74705: opened at −20.6%, exited −43.7%;
-    `ROBINJEAN` 77960: opened at −43.9%, exited −91.4%; all 5 historical
-    `open_price < entry_price` graduations lost — UniversalTrader's live
-    monitor stops out immediately at open if `open_price <= entry_price`).
+    `ROBINJEAN` 77960: opened at −43.9%, exited −91.4%; `DRAINLOVE` 81542:
+    opened at −91.0%, exited −91.0%; all 6 historical `open_price < entry_price`
+    graduations lost — UniversalTrader's live monitor stops out immediately at open if `open_price <= entry_price`).
 ## 3. Crossing-entry sniping (in-band 60–85 SOL accept) — band-gated
 
 - **Mechanism**: accept a coin at the 60-SOL crossing, ride to graduation,
