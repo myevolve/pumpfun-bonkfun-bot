@@ -578,8 +578,8 @@ and all 4 graduated within `2.5..5.8s` and resolved across 60s/300s/900s:
   - **Fixed 60s**: **1W / 3L**, **−82.2 points** (−20.6% mean) → rollover beats/ties **3/4** by **+257.3 points** (+64.3 pts/coin).
   - **Fixed 300s**: **1W / 3L**, **−37.0 points** (−9.2% mean) → rollover beats/ties **3/4** by **+212.0 points** (+53.0 pts/coin).
   - **Fixed 900s**: **0W / 4L**, **−365.7 points** (−91.4% mean) → rollover beats **4/4** by **+540.7 points** (+135.2 pts/coin).
-- **`VRAXTARD` (74974), `CLAUDAI` (75787), `SNIFFR` (76580), `CARTON` (76959), `RTM` (77848), `LONGPOS` (77886), `ROBINJEAN` (77960), `BIGPEPPA` (79111), `DOMP` (79349), `DRAINLOVE` (81542), `PARADISE` (82396), and `TRUMPSTER` (83004) validated the armed gate & peak-seed rollover live**: on `TRUMPSTER` (`11:54Z`, `buyers=3`, `real_sol=62.89`), open was `+76.7%`, peak reached `+120.7%` at `G+47.3s`, and rollover exited at `G+51.4s` for **`+108.5%` net**, avoiding the catastrophic crash to **`−35.7%` at G+120s** and **`−17.4%` at 300s** (**`+125.8 pts` saved vs 300s**).
-- **Cumulative post-fix 5% rollover cohort (`id >= 66872`, n=43 clean resolved, excluding `IOF` 73272 vault squeeze)**: **38W / 5L (88.4% win rate)**, **+2,445.0 aggregate points** (**+56.9% mean**, **+47.1% median**), beating 60s (+1,879.2 pts, 29W/14L) by **+565.8 points** and 300s by **+358.8 points**.
+- **`VRAXTARD` (74974), `CLAUDAI` (75787), `SNIFFR` (76580), `CARTON` (76959), `RTM` (77848), `LONGPOS` (77886), `ROBINJEAN` (77960), `BIGPEPPA` (79111), `DOMP` (79349), `DRAINLOVE` (81542), `PARADISE` (82396), `TRUMPSTER` (83004), `NEYMAR` (83729), and `WIFHELL` (84677) validated the armed gate & peak-seed rollover live**: on `NEYMAR` (`16:44Z`, `buyers=2`, `real_sol=79.8`), open was `+15.8%`, peak reached `+199.0%` at `G+170.3s`, and rollover exited at `G+208.1s` for **`+182.4%` net**, avoiding the crash to **`−92.2%` at 900s** (**`+274.5 pts` saved vs 900s**); on `WIFHELL` (`23:21Z`, `buyers=3`, `real_sol=60.01`), open was `+73.9%`, peak reached `+83.4%` at `G+6.1s`, and rollover exited at `G+10.1s` for **`+45.8%` net**, avoiding the collapse to **`−56.0%` at 60s** (**`+101.8 pts` saved vs 60s**).
+- **Cumulative post-fix 5% rollover cohort (`id >= 66872`, n=45 clean resolved, excluding `IOF` 73272 vault squeeze)**: **40W / 5L (88.9% win rate)**, **+2,673.1 aggregate points** (**+59.4% mean**, **+47.1% median**), beating 60s (+1,855.4 pts, 30W/15L) by **+817.7 points** and 300s by **+202.2 points**.
 because the operator's proc-service kills never touched the keeper's
 lineage. SQLite's WAL serialized the writes (no corruption), but the
 one-writer-by-convention invariant was violated and the position JSON
@@ -787,11 +787,11 @@ survey) is blocked by missing scores, not by analysis. The shadow
 config should enable the scorer.
 
 ## Phase 0 live: the creator annuity measured on real pools (2026-10-11)
-**Phase 0 result, 120.6 hours of tracking (34 snapshots through `2026-10-16 11:08Z`, covering all 49 graduated `grad_marks` pools + 11 tape pools)**: creators actively collect mid-tracking, and `SPOOF` (`71452`) re-accrued an additional `+0.955 SOL` in the last 6h (`vault: 5.438 -> 6.394 SOL`), crossing **`34.79 SOL`** cumulative. Top cumulative fee earners:
+**Phase 0 result, 126.6 hours of tracking (36 snapshots through `2026-10-16 23:08Z`, covering all 49 graduated `grad_marks` pools + 11 tape pools)**: creators actively collect mid-tracking (`SPOOF` creator drained another `7.155 SOL` at `23:08Z`: `7.200 -> 0.045 SOL`), bringing `SPOOF` cumulative observed fees past **`35.60 SOL`** (~42% of 85 SOL sweep recovered). `IOF` (`73272`) reached **`19.904 SOL`** in vault. Top cumulative fee earners:
 
-- `SPOOF` (`71452`, `60.2 SOL` fund): **`34.79 SOL`** cumulative (`22.15 SOL` peak + re-accrual; `+0.955 SOL` in last 6h, `6.394 SOL` in vault) -> **payback ~7 days**
+- `SPOOF` (`71452`, `60.2 SOL` fund): **`35.60 SOL`** cumulative (`22.15 SOL` peak + re-accruals; creator drained `7.155 SOL` at `23:08Z`) -> **payback ~7 days**
 - `INTENTS` (`73896`, `60.7 SOL` fund): **`25.79 SOL`** cumulative -> **payback ~10 days**
-- `IOF` (`73272`, `64.0 SOL` fund): **`19.74 SOL`** (`+0.072 SOL` in last 6h; `19.74 SOL` in vault) -> **payback ~13 days**
+- `IOF` (`73272`, `64.0 SOL` fund): **`19.90 SOL`** (`19.904 SOL` in vault) -> **payback ~13 days**
 - `SEED` (`70989`, `70.0 SOL` fund): **`15.09 SOL`** -> **payback ~14 days**
 - `SNIFFR` (`76580`, `72.8 SOL` fund, paced `21.2s` sweep): **`2.993 SOL`** (drained by creator) -> **payback ~4 days**
 - `Mishu` (`65703`, `60.8 SOL` fund, paced `11.0s` sweep): **`1.572 SOL`** (`1.369 SOL` peak)

@@ -36,15 +36,15 @@ This file is the inventory. Rules:
   compressing the payback, the creator's own pool dump risk (the churn
   that pays the annuity also craters the price — the position is the fee
   stream, not the tokens).
-- **Status**: MEASURED-LIVE — Phase 0 live tracker running (`120.6h` / `34` snapshots across all `49` graduated `grad_marks` pools: `7/49` pools earned `1.3..34.8 SOL` each, with `SPOOF` `71452` surging past `34.79 SOL` cumulative and `IOF` reaching `19.74 SOL`; `101.1 SOL` combined across the top 7), Phase 1 launch + self-sweep mechanics & dry-run simulator shipped (`simulate_creator_pilot_launch.py`). Phase 2 blocked on capital (~86 SOL) + explicit operator approval.
+- **Status**: MEASURED-LIVE — Phase 0 live tracker running (`126.6h` / `36` snapshots across all `49` graduated `grad_marks` pools: `7/49` pools earned `1.3..35.6 SOL` each, with `SPOOF` `71452` creator collecting another `7.155 SOL` at `23:08Z` (cumulative observed fees: **`35.60 SOL`**, ~42% of 85 SOL sweep); `IOF` reaching `19.904 SOL`; `102.3 SOL` combined across the top 7), Phase 1 launch + self-sweep mechanics & dry-run simulator shipped (`simulate_creator_pilot_launch.py`). Phase 2 blocked on capital (~86 SOL) + explicit operator approval.
 
 - **Mechanism**: hold the pool position; exit when the pool drops ≥5%
   below its running peak, with `peak` seeded at graduation `open_price`
   (`bbb6510`) so open-and-dump pools trigger on the first poll.
 - **Measured**:
-  - **Cumulative post-fix 5% cohort (`id >= 66872`, n=43 clean resolved)**:
-    **38W / 5L (88.4%)**, **+2,445.0 points** (+56.9% mean, +47.1% median)
-    vs +1,879.2 pts at 60s (29W/14L) and +2,086.2 pts at 300s (20W/23L).
+  - **Cumulative post-fix 5% cohort (`id >= 66872`, n=45 clean resolved)**:
+    **40W / 5L (88.9%)**, **+2,673.1 points** (+59.4% mean, +47.1% median)
+    vs +1,855.4 pts at 60s (30W/15L) and +2,470.9 pts at 300s (21W/24L).
   - **Focused 6-hour live test (2026-10-14, n=4)**: **3W / 1L**, **+175.1 points**
     (+43.8% mean) vs −82.2 pts at 60s (1W/3L), −37.0 pts at 300s (1W/3L), and
     −365.7 pts at 900s (0W/4L) — **+257.3 pts** over 60s and **+540.7 pts** over 900s.
