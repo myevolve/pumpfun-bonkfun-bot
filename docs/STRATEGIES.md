@@ -36,7 +36,7 @@ This file is the inventory. Rules:
   compressing the payback, the creator's own pool dump risk (the churn
   that pays the annuity also craters the price — the position is the fee
   stream, not the tokens).
-- **Status**: MEASURED-LIVE — Phase 0 live tracker running (`132.6h` / `37` snapshots across all `49` graduated `grad_marks` pools: `7/49` pools earned `1.3..35.7 SOL` each, with `IOF` `73272` touching **`20.00 SOL`** in creator fees and `SPOOF` reaching **`35.69 SOL`**; `103.2 SOL` combined across the top 7), Phase 1 launch + self-sweep mechanics & dry-run simulator shipped (`simulate_creator_pilot_launch.py`). Phase 2 blocked on capital (~86 SOL) + explicit operator approval.
+- **Status**: MEASURED-LIVE — Phase 0 live tracker running (`138.6h` / `38` snapshots across all `49` graduated `grad_marks` pools: `7/49` pools earned `1.3..36.2 SOL` each, with `IOF` `73272` crossing **`20.07 SOL`** and `SPOOF` reaching **`36.18 SOL`** cumulative; `103.7 SOL` combined across the top 7), Phase 1 launch + self-sweep mechanics & dry-run simulator shipped (`simulate_creator_pilot_launch.py`). Phase 2 blocked on capital (~86 SOL) + explicit operator approval.
 
 - **Mechanism**: hold the pool position; exit when the pool drops ≥5%
   below its running peak, with `peak` seeded at graduation `open_price`
