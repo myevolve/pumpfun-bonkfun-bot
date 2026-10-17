@@ -787,11 +787,11 @@ survey) is blocked by missing scores, not by analysis. The shadow
 config should enable the scorer.
 
 ## Phase 0 live: the creator annuity measured on real pools (2026-10-11)
-**Phase 0 result, 126.6 hours of tracking (36 snapshots through `2026-10-16 23:08Z`, covering all 49 graduated `grad_marks` pools + 11 tape pools)**: creators actively collect mid-tracking (`SPOOF` creator drained another `7.155 SOL` at `23:08Z`: `7.200 -> 0.045 SOL`), bringing `SPOOF` cumulative observed fees past **`35.60 SOL`** (~42% of 85 SOL sweep recovered). `IOF` (`73272`) reached **`19.904 SOL`** in vault. Top cumulative fee earners:
+**Phase 0 result, 132.6 hours of tracking (37 snapshots through `2026-10-17 05:08Z`, covering all 49 graduated `grad_marks` pools + 11 tape pools)**: creators actively collect mid-tracking, and `IOF` (`73272`) reached **`20.00 SOL`** in its creator vault (`19.997 SOL` currently uncollected), while `SPOOF` (`71452`) cumulative fees reached **`35.69 SOL`** and `INTENTS` (`73896`) reached **`26.57 SOL`**. Top cumulative fee earners:
 
-- `SPOOF` (`71452`, `60.2 SOL` fund): **`35.60 SOL`** cumulative (`22.15 SOL` peak + re-accruals; creator drained `7.155 SOL` at `23:08Z`) -> **payback ~7 days**
-- `INTENTS` (`73896`, `60.7 SOL` fund): **`25.79 SOL`** cumulative -> **payback ~10 days**
-- `IOF` (`73272`, `64.0 SOL` fund): **`19.90 SOL`** (`19.904 SOL` in vault) -> **payback ~13 days**
+- `SPOOF` (`71452`, `60.2 SOL` fund): **`35.69 SOL`** cumulative (`22.15 SOL` peak + re-accruals) -> **payback ~7 days**
+- `INTENTS` (`73896`, `60.7 SOL` fund): **`26.57 SOL`** cumulative -> **payback ~10 days**
+- `IOF` (`73272`, `64.0 SOL` fund): **`20.00 SOL`** (`19.997 SOL` in vault) -> **payback ~13 days**
 - `SEED` (`70989`, `70.0 SOL` fund): **`15.09 SOL`** -> **payback ~14 days**
 - `SNIFFR` (`76580`, `72.8 SOL` fund, paced `21.2s` sweep): **`2.993 SOL`** (drained by creator) -> **payback ~4 days**
 - `Mishu` (`65703`, `60.8 SOL` fund, paced `11.0s` sweep): **`1.572 SOL`** (`1.369 SOL` peak)
