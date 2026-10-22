@@ -787,17 +787,19 @@ survey) is blocked by missing scores, not by analysis. The shadow
 config should enable the scorer.
 
 ## Phase 0 live: the creator annuity measured on real pools (2026-10-11)
-**Phase 0 result, 234.7 hours / 9.78 days of tracking (52 snapshots through `2026-10-21 05:11Z`, covering 65 of 66 graduated `grad_marks` pools + 34 tape pools; `--limit` raised to 100)**: creators actively collect mid-tracking, and `FLAMBO` (`91174`, `62.85 SOL` fund) accrued **`24.73 SOL`** within hours of graduation (`23.46 SOL` immediately drained by creator, `1.28 SOL` remaining in vault). Top cumulative fee earners across `9.78 days`:
+**Phase 0 result, 252.7 hours / 10.53 days of tracking (55 snapshots through `2026-10-21 23:12Z`, covering all 66 of 66 graduated `grad_marks` pools + 34 tape pools; `--limit 100`)**: creators actively collect mid-tracking (`SPOOF` creator drained another `0.815 SOL` between 05:11Z and 23:12Z), while `IOF` (`73272`) crossed **`21.03 SOL`** in its creator vault (`21.029 SOL` uncollected) and two newly included tape pools (`wQhUuD6j` **`6.80 SOL`**, `tWgUKYTg` **`1.51 SOL`**) surfaced in the expanded 100-pool batch. Top cumulative fee earners across `10.53 days`:
 
-- `SPOOF` (`71452`, `60.2 SOL` fund): **`36.80 SOL`** cumulative (`22.15 SOL` peak + re-accruals) -> **payback ~7 days**
+- `SPOOF` (`71452`, `60.2 SOL` fund): **`36.87 SOL`** cumulative (`22.15 SOL` peak + re-accruals; creator drained `0.815 SOL` on Oct 21) -> **payback ~7 days**
 - `INTENTS` (`73896`, `60.7 SOL` fund): **`26.58 SOL`** cumulative -> **payback ~10 days**
 - `FLAMBO` (`91174`, `62.9 SOL` fund): **`24.73 SOL`** accrued on launch day (`23.46 SOL` drained by creator) -> **payback ~3 days** at launch velocity
-- `IOF` (`73272`, `64.0 SOL` fund): **`20.91 SOL`** (`20.906 SOL` in vault) -> **payback ~13 days**
+- `IOF` (`73272`, `64.0 SOL` fund): **`21.03 SOL`** (`21.029 SOL` in vault) -> **payback ~13 days**
 - `SEED` (`70989`, `70.0 SOL` fund): **`15.09 SOL`** -> **payback ~14 days**
+- `wQhUuD6j` (tape whale-band pool): **`6.80 SOL`** (`6.801 SOL` in vault)
 - `SNIFFR` (`76580`, `72.8 SOL` fund, paced `21.2s` sweep): **`2.995 SOL`** (drained by creator) -> **payback ~4 days**
 - `Mishu` (`65703`, `60.8 SOL` fund, paced `11.0s` sweep): **`1.572 SOL`** (`1.369 SOL` peak)
+- `tWgUKYTg` (tape whale-band pool): **`1.51 SOL`** (`1.512 SOL` in vault)
 - `DOMP` (`79349`, `63.2 SOL` fund): **`1.284 SOL`** (drained by creator)
-- **8 of 65 graduated `grad_marks` pools earned ≥1.28 SOL (`12.3%`, `129.96 SOL` combined)**; **`5 of 65` (`7.7%`) earned >15 SOL**; `22/99` (`22.2%`) hold `≥0.01 SOL`; median pool earned `~0.0001 SOL`.
+- **10 of 100 tracked pools earned ≥1.28 SOL (`10.0%`, `138.47 SOL` combined)**; **`8 of 66` (`12.1%`) graduated `grad_marks` pools earned ≥1.28 SOL (`130.15 SOL` combined)**; median pool earned `~0.0001 SOL`.
 
 **Sweep-pacing determinant across all 49 graduated pools (2026-10-14)**:
 - **Paced sweeps (`grad_elapsed_s >= 8s`, `n=13`)**: `3/13` (`23.1%`) earned `>15 SOL`, `6/13` (`46.2%`) earned `≥0.1 SOL`, mean **`5.40 SOL`**, median **`0.0150 SOL`**.
