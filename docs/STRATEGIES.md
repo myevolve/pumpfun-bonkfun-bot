@@ -36,15 +36,15 @@ This file is the inventory. Rules:
   compressing the payback, the creator's own pool dump risk (the churn
   that pays the annuity also craters the price — the position is the fee
   stream, not the tokens).
-- **Status**: MEASURED-LIVE — Phase 0 live tracker running (`162.6h` / `42` snapshots across all `49` graduated `grad_marks` pools: `7/49` pools earned `1.3..36.4 SOL` each, with `IOF` `73272` crossing **`20.33 SOL`** and `SPOOF` reaching **`36.38 SOL`** cumulative; `104.1 SOL` combined across the top 7), Phase 1 launch + self-sweep mechanics & dry-run simulator shipped (`simulate_creator_pilot_launch.py`). Phase 2 blocked on capital (~86 SOL) + explicit operator approval.
+- **Status**: MEASURED-LIVE — Phase 0 1-week gate completed (`234.7h` / `9.78 days` / `52` snapshots across `65/66` graduated `grad_marks` pools: `8/65` (`12.3%`) earned `1.3..36.8 SOL` each, `5/65` (`7.7%`) earned `15.1..36.8 SOL`, with `FLAMBO` `91174` accruing **`24.73 SOL`** (`23.46 SOL` drained by creator) and `SPOOF` reaching **`36.80 SOL`**; **`129.96 SOL` combined across the top 8**, while median pool earned `~0.0001 SOL` — lottery structure confirmed). Phase 1 launch, self-sweep, and creator-fee claim builders (`collect_creator_fee_v2`, `collect_coin_creator_fee`) shipped (`simulate_creator_pilot_launch.py`). Phase 2 blocked on capital (~86 SOL) + explicit operator approval.
 
 - **Mechanism**: hold the pool position; exit when the pool drops ≥5%
   below its running peak, with `peak` seeded at graduation `open_price`
   (`bbb6510`) so open-and-dump pools trigger on the first poll.
 - **Measured**:
-  - **Cumulative post-fix 5% cohort (`id >= 66872`, n=46 clean resolved)**:
-    **41W / 5L (89.1%)**, **+2,748.3 points** (+59.7% mean, +50.2% median)
-    vs +1,957.7 pts at 60s (31W/15L) and +2,449.1 pts at 300s (21W/25L).
+  - **Cumulative post-fix 5% cohort (`id >= 66872`, n=50 clean resolved)**:
+    **45W / 5L (90.0%)**, **+3,054.6 points** (+61.1% mean, +53.4% median)
+    vs +2,246.2 pts at 60s (34W/16L), +2,768.0 pts at 300s (23W/27L), and +812.7 pts at 900s (13W/37L, −91.4% median).
   - **Focused 6-hour live test (2026-10-14, n=4)**: **3W / 1L**, **+175.1 points**
     (+43.8% mean) vs −82.2 pts at 60s (1W/3L), −37.0 pts at 300s (1W/3L), and
     −365.7 pts at 900s (0W/4L) — **+257.3 pts** over 60s and **+540.7 pts** over 900s.
@@ -83,8 +83,7 @@ This file is the inventory. Rules:
 - **Worst case**: the measured latency drift inside the band; the
   WICK/68368 rebound class (the rollover exit gave back +98% while the
   timeline ran to +742% on the largest resolved winner).
-- **Status**: MEASURED-CONDITIONAL — gate support shipped; arming is the
-  operator's call.
+- **Status**: ARMED IN DRY-RUN (`whaleride-paper`: `min_buyers: 2, max_buyers: 3, exclude_mayhem: true`). Across `79` post-clock accepts (`id >= 62798`), the 2–3 non-mayhem band (`n=42`) achieved **`92.9%` graduation (`39/42`)**, **`35W / 7L` (`83.3%` win)**, **`+2,767.1 pts` (`+65.9%` mean, `+75.3%` median)** vs **`+114.8 pts` (`+3.1%` mean)** on the `37` out-of-band accepts. Sub-refinement: when the 60-SOL crossing trade itself is a whale sweep (`last_buy_sol >= 10 SOL`, `n=39`, `38/39` `buyers == 3`), graduation is **`97.4%` (`38/39`)** and live return is **`34W / 5L` (`87.2%`), `+2,707.4 pts` (`+69.4%` mean)**. Moreover, on-chain audit of all `28` `buyers == 4` skips (`85935..98965`) proved `8/28` (`28.6%`) never graduated and `20/28` were drained to `1.4..7.4 SOL` in quote vault with `0.0000..0.0037 SOL` creator fees (`0/28` organic winners).
 
 ## 4. Follower LP — PumpSwap graduated pools
 

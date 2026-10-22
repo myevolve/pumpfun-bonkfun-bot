@@ -43,7 +43,10 @@ from platforms.pumpfun.fee_schedule import (
     quote_buy_exact_out,
 )
 from platforms.pumpfun.instruction_builder import PumpFunInstructionBuilder
-from platforms.pumpfun.pumpswap import PumpSwapAddresses
+from platforms.pumpfun.pumpswap import (
+    PumpSwapAddresses,
+    build_pumpswap_collect_creator_fee_instructions,
+)
 from utils.idl_parser import IDLParser
 
 IDL_PATH = PROJECT_ROOT / "idl" / "pump_fun_idl.json"
@@ -198,6 +201,22 @@ async def run_simulation(tranches: int = 4) -> dict[str, int | float | bool]:
     assert pool != Pubkey.default()
     assert creator_vault_pda != Pubkey.default()
 
+    curve_claim_ixs = builder.build_collect_creator_fee_v2_instructions(
+        creator=creator,
+        address_provider=provider,
+        quote_mint=WSOL_MINT,
+    )
+    pumpswap_claim_ixs = build_pumpswap_collect_creator_fee_instructions(
+        creator,
+        quote_mint=WSOL_MINT,
+    )
+    assert len(curve_claim_ixs) == 3, "Expected ATA + collect_creator_fee_v2 + close"
+    assert len(pumpswap_claim_ixs) == 3, (
+        "Expected ATA + collect_coin_creator_fee + close"
+    )
+    assert len(pumpswap_claim_ixs[1].accounts) == 8, (
+        "Expected 8 PumpSwap claim accounts"
+    )
     net_lockup_lamports = total_gross_lamports - total_creator_fee_lamports
     return {
         "complete": True,

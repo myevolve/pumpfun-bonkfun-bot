@@ -97,6 +97,19 @@ _EXTEND_ACCOUNT_ACCOUNTS: list[tuple[str, bool]] = [
     ("program", False),
 ]
 
+_COLLECT_CREATOR_FEE_V2_ACCOUNTS: list[tuple[str, bool]] = [
+    ("creator", True),
+    ("creator_token_account", True),
+    ("creator_vault", True),
+    ("creator_vault_token_account", True),
+    ("quote_mint", False),
+    ("quote_token_program", False),
+    ("associated_token_program", False),
+    ("system_program", False),
+    ("event_authority", False),
+    ("program", False),
+]
+
 _SUPPORTED_TOKEN_PROGRAMS = frozenset(
     (SystemAddresses.TOKEN_PROGRAM, SystemAddresses.TOKEN_2022_PROGRAM)
 )
@@ -128,6 +141,9 @@ class PumpFunInstructionBuilder(InstructionBuilder):
         )
         self._extend_account_discriminator = discriminators.get(
             "extend_account", bytes([234, 102, 194, 203, 150, 72, 62, 229])
+        )
+        self._collect_creator_fee_v2_discriminator = discriminators.get(
+            "collect_creator_fee_v2", bytes([207, 17, 138, 242, 4, 34, 19, 56])
         )
 
         logger.info(
@@ -959,3 +975,51 @@ class PumpFunInstructionBuilder(InstructionBuilder):
                 accounts=extend_metas,
             ),
         ]
+
+    def build_collect_creator_fee_v2_instructions(
+        self,
+        *,
+        creator: Pubkey,
+        address_provider: AddressProvider,
+        quote_mint: Pubkey | None = None,
+        quote_token_program: Pubkey | None = None,
+    ) -> list[Instruction]:
+        """Build the pump.fun collect_creator_fee_v2 instruction and ATA setup/unwrap."""
+        accounts_info = address_provider.get_collect_creator_fee_v2_accounts(
+            creator, quote_mint, quote_token_program
+        )
+        resolved_mint = accounts_info["quote_mint"]
+        resolved_program = accounts_info["quote_token_program"]
+        creator_ata = accounts_info["creator_token_account"]
+        metas = [
+            AccountMeta(
+                pubkey=accounts_info[name],
+                is_signer=False,
+                is_writable=is_writable,
+            )
+            for name, is_writable in _COLLECT_CREATOR_FEE_V2_ACCOUNTS
+        ]
+        instructions: list[Instruction] = [
+            create_idempotent_associated_token_account(
+                creator, creator, resolved_mint, resolved_program
+            ),
+            Instruction(
+                program_id=accounts_info["program"],
+                data=self._collect_creator_fee_v2_discriminator,
+                accounts=metas,
+            ),
+        ]
+        if is_sol_paired(resolved_mint):
+            from spl.token.instructions import CloseAccountParams, close_account
+
+            instructions.append(
+                close_account(
+                    CloseAccountParams(
+                        account=creator_ata,
+                        dest=creator,
+                        owner=creator,
+                        program_id=resolved_program,
+                    )
+                )
+            )
+        return instructions

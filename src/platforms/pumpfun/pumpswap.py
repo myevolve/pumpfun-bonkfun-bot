@@ -39,6 +39,7 @@ PUMP_SWAP_EVENT_AUTHORITY = Pubkey.from_string(
 PUMP_SWAP_SELL_DISCRIMINATOR = bytes.fromhex("33e685a4017f83ad")
 PUMP_SWAP_EXTEND_ACCOUNT_DISCRIMINATOR = bytes((234, 102, 194, 203, 150, 72, 62, 229))
 PUMP_SWAP_POOL_DISCRIMINATOR = bytes((241, 154, 109, 4, 17, 177, 109, 188))
+PUMP_SWAP_COLLECT_CREATOR_FEE_DISCRIMINATOR = bytes((160, 57, 89, 42, 181, 139, 43, 66))
 PUMP_SWAP_GLOBAL_CONFIG_DISCRIMINATOR = bytes((149, 8, 156, 202, 160, 252, 176, 217))
 _MAX_U64 = 0xFFFF_FFFF_FFFF_FFFF
 _MAX_BASIS_POINTS = 10_000
@@ -818,6 +819,69 @@ def build_pumpswap_sell_instructions(  # noqa: C901
                     dest=user,
                     owner=user,
                     program_id=quote_program,
+                )
+            )
+        )
+    return instructions
+
+
+def build_pumpswap_collect_creator_fee_instructions(
+    coin_creator: Pubkey,
+    *,
+    payer: Pubkey | None = None,
+    quote_mint: Pubkey = WSOL_MINT,
+    quote_token_program: Pubkey | None = None,
+    unwrap_wsol: bool = True,
+) -> list[Instruction]:
+    """Build PumpSwap's collect_coin_creator_fee instruction (8 IDL accounts).
+
+    Claims accumulated 30 bps creator fees from the PumpSwap creator-vault ATA
+    into ``coin_creator``'s quote ATA, optionally unwrapping WSOL to native SOL
+    when ``payer`` is ``coin_creator``.
+    """
+    effective_payer = payer if payer is not None else coin_creator
+    resolved_program = (
+        quote_token_program
+        if quote_token_program is not None
+        else QUOTE_TOKEN_PROGRAMS.get(quote_mint, SystemAddresses.TOKEN_PROGRAM)
+    )
+    vault_authority = PumpSwapAddresses.derive_creator_vault(coin_creator)
+    vault_ata = get_associated_token_address(
+        vault_authority, quote_mint, resolved_program
+    )
+    creator_ata = get_associated_token_address(
+        coin_creator, quote_mint, resolved_program
+    )
+    accounts = [
+        AccountMeta(pubkey=quote_mint, is_signer=False, is_writable=False),
+        AccountMeta(pubkey=resolved_program, is_signer=False, is_writable=False),
+        AccountMeta(pubkey=coin_creator, is_signer=False, is_writable=False),
+        AccountMeta(pubkey=vault_authority, is_signer=False, is_writable=False),
+        AccountMeta(pubkey=vault_ata, is_signer=False, is_writable=True),
+        AccountMeta(pubkey=creator_ata, is_signer=False, is_writable=True),
+        AccountMeta(
+            pubkey=PUMP_SWAP_EVENT_AUTHORITY, is_signer=False, is_writable=False
+        ),
+        AccountMeta(pubkey=PUMP_SWAP_PROGRAM, is_signer=False, is_writable=False),
+    ]
+    instructions: list[Instruction] = [
+        create_idempotent_associated_token_account(
+            effective_payer, coin_creator, quote_mint, resolved_program
+        ),
+        Instruction(
+            PUMP_SWAP_PROGRAM,
+            PUMP_SWAP_COLLECT_CREATOR_FEE_DISCRIMINATOR,
+            accounts,
+        ),
+    ]
+    if unwrap_wsol and quote_mint == WSOL_MINT and effective_payer == coin_creator:
+        instructions.append(
+            close_account(
+                CloseAccountParams(
+                    account=creator_ata,
+                    dest=coin_creator,
+                    owner=coin_creator,
+                    program_id=resolved_program,
                 )
             )
         )

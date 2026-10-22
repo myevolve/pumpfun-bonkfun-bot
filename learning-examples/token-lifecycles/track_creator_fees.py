@@ -110,7 +110,7 @@ def cohort_pools() -> list[dict]:
 async def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--rpc", default=None)
-    parser.add_argument("--limit", type=int, default=60)
+    parser.add_argument("--limit", type=int, default=100)
     args = parser.parse_args()
     rpc = args.rpc or rpc_from_env()
     pools = cohort_pools()[: args.limit]

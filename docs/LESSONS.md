@@ -578,8 +578,8 @@ and all 4 graduated within `2.5..5.8s` and resolved across 60s/300s/900s:
   - **Fixed 60s**: **1W / 3L**, **−82.2 points** (−20.6% mean) → rollover beats/ties **3/4** by **+257.3 points** (+64.3 pts/coin).
   - **Fixed 300s**: **1W / 3L**, **−37.0 points** (−9.2% mean) → rollover beats/ties **3/4** by **+212.0 points** (+53.0 pts/coin).
   - **Fixed 900s**: **0W / 4L**, **−365.7 points** (−91.4% mean) → rollover beats **4/4** by **+540.7 points** (+135.2 pts/coin).
-- **`VRAXTARD` (74974), `CLAUDAI` (75787), `SNIFFR` (76580), `CARTON` (76959), `RTM` (77848), `LONGPOS` (77886), `ROBINJEAN` (77960), `BIGPEPPA` (79111), `DOMP` (79349), `DRAINLOVE` (81542), `PARADISE` (82396), `TRUMPSTER` (83004), `NEYMAR` (83729), `WIFHELL` (84677), and `BEAMFOX` (85896) validated the armed gate & peak-seed rollover live**: on `BEAMFOX` (`08:39Z`, `buyers=3`, `real_sol=60.13`), open was `+70.5%`, peak hit `+95.9%` (`G+10.3s`), and rollover exited at `G+14.8s` for **`+75.2%` net**, avoiding the dump to **`−21.8%` at 300s** (**`+97.0 pts` saved vs 300s**).
-- **Cumulative post-fix 5% rollover cohort (`id >= 66872`, n=46 clean resolved, excluding `IOF` 73272 vault squeeze)**: **41W / 5L (89.1% win rate)**, **+2,748.3 aggregate points** (**+59.7% mean**, **+50.2% median**), beating 60s (+1,957.7 pts, 31W/15L) by **+790.6 points** and 300s by **+299.2 points**.
+- **19 live resolutions under the armed gate & peak-seed rollover (`74974..98933`)**: including `FLAMBO` (`91174`, `23:04Z`, `buyers=3`, `62.85 SOL`: opened `+105.8%`, peaked `+110.9%`, rolled over at `G+29.0s` for **`+96.8%` net** vs `−92.5%` at 900s, **`+189.3 pts` saved**, and accrued **`24.73 SOL`** in creator fees), `TRALALA` (`91328`: rolled over **`+114.5%`** at `G+24.7s` vs `−92.5%` at 900s), `JPG` (`98015`: rolled over **`+41.6%`** at `G+14.3s` vs **`−51.4%` at 60s**, **`+93.0 pts` saved**), and `PUMPCITY` (`98933`: rolled over **`+53.6%`** at `G+11.6s` vs **`−45.5%` at 300s**, **`+99.1 pts` saved**).
+- **Cumulative post-fix 5% rollover cohort (`id >= 66872`, n=50 clean resolved, excluding `IOF` 73272 vault squeeze)**: **45W / 5L (90.0% win rate)**, **+3,054.6 aggregate points** (**+61.1% mean**, **+53.4% median**), beating 60s (+2,246.2 pts, 34W/16L) by **+808.4 points**, 300s (+2,768.0 pts, 23W/27L) by **+286.6 points**, and 900s (+812.7 pts, 13W/37L, −91.4% median) by **+2,241.9 points**.
 because the operator's proc-service kills never touched the keeper's
 lineage. SQLite's WAL serialized the writes (no corruption), but the
 one-writer-by-convention invariant was violated and the position JSON
@@ -787,16 +787,17 @@ survey) is blocked by missing scores, not by analysis. The shadow
 config should enable the scorer.
 
 ## Phase 0 live: the creator annuity measured on real pools (2026-10-11)
-**Phase 0 result, 162.6 hours of tracking (42 snapshots through `2026-10-18 11:10Z`, covering all 49 graduated `grad_marks` pools + 11 tape pools)**: creators actively collect mid-tracking, and `IOF` (`73272`) crossed **`20.33 SOL`** in its creator vault (`20.326 SOL` currently uncollected), while `SPOOF` (`71452`) cumulative fees reached **`36.38 SOL`** and `INTENTS` (`73896`) reached **`26.58 SOL`**. Top cumulative fee earners:
+**Phase 0 result, 234.7 hours / 9.78 days of tracking (52 snapshots through `2026-10-21 05:11Z`, covering 65 of 66 graduated `grad_marks` pools + 34 tape pools; `--limit` raised to 100)**: creators actively collect mid-tracking, and `FLAMBO` (`91174`, `62.85 SOL` fund) accrued **`24.73 SOL`** within hours of graduation (`23.46 SOL` immediately drained by creator, `1.28 SOL` remaining in vault). Top cumulative fee earners across `9.78 days`:
 
-- `SPOOF` (`71452`, `60.2 SOL` fund): **`36.38 SOL`** cumulative (`22.15 SOL` peak + re-accruals) -> **payback ~7 days**
+- `SPOOF` (`71452`, `60.2 SOL` fund): **`36.80 SOL`** cumulative (`22.15 SOL` peak + re-accruals) -> **payback ~7 days**
 - `INTENTS` (`73896`, `60.7 SOL` fund): **`26.58 SOL`** cumulative -> **payback ~10 days**
-- `IOF` (`73272`, `64.0 SOL` fund): **`20.33 SOL`** (`20.326 SOL` in vault) -> **payback ~13 days**
+- `FLAMBO` (`91174`, `62.9 SOL` fund): **`24.73 SOL`** accrued on launch day (`23.46 SOL` drained by creator) -> **payback ~3 days** at launch velocity
+- `IOF` (`73272`, `64.0 SOL` fund): **`20.91 SOL`** (`20.906 SOL` in vault) -> **payback ~13 days**
 - `SEED` (`70989`, `70.0 SOL` fund): **`15.09 SOL`** -> **payback ~14 days**
-- `SNIFFR` (`76580`, `72.8 SOL` fund, paced `21.2s` sweep): **`2.993 SOL`** (drained by creator) -> **payback ~4 days**
+- `SNIFFR` (`76580`, `72.8 SOL` fund, paced `21.2s` sweep): **`2.995 SOL`** (drained by creator) -> **payback ~4 days**
 - `Mishu` (`65703`, `60.8 SOL` fund, paced `11.0s` sweep): **`1.572 SOL`** (`1.369 SOL` peak)
 - `DOMP` (`79349`, `63.2 SOL` fund): **`1.284 SOL`** (drained by creator)
-- **7 of 49 graduated `grad_marks` pools earned ≥1.28 SOL (`14.3%`, `101.10 SOL` combined)**; `19/92` (`20.7%`) hold `≥0.01 SOL`.
+- **8 of 65 graduated `grad_marks` pools earned ≥1.28 SOL (`12.3%`, `129.96 SOL` combined)**; **`5 of 65` (`7.7%`) earned >15 SOL**; `22/99` (`22.2%`) hold `≥0.01 SOL`; median pool earned `~0.0001 SOL`.
 
 **Sweep-pacing determinant across all 49 graduated pools (2026-10-14)**:
 - **Paced sweeps (`grad_elapsed_s >= 8s`, `n=13`)**: `3/13` (`23.1%`) earned `>15 SOL`, `6/13` (`46.2%`) earned `≥0.1 SOL`, mean **`5.40 SOL`**, median **`0.0150 SOL`**.

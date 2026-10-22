@@ -34,6 +34,7 @@ from platforms.pumpfun.address_provider import (  # noqa: E402
 )
 from platforms.pumpfun.instruction_builder import (  # noqa: E402
     _BUY_V2_ACCOUNTS,
+    _COLLECT_CREATOR_FEE_V2_ACCOUNTS,
     _CREATE_V2_ACCOUNTS,
     _EXTEND_ACCOUNT_ACCOUNTS,
     _SELL_V2_ACCOUNTS,
@@ -803,6 +804,28 @@ def check_create_v2_roundtrip() -> list[str]:
             or args.get("is_mayhem_mode") is not False
         ):
             problems.append(f"create_v2 decoded args mismatch: {args}")
+    curve_claim_ixs = builder.build_collect_creator_fee_v2_instructions(
+        creator=user,
+        address_provider=provider,
+        quote_mint=WSOL_MINT,
+    )
+    if len(curve_claim_ixs) != 3:
+        problems.append(
+            f"expected 3 instructions for WSOL collect_creator_fee_v2, got {len(curve_claim_ixs)}"
+        )
+    else:
+        claim_ix = curve_claim_ixs[1]
+        claim_keys = [bytes(a.pubkey) for a in claim_ix.accounts]
+        claim_dec = parser.decode_instruction(
+            bytes(claim_ix.data), claim_keys, list(range(len(claim_keys)))
+        )
+        if (
+            not claim_dec
+            or claim_dec.get("instruction_name") != "collect_creator_fee_v2"
+        ):
+            problems.append(
+                f"collect_creator_fee_v2 failed IDLParser round-trip: {claim_dec}"
+            )
     return problems
 
 
@@ -819,6 +842,7 @@ def main() -> int:
         ("sell_v2", _SELL_V2_ACCOUNTS),
         ("create_v2", _CREATE_V2_ACCOUNTS),
         ("extend_account", _EXTEND_ACCOUNT_ACCOUNTS),
+        ("collect_creator_fee_v2", _COLLECT_CREATOR_FEE_V2_ACCOUNTS),
     ):
         problems = check_layout(name, layout)
         status = "OK" if not problems else f"{len(problems)} PROBLEM(S)"

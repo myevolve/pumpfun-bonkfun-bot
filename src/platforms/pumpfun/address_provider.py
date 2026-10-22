@@ -624,6 +624,37 @@ class PumpFunAddressProvider(AddressProvider):
             "program": PumpFunAddresses.PROGRAM,
         }
 
+    def get_collect_creator_fee_v2_accounts(
+        self,
+        creator: Pubkey,
+        quote_mint: Pubkey | None = None,
+        quote_token_program: Pubkey | None = None,
+    ) -> dict[str, Pubkey]:
+        """Get all 10 IDL accounts needed for a collect_creator_fee_v2 instruction."""
+        resolved_mint = normalize_quote_mint(quote_mint)
+        resolved_program = (
+            quote_token_program
+            if quote_token_program is not None
+            else require_quote_token_program(resolved_mint)
+        )
+        creator_vault = self.derive_creator_vault(creator)
+        return {
+            "creator": creator,
+            "creator_token_account": self.derive_quote_token_account(
+                creator, resolved_mint, resolved_program
+            ),
+            "creator_vault": creator_vault,
+            "creator_vault_token_account": self.derive_quote_token_account(
+                creator_vault, resolved_mint, resolved_program
+            ),
+            "quote_mint": resolved_mint,
+            "quote_token_program": resolved_program,
+            "associated_token_program": SystemAddresses.ASSOCIATED_TOKEN_PROGRAM,
+            "system_program": SystemAddresses.SYSTEM_PROGRAM,
+            "event_authority": PumpFunAddresses.EVENT_AUTHORITY,
+            "program": PumpFunAddresses.PROGRAM,
+        }
+
     def get_fee_recipient(self, token_info: TokenInfo) -> Pubkey:
         """Get the correct fee recipient based on mayhem mode.
 

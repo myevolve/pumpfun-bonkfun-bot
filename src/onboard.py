@@ -192,7 +192,7 @@ async def check_rpc_health(rpc_endpoint: str | None) -> dict[str, str]:
 
 def _endpoint_host_port(endpoint: str) -> tuple[str, int]:
     if "://" not in endpoint:
-        endpoint = "http://" + endpoint
+        endpoint = "https://" + endpoint
     parsed = urlparse(endpoint)
     if parsed.port is not None:
         port = parsed.port

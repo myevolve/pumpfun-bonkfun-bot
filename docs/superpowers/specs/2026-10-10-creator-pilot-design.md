@@ -26,42 +26,30 @@ that attracted whale sweeps — successful launches. A random creator's
 pool may see materially less. This is the single largest unknown, and it
 is measurable **before any money is spent** (Phase 0).
 
-## Phase 0 — creator fee tracker (read-only, ~1 week)
+## Phase 0 — creator fee tracker (read-only, ~1 week) [COMPLETED 2026-10-21 — 9.78 DAYS]
 
-The census identified the self-sweep creators by wallet. Their fee
-income is readable: the creator's fee account accrues 30 bps of their
-pool's volume; balances are on-chain.
+Tracked `99` pools (`65/66` graduated `grad_marks` pools + `34` whale-census tape pools; `--limit 100`) across **`52` snapshots (`2,280` rows, `234.7 hours` / `9.78 days`)**:
 
-1. Pick N≈20 graduated pools from the whale census (spread across the
-   fund bands and ages).
-2. Daily: read each pool's creator fee account balance → the daily
-   accrual per pool.
-3. Output: the **measured annuity curve** — accrual by pool age (day 0,
-   day 1, day 2...), by fund size. This replaces the survivorship-tainted
-   1,858 SOL estimate with the real decay function.
+1. **Top 8 Graduated Pools Earned `129.96 SOL` Combined (`8 / 65 = 12.3%` ≥ 1.28 SOL; `5 / 65 = 7.7%` > 15 SOL)**:
+   - `SPOOF` (`71452`): **`36.80 SOL`** (`~7-day` payback)
+   - `INTENTS` (`73896`): **`26.58 SOL`** (`~10-day` payback)
+   - `FLAMBO` (`91174`): **`24.73 SOL`** (`23.46 SOL` drained by creator on day 1)
+   - `IOF` (`73272`): **`20.91 SOL`** (`20.91 SOL` in vault)
+   - `SEED` (`70989`): **`15.09 SOL`** (`~14-day` payback)
+   - `SNIFFR` (`76580`): **`2.995 SOL`**, `Mishu` (`65703`): **`1.572 SOL`**, `DOMP` (`79349`): **`1.284 SOL`**.
+2. **Gate Verdict**: **LOTTERY STRUCTURE CONFIRMED.** The median pool earns `~0.0001 SOL` (fails the median 45-day payback gate for a blind/content-free launch), while the top `8–12%` of launches recover `15–37 SOL` within days (`3–14 day` payback) when organic followers churn the pool.
 
-**Gate**: if the measured day-1..7 accrual implies payback > ~45 days on
-the median 85 SOL sweep, STOP — the annuity does not survive contact
-with the decay data. If payback lands in the 10–20 day band, proceed.
+## Phase 1 — mechanics (no funds) [EXECUTED 2026-10-14, EXPANDED 2026-10-21]
 
-Build: one script, existing RPC patterns, read-only. ~150 lines.
+Ported the proven `mint_and_buy_v2.py` builders AND creator-fee collection builders into `src/platforms/pumpfun/` and verified offline:
 
-## Phase 1 — mechanics (no funds) [EXECUTED 2026-10-14]
-
-Ported the proven `mint_and_buy_v2.py` builders into the bot's
-`instruction_builder` and verified offline:
-
-1. `create_v2` (16 accounts) + `extend_account` (5 accounts) added to
-   `PumpFunAddressProvider.get_create_v2_instruction_accounts` and
-   `PumpFunInstructionBuilder.build_create_v2_instructions`, machine-checked
-   against `idl/pump_fun_idl.json` in `learning-examples/verify_v2_account_layout.py`.
-2. Self-sweep dry-run simulator (`learning-examples/token-lifecycles/simulate_creator_pilot_launch.py`):
-   steps a fresh curve across 4 `buy_v2` tranches using `quote_buy_exact_out`
-   to exact completion (`real_token_reserves == 0`, `real_quote_sol == 85.0054 SOL`,
-   `gross_spend == 86.0679 SOL`, `creator_self_rebate == 0.2550 SOL`,
-   `net_lockup == 85.8129 SOL`).
-3. Post-graduation hold: derives the canonical PumpSwap pool and creator vault
-   without building any sell or LP withdrawal instruction.
+1. **Launch**: `create_v2` (16 accounts) + `extend_account` (5 accounts) in `PumpFunAddressProvider.get_create_v2_instruction_accounts` and `PumpFunInstructionBuilder.build_create_v2_instructions`.
+2. **Creator Fee Claiming (Curve + PumpSwap)**:
+   - `PumpFunAddressProvider.get_collect_creator_fee_v2_accounts` & `PumpFunInstructionBuilder.build_collect_creator_fee_v2_instructions` (10 IDL accounts + idempotent quote ATA + WSOL unwrap).
+   - `build_pumpswap_collect_creator_fee_instructions` in `src/platforms/pumpfun/pumpswap.py` (8 IDL accounts for `collect_coin_creator_fee` + idempotent quote ATA + WSOL unwrap).
+   - All layouts and discriminators machine-checked against `idl/pump_fun_idl.json` and `idl/pump_swap_idl.json` in `learning-examples/verify_v2_account_layout.py`.
+3. **Self-Sweep & Claim Dry-Run Simulator (`learning-examples/token-lifecycles/simulate_creator_pilot_launch.py`)**:
+   - Steps a fresh curve across 4 `buy_v2` tranches using `quote_buy_exact_out` to exact completion (`real_quote_sol == 85.0054 SOL`, `gross_spend == 86.0679 SOL`, `creator_self_rebate == 0.2550 SOL`, `net_lockup == 85.8129 SOL`) and verifies both bonding-curve and PumpSwap creator-fee claim instruction bundles.
 
 Gate: PASSED (`uv run learning-examples/token-lifecycles/simulate_creator_pilot_launch.py`).
 ## Phase 2 — bounded live pilot (operator approval required)
