@@ -69,7 +69,7 @@ class ImageTransport:
                 ).encode(),
             )
         if url.endswith("/clip.mp4"):
-            return HttpResponse(200, b"fake-mp4")
+            return HttpResponse(200, b"\x00\x00\x00\x18ftypisom")
         encoded = base64.b64encode(tiny_png()).decode("ascii")
         return HttpResponse(
             200,
@@ -108,6 +108,7 @@ def test_build_without_a_key_is_procedural_and_offline(tmp_path, monkeypatch) ->
     manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
     assert manifest["posted"] is False
     assert manifest["deployed"] is False
+    assert manifest["network_used"] is False
     assert manifest["phase"] == "0-shadow"
     assert manifest["clip"]["status"] == "skipped"
     assert result.art.logo.path.is_file()
@@ -133,6 +134,52 @@ def test_game_only_build_hides_ticker_on_the_hub(tmp_path, monkeypatch) -> None:
         assert "CA_PLACEHOLDER_DO_NOT_USE" not in text
         assert "coin" not in text.lower()
     assert DISCLOSURE in page
+
+
+def test_hub_with_a_ticker_states_we_created_and_hold_the_coin(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
+    result = build(FIXTURE, tmp_path, skip_clip=True)
+    index = result.hub_index.read_text(encoding="utf-8")
+    holding = index.split('id="holding-disclosure">', 1)[1].split("</p>", 1)[0]
+    assert "We created this coin, hold a dev bag" in holding
+    assert "SOCKDRIFT" in index
+
+
+def test_same_title_different_story_does_not_overwrite(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
+    build(FIXTURE, tmp_path, skip_clip=True)
+    payload = load_fixture_dict()
+    payload["story_id"] = "2026-10-29-sock-two"
+    payload["date"] = "2026-10-29"
+    payload["ticker"] = "SOCKTWO"
+    payload["template_id"] = "clicker"
+    second = write_concept(tmp_path, payload, "sock-two.json")
+    build(second, tmp_path, skip_clip=True)
+    catalog = json.loads((tmp_path / "catalog.json").read_text(encoding="utf-8"))
+    pages = {str(entry["page"]) for entry in catalog["games"]}
+    assert len(pages) == 2
+    bodies = [(tmp_path / page).read_text(encoding="utf-8") for page in pages]
+    assert sum("SOCKDRIFT" in body for body in bodies) == 1
+    assert sum("SOCKTWO" in body for body in bodies) == 1
+
+
+def test_daily_cap_is_shared_across_output_directories(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("XAI_API_KEY", UNIT_KEY)
+    monkeypatch.setenv("MEME_STUDIO_IMAGINE_BUDGET_DIR", str(tmp_path / "budget"))
+    first = ImageTransport()
+    second = ImageTransport()
+    build(FIXTURE, tmp_path / "one", transport=first, skip_clip=True, daily_image_cap=1)
+    build(
+        FIXTURE, tmp_path / "two", transport=second, skip_clip=True, daily_image_cap=1
+    )
+    posts = [
+        url
+        for url in first.calls + second.calls
+        if str(url).endswith("/images/generations")
+    ]
+    assert len(posts) == 1
 
 
 def test_second_story_is_archived_and_rebuild_does_not_duplicate(
@@ -183,7 +230,10 @@ def test_imagine_is_primary_when_a_key_and_transport_are_present(
     assert result.art.clip.status == "captured"
     assert result.art.clip.provider == "imagine"
     assert result.art.clip.path is not None
-    assert result.art.clip.path.read_bytes() == b"fake-mp4"
+    assert result.art.clip.path is not None
+    assert b"ftyp" in result.art.clip.path.read_bytes()[:32]
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["network_used"] is True
     video_prompts = [body["prompt"] for body in transport.bodies if "duration" in body]
     assert video_prompts
     assert all("SOCKDRIFT" not in str(prompt) for prompt in video_prompts)

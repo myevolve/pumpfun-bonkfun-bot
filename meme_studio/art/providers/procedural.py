@@ -6,9 +6,11 @@ from __future__ import annotations
 import hashlib
 import json
 from typing import TYPE_CHECKING
+from xml.sax.saxutils import escape
 
 from meme_studio.art.png import write_rgb_png
 from meme_studio.art.providers.base import AssetRecord, meta_path_for
+from meme_studio.game.page import FULL_COIN_DISCLOSURE
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -27,8 +29,39 @@ _SIZES = {
     "share": _SHARE_SIZE,
     "background": _BACKGROUND_SIZE,
 }
-_BAND = 16
+_BAND = 28
 _ADVICE = "Parody and entertainment only. Not investment advice."
+_HOLDING_GLYPHS = "WE CREATED THIS COIN HOLD A DEV BAG"
+# 5x7 glyphs, left to right, top to bottom. Each row is five bits.
+_FONT = {
+    "A": (0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001),
+    "B": (0b11110, 0b10001, 0b11110, 0b10001, 0b10001, 0b10001, 0b11110),
+    "C": (0b01110, 0b10001, 0b10000, 0b10000, 0b10000, 0b10001, 0b01110),
+    "D": (0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110),
+    "E": (0b11111, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000, 0b11111),
+    "F": (0b11111, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000, 0b10000),
+    "G": (0b01110, 0b10001, 0b10000, 0b10111, 0b10001, 0b10001, 0b01110),
+    "H": (0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001, 0b10001),
+    "I": (0b01110, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110),
+    "J": (0b00111, 0b00010, 0b00010, 0b00010, 0b10010, 0b10010, 0b01100),
+    "K": (0b10001, 0b10010, 0b11100, 0b10010, 0b10001, 0b10001, 0b10001),
+    "L": (0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111),
+    "M": (0b10001, 0b11011, 0b10101, 0b10001, 0b10001, 0b10001, 0b10001),
+    "N": (0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b10001),
+    "O": (0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110),
+    "P": (0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000),
+    "Q": (0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101),
+    "R": (0b11110, 0b10001, 0b10001, 0b11110, 0b10010, 0b10001, 0b10001),
+    "S": (0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110),
+    "T": (0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100),
+    "U": (0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110),
+    "V": (0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100),
+    "W": (0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b10101, 0b01010),
+    "X": (0b10001, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001),
+    "Y": (0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b00100),
+    "Z": (0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111),
+    " ": (0, 0, 0, 0, 0, 0, 0),
+}
 
 
 def render_procedural(
@@ -78,6 +111,7 @@ def render_procedural(
 def _lines(concept: Concept, *, kind: str, game_only: bool) -> list[str]:
     lines = [concept.title, concept.character.name, _ADVICE]
     if kind == "share" and not game_only:
+        lines.append(FULL_COIN_DISCLOSURE)
         lines.append(concept.ticker)
     return lines
 
@@ -118,6 +152,8 @@ def _draw(
     if kind == "share":
         band = accent if game_only else primary
         _fill_rect(buf, width, height, 0, height - _BAND, width, _BAND, band)
+        if not game_only:
+            _blit(buf, width, height, 4, height - 22, _HOLDING_GLYPHS, ink, scale=2)
     if kind == "background":
         _fill_rect(
             buf, width, height, 0, int(height * 0.72), width, height // 8, accent
@@ -169,10 +205,39 @@ def _fill_circle(
                 buf[start : start + 3] = pixel
 
 
+def _blit(
+    buf: bytearray,
+    width: int,
+    height: int,
+    x: int,
+    y: int,
+    text: str,
+    color: tuple[int, int, int],
+    *,
+    scale: int,
+) -> None:
+    cursor = x
+    pixel = bytes(color)
+    for character in text:
+        rows = _FONT.get(character, _FONT[" "])
+        for row_index, bits in enumerate(rows):
+            for col in range(5):
+                if bits & (1 << (4 - col)):
+                    for dy in range(scale):
+                        for dx in range(scale):
+                            px = cursor + col * scale + dx
+                            py = y + row_index * scale + dy
+                            if 0 <= px < width and 0 <= py < height:
+                                start = (py * width + px) * 3
+                                buf[start : start + 3] = pixel
+        cursor += 6 * scale
+
+
 def _svg(concept: Concept) -> str:
-    name = concept.character.name.replace("&", "").replace("<", "").replace(">", "")
+    name = escape(concept.character.name, {'"': "&quot;"})
     return (
-        f'<svg viewBox="0 0 64 64" role="img" aria-label="{name}">'
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" '
+        f'role="img" aria-label="{name}">'
         f'<rect width="64" height="64" fill="{concept.palette.background}"/>'
         f'<circle cx="32" cy="34" r="18" fill="{concept.palette.primary}"/>'
         f'<circle cx="26" cy="30" r="2" fill="{concept.palette.ink}"/>'

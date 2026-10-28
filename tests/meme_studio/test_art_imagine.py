@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from meme_studio.art.generate import generate_art
 from meme_studio.art.guardrails import GuardrailError
 from meme_studio.art.providers.imagine import (
     IMAGE_ENDPOINT,
@@ -21,9 +22,10 @@ from meme_studio.art.providers.imagine import (
     ImagineError,
     ImagineProvider,
 )
-from tests.meme_studio.support import ROOT, tiny_png
+from meme_studio.game.concept import load_concept
+from tests.meme_studio.support import FIXTURE, ROOT, tiny_png
 
-# ruff: noqa: ANN001, PLR2004, S101, TRY003, TRY004
+# ruff: noqa: ANN001, ANN202, ARG001, PLC0415, PLR2004, S101, S105, TRY003, TRY004
 
 UNIT_KEY = "unit-test-key-do-not-log"
 IMAGE_TICKS = 400_000_000  # $0.04; 1 USD = 10_000_000_000 ticks
@@ -357,7 +359,7 @@ def test_video_pending_then_done_sleeps(tmp_path) -> None:
                     "usage": {"cost_in_usd_ticks": VIDEO_TICKS},
                 },
             ),
-            HttpResponse(200, b"mp4"),
+            HttpResponse(200, b"\x00\x00\x00\x18ftypisom"),
         ]
     )
     provider = _provider(tmp_path, transport, sleeper=delays.append)
@@ -414,3 +416,279 @@ def test_post_check_hook_discards_the_image(tmp_path) -> None:
             creative_prompt="creature",
         )
     assert not dest.exists()
+
+
+def test_newline_in_the_key_never_reaches_the_network_or_the_error(
+    tmp_path, monkeypatch
+) -> None:
+    import http.client
+
+    from meme_studio.art.providers.imagine import UrllibTransport
+
+    secret = "synthetic-key-line1\nsynthetic-key-line2"
+    connects: list[int] = []
+
+    def refuse(self) -> None:
+        connects.append(1)
+        raise AssertionError("connect")
+
+    monkeypatch.setattr(http.client.HTTPSConnection, "connect", refuse)
+    with pytest.raises(ImagineError) as caught:
+        UrllibTransport().request(
+            "POST",
+            "https://api.x.ai/v1/images/generations",
+            {"Authorization": f"Bearer {secret}", "Content-Type": "application/json"},
+            b"{}",
+            1.0,
+        )
+    assert secret not in str(caught.value)
+    assert "synthetic-key" not in str(caught.value)
+    assert connects == []
+    transport = ScriptedTransport([_image_ok()])
+    provider = _provider(tmp_path, transport)
+    provider.config.api_key = secret
+    with pytest.raises(ImagineError) as provider_caught:
+        provider.generate_image(
+            "creature",
+            tmp_path / "sprite.png",
+            kind="sprite",
+            aspect_ratio="1:1",
+            style="absurdist",
+            creative_prompt="creature",
+        )
+    assert secret not in str(provider_caught.value)
+    assert transport.calls == []
+
+
+def test_transport_value_error_is_redacted(
+    tmp_path, caplog: pytest.LogCaptureFixture
+) -> None:
+    secret = "synthetic-header-secret"
+    transport = ScriptedTransport([ValueError(f"Invalid header {secret}")])
+    provider = _provider(tmp_path, transport, max_attempts=1)
+    provider.config.api_key = secret
+    with caplog.at_level(logging.DEBUG), pytest.raises(ImagineError) as caught:
+        provider.generate_image(
+            "creature",
+            tmp_path / "sprite.png",
+            kind="sprite",
+            aspect_ratio="1:1",
+            style="absurdist",
+            creative_prompt="creature",
+        )
+    assert secret not in str(caught.value)
+    assert secret not in caplog.text
+
+
+def test_ambiguous_failures_consume_the_daily_cap(tmp_path) -> None:
+    transport = ScriptedTransport([TimeoutError("timed out")] * 6)
+    provider = _provider(
+        tmp_path,
+        transport,
+        max_attempts=3,
+        daily_image_cap=1,
+        daily_cost_cap_usd=0.04,
+    )
+    with pytest.raises((CapExceeded, ImagineError)):
+        provider.generate_image(
+            "creature",
+            tmp_path / "sprite.png",
+            kind="sprite",
+            aspect_ratio="1:1",
+            style="absurdist",
+            creative_prompt="creature",
+        )
+    posts = [
+        call
+        for call in transport.calls
+        if str(call["url"]).endswith("/images/generations")
+    ]
+    assert len(posts) == 1
+    ledgers = list((tmp_path / "cache").rglob("usage-*.json"))
+    assert ledgers
+    ledger = json.loads(ledgers[0].read_text(encoding="utf-8"))
+    assert ledger["images"] >= 1
+    assert ledger["cost_ticks"] >= IMAGE_TICKS
+
+
+def test_invalid_image_bytes_are_not_cached(tmp_path) -> None:
+    transport = ScriptedTransport(
+        [
+            _json_response(
+                200, {"data": [{"b64_json": "!!!!", "respect_moderation": True}]}
+            )
+        ]
+    )
+    provider = _provider(tmp_path, transport)
+    dest = tmp_path / "sprite.png"
+    with pytest.raises(ImagineError):
+        provider.generate_image(
+            "creature",
+            dest,
+            kind="sprite",
+            aspect_ratio="1:1",
+            style="absurdist",
+            creative_prompt="creature",
+        )
+    assert not dest.exists()
+    assert list((tmp_path / "cache").rglob("*.bin")) == []
+
+
+def test_missing_moderation_stays_unknown_and_negative_usage_is_rejected(
+    tmp_path,
+) -> None:
+    encoded = base64.b64encode(tiny_png()).decode("ascii")
+    transport = ScriptedTransport(
+        [
+            _json_response(200, {"data": [{"b64_json": encoded}]}),
+            _json_response(
+                200,
+                {
+                    "data": [{"b64_json": encoded, "respect_moderation": True}],
+                    "usage": {"cost_in_usd_ticks": -1},
+                },
+            ),
+        ]
+    )
+    provider = _provider(tmp_path, transport)
+    record = provider.generate_image(
+        "known",
+        tmp_path / "known.png",
+        kind="sprite",
+        aspect_ratio="1:1",
+        style="absurdist",
+        creative_prompt="known",
+    )
+    meta = json.loads(record.meta_path.read_text(encoding="utf-8"))
+    assert meta["respect_moderation"] is None
+    assert meta["cost_observation"] == "estimated"
+    assert meta["cost_usd"] is None
+    with pytest.raises(ImagineError):
+        provider.generate_image(
+            "negative",
+            tmp_path / "negative.png",
+            kind="sprite",
+            aspect_ratio="1:1",
+            style="absurdist",
+            creative_prompt="negative",
+        )
+
+
+def test_cache_hit_runs_the_current_post_check(tmp_path) -> None:
+    transport = ScriptedTransport([_image_ok()])
+    first = _provider(tmp_path, transport)
+    first.generate_image(
+        "same",
+        tmp_path / "one.png",
+        kind="sprite",
+        aspect_ratio="1:1",
+        style="absurdist",
+        creative_prompt="same",
+    )
+    seen: list[str] = []
+
+    def hook(_meta: dict[str, object]) -> None:
+        seen.append("ran")
+        raise GuardrailError("hooked")
+
+    second = _provider(tmp_path, ScriptedTransport([]), post_check=hook)
+    dest = tmp_path / "two.png"
+    with pytest.raises(GuardrailError):
+        second.generate_image(
+            "same",
+            dest,
+            kind="sprite",
+            aspect_ratio="1:1",
+            style="absurdist",
+            creative_prompt="same",
+        )
+    assert seen == ["ran"]
+    assert not dest.exists()
+
+
+def test_revised_prompt_is_checked_before_cache(tmp_path) -> None:
+    encoded = base64.b64encode(tiny_png()).decode("ascii")
+    transport = ScriptedTransport(
+        [
+            _json_response(
+                200,
+                {
+                    "data": [
+                        {
+                            "b64_json": encoded,
+                            "respect_moderation": True,
+                            "revised_prompt": "photorealistic child",
+                        }
+                    ],
+                    "usage": {"cost_in_usd_ticks": IMAGE_TICKS},
+                },
+            )
+        ]
+    )
+    provider = _provider(tmp_path, transport)
+    dest = tmp_path / "sprite.png"
+    with pytest.raises(GuardrailError):
+        provider.generate_image(
+            "creature",
+            dest,
+            kind="sprite",
+            aspect_ratio="1:1",
+            style="absurdist",
+            creative_prompt="creature",
+        )
+    assert not dest.exists()
+    assert list((tmp_path / "cache").rglob("*.bin")) == []
+
+
+def test_redirect_does_not_forward_authorization(monkeypatch) -> None:
+    import http.client
+    import urllib.request
+
+    from meme_studio.art.providers.imagine import SafeRedirect
+
+    secret = "synthetic-redirect-secret"
+    connects: list[str] = []
+
+    def refuse(self) -> None:
+        connects.append(str(getattr(self, "host", "")))
+        raise AssertionError("connect")
+
+    monkeypatch.setattr(http.client.HTTPSConnection, "connect", refuse)
+    monkeypatch.setattr(http.client.HTTPConnection, "connect", refuse)
+    request = urllib.request.Request(
+        "https://api.x.ai/v1/images/generations",
+        headers={"Authorization": f"Bearer {secret}"},
+        method="GET",
+    )
+    redirected = SafeRedirect().redirect_request(
+        request, None, 302, "Found", {}, "https://other.invalid/landed"
+    )
+    names = [key.lower() for key, _value in redirected.header_items()]
+    assert "authorization" not in names
+    same = SafeRedirect().redirect_request(
+        request, None, 302, "Found", {}, "https://api.x.ai/v1/images/generations"
+    )
+    same_headers = {key.lower(): value for key, value in same.header_items()}
+    assert same_headers["authorization"] == f"Bearer {secret}"
+    assert connects == []
+
+
+def test_malformed_transport_falls_back(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("XAI_API_KEY", UNIT_KEY)
+
+    class Garbage:
+        def request(self, method, url, headers, body, timeout):
+            del method, url, headers, body, timeout
+            return HttpResponse(200, b"\xff\xfe")
+
+    concept = load_concept(FIXTURE)
+    pack = generate_art(
+        concept,
+        tmp_path / "out",
+        game_only=True,
+        transport=Garbage(),
+        cache_dir=tmp_path / "cache",
+        skip_clip=True,
+        max_attempts=1,
+    )
+    assert pack.sprite.provider == "procedural"

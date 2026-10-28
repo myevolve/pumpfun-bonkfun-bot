@@ -75,6 +75,22 @@ def test_unsafe_concept_text_is_rejected(tmp_path, joke: str) -> None:
         build_image_prompt(concept, kind="sprite", game_only=True)
 
 
+@pytest.mark.parametrize(
+    "joke",
+    [
+        "Taylor Swift endorses our token",
+        "Harry Potter wears a Gucci logo",
+        "Nimbus endorses our token",
+    ],
+)
+def test_names_brands_and_endorsements_are_rejected(tmp_path, joke: str) -> None:
+    payload = load_fixture_dict()
+    payload["joke"] = joke
+    concept = load_concept(write_concept(tmp_path, payload, "unsafe-name.json"))
+    with pytest.raises(GuardrailError):
+        build_image_prompt(concept, kind="sprite", game_only=True)
+
+
 def test_provocative_humor_is_allowed(tmp_path) -> None:
     payload = load_fixture_dict()
     payload["joke"] = (

@@ -8,6 +8,8 @@ if (fn === "create") {
   result = mechanics.createState(payload);
 } else if (fn === "step") {
   result = mechanics.step(payload.state, payload.input, payload.dt);
+} else if (fn === "share") {
+  result = { text: mechanics.shareText(payload.score, payload.title, payload.suffix) };
 } else {
   throw new Error("unknown fn " + fn);
 }

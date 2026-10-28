@@ -62,10 +62,22 @@
           { x: 40, y: 0, w: 16, h: 16, kind: "good", vy: 140 },
           { x: 280, y: 30, w: 16, h: 16, kind: "bad", vy: 160 },
         ],
-        rand: seed,
+        rand: seed || 1,
+        spawned: 0,
       };
     }
     throw new Error("unknown template");
+  }
+
+  function shareText(score, title, suffix) {
+    return "I scored " + score + " in " + title + ". " + suffix;
+  }
+
+  function nextRand(state) {
+    let value = state.rand >>> 0;
+    value = (Math.imul(value, 1664525) + 1013904223) >>> 0;
+    state.rand = value;
+    return value / 4294967296;
   }
 
   function overlaps(a, b) {
@@ -182,6 +194,14 @@
       }
     }
     state.items = kept;
+    if (state.alive) {
+      while (state.items.length < 2) {
+        const lane = nextRand(state) < 0.5 ? 12 : state.width - 36;
+        const kind = nextRand(state) < 0.45 ? "bad" : "good";
+        state.items.push({ x: lane, y: -24, w: 16, h: 16, kind: kind, vy: 420 });
+        state.spawned = (state.spawned || 0) + 1;
+      }
+    }
     state.t += dt;
     return state;
   }
@@ -236,5 +256,11 @@
     }
   }
 
-  return { createState: createState, step: step, draw: draw, drawCreature: drawCreature };
+  return {
+    createState: createState,
+    step: step,
+    draw: draw,
+    drawCreature: drawCreature,
+    shareText: shareText,
+  };
 });

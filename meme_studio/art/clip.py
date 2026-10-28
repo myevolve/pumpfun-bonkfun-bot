@@ -70,9 +70,9 @@ def capture_gameplay(
         return ClipResult("skipped", None, "playwright unavailable", "none")
     try:
         _capture_with_playwright(html_path, dest, seconds)
-    except (OSError, RuntimeError, TimeoutError) as exc:
-        logger.warning("playwright capture skipped: %s", exc)
-        return ClipResult("skipped", None, f"playwright capture skipped: {exc}", "none")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("optional capture skipped: %s", type(exc).__name__)
+        return ClipResult("skipped", None, "capture skipped", "none")
     if not dest.is_file():
         return ClipResult("skipped", None, "playwright produced no file", "none")
     return ClipResult("captured", dest, "playwright", "playwright")
@@ -83,7 +83,7 @@ def _run_capturer(
 ) -> ClipResult:
     try:
         capturer(html_path, dest, seconds)
-    except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
+    except Exception as exc:  # noqa: BLE001
         return ClipResult("skipped", None, str(exc), "none")
     if not dest.is_file():
         return ClipResult("skipped", None, "capturer produced no file", "none")

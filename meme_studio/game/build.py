@@ -12,7 +12,7 @@ from meme_studio.art.clip import DEFAULT_CLIP_SECONDS, capture_gameplay
 from meme_studio.art.generate import ArtPack, generate_art
 from meme_studio.art.guardrails import GuardrailError, assert_concept_safe
 from meme_studio.game.concept import Concept, ConceptError, load_concept
-from meme_studio.game.hub import render_index, slugify
+from meme_studio.game.hub import render_index
 from meme_studio.game.page import DISCLOSURE, render_game_page
 
 _CATALOG_SCHEMA = "meme_studio.hub.v1"
@@ -68,7 +68,7 @@ def build(
     concept = load_concept(concept_path)
     assert_concept_safe(concept)
     out_dir.mkdir(parents=True, exist_ok=True)
-    slug = slugify(concept.title)
+    slug = concept.story_id
     game_dir = out_dir / "games" / slug
     assets = game_dir / "assets"
     art = generate_art(
@@ -155,6 +155,7 @@ def _maybe_capture(
         banner=art.banner,
         clip=captured,
         fallback_reason=art.fallback_reason,
+        network_used=art.network_used,
     )
 
 
@@ -187,7 +188,7 @@ def _manifest(concept: Concept, art: ArtPack, *, game_only: bool) -> dict[str, o
         "phase": "0-shadow",
         "posted": False,
         "deployed": False,
-        "network_used": False,
+        "network_used": art.network_used,
         "game_only": game_only,
         "story_id": concept.story_id,
         "template_id": concept.template_id,

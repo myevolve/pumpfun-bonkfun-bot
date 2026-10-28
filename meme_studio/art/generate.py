@@ -18,11 +18,16 @@ from meme_studio.art.prompts import (
 )
 from meme_studio.art.providers.base import AssetRecord
 from meme_studio.art.providers.imagine import (
+    DEFAULT_DAILY_COST_USD,
+    DEFAULT_DAILY_IMAGE_CAP,
+    DEFAULT_DAILY_VIDEO_CAP,
     ImagineConfig,
     ImagineError,
     ImagineProvider,
+    Transport,
     UrllibTransport,
     api_key_from_env,
+    default_budget_dir,
 )
 from meme_studio.art.providers.procedural import render_procedural
 from meme_studio.game.concept import Concept
@@ -49,6 +54,7 @@ class ArtPack:
     banner: AssetRecord
     clip: ClipResult
     fallback_reason: str | None
+    network_used: bool
 
 
 def generate_art(
@@ -95,9 +101,11 @@ def generate_art(
     assert_concept_safe(concept)
     out_dir.mkdir(parents=True, exist_ok=True)
     reasons: list[str] = []
+    client: Transport = transport if transport is not None else UrllibTransport()  # type: ignore[assignment]
+    meter = _Meter(client)
     imagine = _imagine(
         out_dir,
-        transport=transport,
+        transport=meter,
         cache_dir=cache_dir,
         post_check=post_check,
         max_attempts=max_attempts,
@@ -138,7 +146,27 @@ def generate_art(
         banner=assets["banner"],
         clip=clip,
         fallback_reason=fallback,
+        network_used=meter.used,
     )
+
+
+class _Meter:
+    """Count transport calls without changing the response."""
+
+    def __init__(self, inner: Transport) -> None:
+        self.inner = inner
+        self.used = False
+
+    def request(
+        self,
+        method: str,
+        url: str,
+        headers: dict[str, str],
+        body: bytes | None,
+        timeout: float,
+    ) -> object:
+        self.used = True
+        return self.inner.request(method, url, headers, body, timeout)
 
 
 def _imagine(
@@ -163,11 +191,18 @@ def _imagine(
     config = ImagineConfig(
         api_key=key,
         cache_dir=cache_dir or (out_dir / "imagine-cache"),
+        budget_dir=default_budget_dir(),
         timeout_s=timeout_s,
         max_attempts=max_attempts,
-        daily_image_cap=24 if daily_image_cap is None else daily_image_cap,
-        daily_video_cap=2 if daily_video_cap is None else daily_video_cap,
-        daily_cost_cap_usd=2.0 if daily_cost_cap_usd is None else daily_cost_cap_usd,
+        daily_image_cap=(
+            DEFAULT_DAILY_IMAGE_CAP if daily_image_cap is None else daily_image_cap
+        ),
+        daily_video_cap=(
+            DEFAULT_DAILY_VIDEO_CAP if daily_video_cap is None else daily_video_cap
+        ),
+        daily_cost_cap_usd=(
+            DEFAULT_DAILY_COST_USD if daily_cost_cap_usd is None else daily_cost_cap_usd
+        ),
     )
     client = transport if transport is not None else UrllibTransport()
     return ImagineProvider(

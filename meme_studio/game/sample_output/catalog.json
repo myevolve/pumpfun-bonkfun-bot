@@ -3,11 +3,11 @@
   "games": [
     {
       "story_id": "2026-10-28-sock-drawer",
-      "slug": "sock-drawer-drift",
+      "slug": "2026-10-28-sock-drawer",
       "title": "Sock Drawer Drift",
       "date": "2026-10-28",
       "template_id": "endless_runner",
-      "page": "games/sock-drawer-drift/index.html",
+      "page": "games/2026-10-28-sock-drawer/index.html",
       "game_only": false,
       "ticker": "SOCKDRIFT"
     }

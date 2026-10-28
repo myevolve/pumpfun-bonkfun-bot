@@ -204,6 +204,51 @@ def test_dodge_catches_goods_and_dies_on_bads() -> None:
     assert moved["player_x"] > state["player_x"]
 
 
+def test_full_share_draft_states_we_created_and_hold_the_coin(tmp_path) -> None:
+    from html import unescape
+    from urllib.parse import unquote
+
+    html = _page("endless_runner", tmp_path, game_only=False, sprite=None)
+    href = html.split('id="share-score" href="', 1)[1].split('"', 1)[0]
+    draft = unquote(unescape(href.split("text=", 1)[1]))
+    assert "We created this coin, hold a dev bag" in draft
+    updated = step_mechanics(
+        "share",
+        {
+            "score": 31,
+            "title": "Sock Drawer Drift",
+            "suffix": (
+                "We created this coin, hold a dev bag, and earn creator fees. "
+                "Collectible meme only; it can go to zero. "
+                "Parody and entertainment only. Not investment advice. "
+                "This is an automated account."
+            ),
+        },
+    )
+    assert "We created this coin, hold a dev bag" in str(updated["text"])
+    assert "31" in str(updated["text"])
+
+
+def test_dodge_keeps_spawning_after_the_opening_pair() -> None:
+    state = step_mechanics("create", {"template_id": "dodge_catch", "seed": 1})
+    for _frame in range(600):
+        state = step_mechanics(
+            "step", {"state": state, "input": NO_INPUT, "dt": 1 / 60}
+        )
+    assert int(state["spawned"]) > 2
+    assert len(state["items"]) >= 1
+    assert state["alive"] is True
+
+
+def test_restart_cancels_the_previous_frame(tmp_path) -> None:
+    html = _page("endless_runner", tmp_path, game_only=True, sprite=None)
+    assert "cancelAnimationFrame" in html
+    assert 'if (event.key === " ")' in html
+    assert html.index('if (event.key === " ")') < html.index(
+        "event.preventDefault()", html.index('if (event.key === " ")')
+    )
+
+
 def test_mechanics_file_is_syntax_checked() -> None:
     assert MECHANICS.is_file()
     import subprocess

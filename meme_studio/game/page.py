@@ -20,6 +20,35 @@ FULL_COIN_DISCLOSURE = (
     "Collectible meme only; it can go to zero."
 )
 
+
+def share_suffix(*, game_only: bool) -> str:
+    """Return the disclosure tail for a score draft.
+
+    Args:
+        game_only: Omit creator-holding wording when the page must not mention a coin.
+
+    Returns:
+        Text appended to the score sentence.
+    """
+    if game_only:
+        return DISCLOSURE
+    return f"{FULL_COIN_DISCLOSURE} {DISCLOSURE}"
+
+
+def share_draft(score: int, title: str, *, game_only: bool) -> str:
+    """Build one score-share draft. The viewer posts it; this function does not.
+
+    Args:
+        score: Points to advertise.
+        title: Game title.
+        game_only: Omit the holding disclosure.
+
+    Returns:
+        The draft text.
+    """
+    return f"I scored {score} in {title}. {share_suffix(game_only=game_only)}"
+
+
 _MECHANICS = Path(__file__).with_name("mechanics.js")
 _LABELS = {
     "endless_runner": "Endless runner",
@@ -59,10 +88,11 @@ def render_game_page(
             "accent": concept.palette.accent,
             "ink": concept.palette.ink,
         },
+        "share_suffix": share_suffix(game_only=game_only),
     }
     spec_json = json.dumps(spec).replace("<", "\\u003c")
     share = "https://x.com/intent/tweet?text=" + quote(
-        f"I scored 0 in {concept.title}. Parody and entertainment only."
+        share_draft(0, concept.title, game_only=game_only)
     )
     coin = "" if game_only else f'<p id="coin-disclosure">{FULL_COIN_DISCLOSURE}</p>'
     ticker = "" if game_only else f'<p id="ticker">{html.escape(concept.ticker)}</p>'
@@ -154,6 +184,7 @@ _BOOT = """
   let state = api.createState(spec);
   let running = false;
   let last = 0;
+  let frameId = 0;
   function frame(ts) {
     if (!running) return;
     const dt = Math.min(0.05, last ? (ts - last) / 1000 : 0.016);
@@ -165,16 +196,17 @@ _BOOT = """
     const shown = Math.floor(state.score);
     scoreEl.textContent = "Score: " + shown;
     share.href = "https://x.com/intent/tweet?text=" + encodeURIComponent(
-      "I scored " + shown + " in " + spec.title + ". Parody and entertainment only."
+      api.shareText(shown, spec.title, spec.share_suffix)
     );
-    if (state.alive) requestAnimationFrame(frame);
+    if (state.alive) frameId = requestAnimationFrame(frame);
     else running = false;
   }
   function startGame() {
+    if (frameId) cancelAnimationFrame(frameId);
     state = api.createState(spec);
     running = true;
     last = 0;
-    requestAnimationFrame(frame);
+    frameId = requestAnimationFrame(frame);
   }
   document.getElementById("play").addEventListener("click", startGame);
   function hold(id, key) {
@@ -196,7 +228,11 @@ _BOOT = """
     input.tap = true;
   });
   window.addEventListener("keydown", function (event) {
-    if (event.key === " " || event.key === "ArrowUp") {
+    if (event.key === " ") {
+      event.preventDefault();
+      input.jump = true;
+      input.tap = true;
+    } else if (event.key === "ArrowUp") {
       input.jump = true;
       input.tap = true;
     }

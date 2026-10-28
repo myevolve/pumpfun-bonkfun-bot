@@ -31,11 +31,11 @@ a { color: #f2c14e; }
 <button id="right" type="button">Right</button>
 <canvas id="game" width="360" height="640"></canvas>
 <p id="score">Score: 0</p>
-<a id="share-score" href="https://x.com/intent/tweet?text=I%20scored%200%20in%20Sock%20Drawer%20Drift.%20Parody%20and%20entertainment%20only.">Share score</a>
+<a id="share-score" href="https://x.com/intent/tweet?text=I%20scored%200%20in%20Sock%20Drawer%20Drift.%20Parody%20and%20entertainment%20only.%20Not%20investment%20advice.%20This%20is%20an%20automated%20account.">Share score</a>
 
 <footer id="disclosure">Parody and entertainment only. Not investment advice. This is an automated account.</footer>
 </main>
-<script type="application/json" id="game-spec">{"template_id": "endless_runner", "title": "Sock Drawer Drift", "seed": 495308190, "sprite": "assets/sprite.png", "background": "assets/background.png", "palette": {"background": "#1b1f3b", "primary": "#f2c14e", "secondary": "#e07a5f", "accent": "#81b29a", "ink": "#f4f1de"}}</script>
+<script type="application/json" id="game-spec">{"template_id": "endless_runner", "title": "Sock Drawer Drift", "seed": 495308190, "sprite": "assets/sprite.png", "background": "assets/background.png", "palette": {"background": "#1b1f3b", "primary": "#f2c14e", "secondary": "#e07a5f", "accent": "#81b29a", "ink": "#f4f1de"}, "share_suffix": "Parody and entertainment only. Not investment advice. This is an automated account."}</script>
 <script>
 "use strict";
 
@@ -101,10 +101,22 @@ a { color: #f2c14e; }
           { x: 40, y: 0, w: 16, h: 16, kind: "good", vy: 140 },
           { x: 280, y: 30, w: 16, h: 16, kind: "bad", vy: 160 },
         ],
-        rand: seed,
+        rand: seed || 1,
+        spawned: 0,
       };
     }
     throw new Error("unknown template");
+  }
+
+  function shareText(score, title, suffix) {
+    return "I scored " + score + " in " + title + ". " + suffix;
+  }
+
+  function nextRand(state) {
+    let value = state.rand >>> 0;
+    value = (Math.imul(value, 1664525) + 1013904223) >>> 0;
+    state.rand = value;
+    return value / 4294967296;
   }
 
   function overlaps(a, b) {
@@ -221,6 +233,14 @@ a { color: #f2c14e; }
       }
     }
     state.items = kept;
+    if (state.alive) {
+      while (state.items.length < 2) {
+        const lane = nextRand(state) < 0.5 ? 12 : state.width - 36;
+        const kind = nextRand(state) < 0.45 ? "bad" : "good";
+        state.items.push({ x: lane, y: -24, w: 16, h: 16, kind: kind, vy: 420 });
+        state.spawned = (state.spawned || 0) + 1;
+      }
+    }
     state.t += dt;
     return state;
   }
@@ -275,7 +295,13 @@ a { color: #f2c14e; }
     }
   }
 
-  return { createState: createState, step: step, draw: draw, drawCreature: drawCreature };
+  return {
+    createState: createState,
+    step: step,
+    draw: draw,
+    drawCreature: drawCreature,
+    shareText: shareText,
+  };
 });
 
 </script>
@@ -303,6 +329,7 @@ a { color: #f2c14e; }
   let state = api.createState(spec);
   let running = false;
   let last = 0;
+  let frameId = 0;
   function frame(ts) {
     if (!running) return;
     const dt = Math.min(0.05, last ? (ts - last) / 1000 : 0.016);
@@ -314,16 +341,17 @@ a { color: #f2c14e; }
     const shown = Math.floor(state.score);
     scoreEl.textContent = "Score: " + shown;
     share.href = "https://x.com/intent/tweet?text=" + encodeURIComponent(
-      "I scored " + shown + " in " + spec.title + ". Parody and entertainment only."
+      api.shareText(shown, spec.title, spec.share_suffix)
     );
-    if (state.alive) requestAnimationFrame(frame);
+    if (state.alive) frameId = requestAnimationFrame(frame);
     else running = false;
   }
   function startGame() {
+    if (frameId) cancelAnimationFrame(frameId);
     state = api.createState(spec);
     running = true;
     last = 0;
-    requestAnimationFrame(frame);
+    frameId = requestAnimationFrame(frame);
   }
   document.getElementById("play").addEventListener("click", startGame);
   function hold(id, key) {
@@ -345,7 +373,11 @@ a { color: #f2c14e; }
     input.tap = true;
   });
   window.addEventListener("keydown", function (event) {
-    if (event.key === " " || event.key === "ArrowUp") {
+    if (event.key === " ") {
+      event.preventDefault();
+      input.jump = true;
+      input.tap = true;
+    } else if (event.key === "ArrowUp") {
       input.jump = true;
       input.tap = true;
     }

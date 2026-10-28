@@ -5,7 +5,7 @@ from __future__ import annotations
 import html
 import re
 
-from meme_studio.game.page import DISCLOSURE
+from meme_studio.game.page import DISCLOSURE, FULL_COIN_DISCLOSURE
 
 
 def slugify(title: str) -> str:
@@ -31,6 +31,9 @@ def render_index(entries: list[dict[str, object]]) -> str:
         HTML document. It does not post or link to a wallet.
     """
     items = "\n".join(_item(entry) for entry in entries)
+    holding = ""
+    if any(isinstance(entry.get("ticker"), str) for entry in entries):
+        holding = f'<p id="holding-disclosure">{FULL_COIN_DISCLOSURE}</p>'
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -50,6 +53,7 @@ li {{ margin: 12px 0; }}
 <ul>
 {items}
 </ul>
+{holding}
 <footer id="disclosure">{DISCLOSURE}</footer>
 </main>
 </body>

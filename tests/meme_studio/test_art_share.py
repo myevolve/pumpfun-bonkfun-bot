@@ -17,7 +17,19 @@ from tests.meme_studio.support import (
     write_concept,
 )
 
-# ruff: noqa: ANN001, S101
+# ruff: noqa: ANN001, PLC0415, PLR2004, S101, S314
+
+
+def _ink_pixels(rgb: bytes, width: int, height: int) -> int:
+    ink = bytes.fromhex("f4f1de")
+    count = 0
+    start_row = max(0, height - 24)
+    for y in range(start_row, height):
+        for x in range(width):
+            index = (y * width + x) * 3
+            if rgb[index : index + 3] == ink:
+                count += 1
+    return count
 
 
 def test_logo_and_banner_match_stage_four_sizes(tmp_path) -> None:
@@ -72,15 +84,25 @@ def test_game_only_share_image_differs_and_omits_ticker(tmp_path) -> None:
     assert "SOCKDRIFT" not in json.dumps(hidden_meta)
     assert "SOCKDRIFT" in json.dumps(full_meta)
     assert "Not investment advice" in json.dumps(hidden_meta)
+    assert "We created this coin, hold a dev bag" in json.dumps(full_meta)
+    width, height, rgb = decode_png_rgb(full.path.read_bytes())
+    assert _ink_pixels(rgb, width, height) > 30
 
 
-def test_procedural_svg_has_no_external_image(tmp_path) -> None:
-    concept = load_concept(FIXTURE)
+def test_procedural_svg_is_namespaced_and_escaped(tmp_path) -> None:
+    import xml.etree.ElementTree as ET
+
+    payload = load_fixture_dict()
+    character = dict(payload["character"])  # type: ignore[arg-type]
+    character["name"] = 'Nimbus" onload="alert(1)'
+    payload["character"] = character
+    concept = load_concept(write_concept(tmp_path, payload, "svg.json"))
     record = render_procedural(
         concept, tmp_path / "sprite.png", kind="sprite", game_only=True
     )
-    svg_path = record.path.with_suffix(".svg")
-    svg = svg_path.read_text(encoding="utf-8")
-    assert "<svg" in svg
-    assert "http" not in svg
+    svg = record.path.with_suffix(".svg").read_text(encoding="utf-8")
+    root = ET.fromstring(svg)
+    assert root.tag == "{http://www.w3.org/2000/svg}svg"
+    assert "onload" not in root.attrib
     assert "<image" not in svg
+    assert "href=" not in svg

@@ -45,11 +45,29 @@ _RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     (
         re.compile(
             r"\b(nike|disney|marvel|pokemon|nintendo|mcdonald|coca-cola|"
-            r"cocacola|starbucks|iphone|playstation|xbox|batman|pikachu)\b|"
-            r"mickey mouse",
+            r"cocacola|starbucks|iphone|playstation|xbox|batman|pikachu|"
+            r"gucci|chanel|prada|hermes|rolex|versace|adidas|puma|supreme|"
+            r"lego|barbie|minecraft|fortnite|hogwarts)\b|"
+            r"mickey mouse|louis vuitton|hello kitty|star wars|harry potter",
             re.IGNORECASE,
         ),
         "brand",
+    ),
+    (
+        re.compile(
+            r"\b(endorses?|endorsed|endorsing|endorsement|"
+            r"sponsor(?:ed|s|ship)?|ambassador)\b",
+            re.IGNORECASE,
+        ),
+        "endorsement",
+    ),
+    (
+        re.compile(
+            r"\b(taylor swift|elon musk|donald trump|joe biden|kanye west|"
+            r"kim kardashian|beyonce|beyoncé|rihanna|harry potter)\b",
+            re.IGNORECASE,
+        ),
+        "person",
     ),
 )
 

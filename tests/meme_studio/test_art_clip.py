@@ -5,7 +5,7 @@ from __future__ import annotations
 from meme_studio.art.clip import DEFAULT_CLIP_SECONDS, capture_gameplay
 from meme_studio.art.providers.imagine import VIDEO_MODEL
 
-# ruff: noqa: ANN001, PLR2004, S101, TRY003
+# ruff: noqa: ANN001, PLC0415, PLR2004, S101, TRY003
 
 
 def test_default_clip_length_fits_the_pipeline_and_the_api() -> None:
@@ -48,3 +48,18 @@ def test_capturer_success_and_failure_are_bounded(tmp_path) -> None:
     assert failed.status == "skipped"
     assert "browser missing" in failed.reason
     assert not (tmp_path / "other.mp4").exists()
+
+
+def test_ffmpeg_failure_is_skipped(tmp_path, monkeypatch) -> None:
+    import subprocess
+
+    monkeypatch.setattr("meme_studio.art.clip.playwright_importable", lambda: True)
+
+    def boom(*_args: object, **_kwargs: object) -> None:
+        raise subprocess.CalledProcessError(1, ["ffmpeg"])
+
+    monkeypatch.setattr("meme_studio.art.clip._capture_with_playwright", boom)
+    result = capture_gameplay(tmp_path / "game.html", tmp_path / "clip.mp4", seconds=10)
+    assert result.status == "skipped"
+    assert result.path is None
+    assert "ffmpeg" in result.reason.lower() or "skipped" in result.reason.lower()

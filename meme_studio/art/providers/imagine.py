@@ -19,11 +19,13 @@ The API key is read from ``XAI_API_KEY`` by callers. It is sent only as an
 Authorization header to ``api.x.ai`` and is never written to logs, metadata,
 or request URLs.
 """
-# ruff: noqa: N818, PLR0913, S310, TC003, TRY003
+# ruff: noqa: BLE001, N818, PLR0913, PLR0917, PLR2004, S310, TC003, TRY003
 
 from __future__ import annotations
 
 import base64
+import binascii
+import fcntl
 import hashlib
 import json
 import logging
@@ -58,6 +60,10 @@ _MAX_DURATION_S = 15
 _HTTP_TOO_MANY = 429
 _HTTP_BAD = 400
 _HTTP_SERVER = 500
+# Operator policy assumptions. These are not limits enforced by xAI.
+DEFAULT_DAILY_IMAGE_CAP = 24
+DEFAULT_DAILY_VIDEO_CAP = 2
+DEFAULT_DAILY_COST_USD = 2.0
 
 
 class ImagineError(RuntimeError):
@@ -97,11 +103,12 @@ class ImagineConfig:
 
     api_key: str
     cache_dir: Path
+    budget_dir: Path | None = None
     timeout_s: float = 30.0
     max_attempts: int = 3
-    daily_image_cap: int = 24
-    daily_video_cap: int = 2
-    daily_cost_cap_usd: float = 2.0
+    daily_image_cap: int = DEFAULT_DAILY_IMAGE_CAP
+    daily_video_cap: int = DEFAULT_DAILY_VIDEO_CAP
+    daily_cost_cap_usd: float = DEFAULT_DAILY_COST_USD
     image_model: str = IMAGE_MODEL
     video_model: str = VIDEO_MODEL
     clip_seconds: int = 10
@@ -112,6 +119,62 @@ class ImagineConfig:
             f"ImagineConfig(cache_dir={self.cache_dir!r}, timeout_s={self.timeout_s}, "
             f"max_attempts={self.max_attempts})"
         )
+
+
+def default_budget_dir() -> Path:
+    """Return the shared daily Imagine ledger directory.
+
+    ``MEME_STUDIO_IMAGINE_BUDGET_DIR`` overrides the default. The ledger is not
+    stored beside one game output, so two builds share one budget.
+
+    Returns:
+        Directory for ``usage-YYYY-MM-DD.json``.
+    """
+    override = os.environ.get("MEME_STUDIO_IMAGINE_BUDGET_DIR", "").strip()
+    if override:
+        return Path(override)
+    return (
+        Path(__file__).resolve().parents[3]
+        / ".state"
+        / "meme-studio"
+        / "imagine-budget"
+    )
+
+
+class SafeRedirect(urllib.request.HTTPRedirectHandler):
+    """Drop Authorization when a redirect leaves https://api.x.ai/."""
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: object,
+        code: int,
+        msg: str,
+        headers: object,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        """Rebuild a redirect without forwarding credentials off-origin.
+
+        Args:
+            req: Original request.
+            fp: Response body, unused.
+            code: Redirect status.
+            msg: Reason phrase.
+            headers: Response headers.
+            newurl: Destination URL.
+
+        Returns:
+            The redirected request, or None when the status is not a redirect.
+        """
+        del fp, headers
+        redirected = urllib.request.HTTPRedirectHandler.redirect_request(
+            self, req, None, code, msg, {}, newurl
+        )
+        if redirected is None:
+            return None
+        if not newurl.startswith(_API_PREFIX):
+            redirected.remove_header("Authorization")
+        return redirected
 
 
 def api_key_from_env() -> str | None:
@@ -149,12 +212,20 @@ class UrllibTransport:
         """
         if not url.startswith("https://"):
             raise ImagineError("https")
-        request = urllib.request.Request(url, data=body, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
-                return HttpResponse(response.status, response.read())
+            request = urllib.request.Request(
+                url, data=body, headers=headers, method=method
+            )
+            opener = urllib.request.build_opener(SafeRedirect)
+            with opener.open(request, timeout=timeout) as response:
+                status = int(getattr(response, "status", 200))
+                return HttpResponse(status, response.read())
         except urllib.error.HTTPError as exc:
             return HttpResponse(exc.code, exc.read())
+        except ImagineError:
+            raise
+        except Exception:
+            raise ImagineError("transport") from None
 
 
 class ImagineProvider:
@@ -212,6 +283,7 @@ class ImagineProvider:
             ImagineError: The request failed.
             GuardrailError: Moderation or the post-check rejected the image.
         """
+        self._reject_bad_key()
         assert_safe_text(creative_prompt, field="creative_prompt")
         digest = _digest(
             {
@@ -225,10 +297,12 @@ class ImagineProvider:
         )
         cached = self._read_cache(digest)
         if cached is not None:
+            cached_meta = dict(cached[1])
+            cached_meta["cache_hit"] = True
+            post_check_asset(cached_meta, hook=self._post_check)
             return self._write_asset(
-                dest, cached[0], cached[1], kind=kind, cache_hit=True
+                dest, cached[0], cached_meta, kind=kind, cache_hit=True
             )
-        self._reserve(images=1, videos=0, estimate_ticks=IMAGE_ESTIMATE_TICKS)
         payload = self._request_json(
             "POST",
             IMAGE_ENDPOINT,
@@ -241,6 +315,7 @@ class ImagineProvider:
                 "resolution": "1k",
                 "aspect_ratio": aspect_ratio,
             },
+            bill=(1, 0, IMAGE_ESTIMATE_TICKS),
         )
         data = payload.get("data")
         if not isinstance(data, list) or not data or not isinstance(data[0], dict):
@@ -248,9 +323,11 @@ class ImagineProvider:
         encoded = data[0].get("b64_json")
         if not isinstance(encoded, str):
             raise ImagineError("image response missing b64_json")
-        blob = base64.b64decode(encoded)
-        respect = data[0].get("respect_moderation", True)
-        ticks = _usage_ticks(payload, IMAGE_ESTIMATE_TICKS)
+        blob = _decode_png(encoded)
+        respect = _moderation_flag(data[0].get("respect_moderation"))
+        observed = _usage_ticks(payload)
+        if observed is not None:
+            self._reconcile(IMAGE_ESTIMATE_TICKS, observed)
         meta = _meta(
             model=self.config.image_model,
             prompt=prompt,
@@ -258,10 +335,13 @@ class ImagineProvider:
             style=style,
             kind=kind,
             aspect_ratio=aspect_ratio,
-            ticks=ticks,
-            respect=respect is not False,
+            observed_ticks=observed,
+            estimate_ticks=IMAGE_ESTIMATE_TICKS,
+            respect=respect,
         )
-        self._commit(images=1, videos=0, ticks=ticks)
+        revised = data[0].get("revised_prompt")
+        if isinstance(revised, str):
+            meta["revised_prompt"] = revised
         post_check_asset(meta, hook=self._post_check)
         self._write_cache(digest, blob, meta)
         return self._write_asset(dest, blob, meta, kind=kind, cache_hit=False)
@@ -294,6 +374,7 @@ class ImagineProvider:
             ImagineError: The request failed.
             GuardrailError: Moderation or the post-check rejected the clip.
         """
+        self._reject_bad_key()
         assert_safe_text(creative_prompt, field="creative_prompt")
         requested = self.config.clip_seconds if duration_s is None else duration_s
         duration = min(_MAX_DURATION_S, max(_MIN_DURATION_S, int(requested)))
@@ -309,11 +390,13 @@ class ImagineProvider:
         )
         cached = self._read_cache(digest)
         if cached is not None:
+            cached_meta = dict(cached[1])
+            cached_meta["cache_hit"] = True
+            post_check_asset(cached_meta, hook=self._post_check)
             return self._write_asset(
-                dest, cached[0], cached[1], kind="clip", cache_hit=True
+                dest, cached[0], cached_meta, kind="clip", cache_hit=True
             )
         estimate = duration * VIDEO_TICKS_PER_SEC
-        self._reserve(images=0, videos=1, estimate_ticks=estimate)
         started = self._request_json(
             "POST",
             VIDEO_ENDPOINT,
@@ -324,6 +407,7 @@ class ImagineProvider:
                 "aspect_ratio": aspect_ratio,
                 "resolution": "480p",
             },
+            bill=(0, 1, estimate),
         )
         request_id = started.get("request_id")
         if not isinstance(request_id, str) or not request_id:
@@ -332,8 +416,10 @@ class ImagineProvider:
         video = finished.get("video")
         if not isinstance(video, dict):
             raise ImagineError("video response missing video")
-        respect = video.get("respect_moderation", True)
-        ticks = _usage_ticks(finished, estimate)
+        respect = _moderation_flag(video.get("respect_moderation"))
+        observed = _usage_ticks(finished)
+        if observed is not None:
+            self._reconcile(estimate, observed)
         meta = _meta(
             model=str(finished.get("model") or self.config.video_model),
             prompt=prompt,
@@ -341,11 +427,11 @@ class ImagineProvider:
             style=style,
             kind="clip",
             aspect_ratio=aspect_ratio,
-            ticks=ticks,
-            respect=respect is not False,
+            observed_ticks=observed,
+            estimate_ticks=estimate,
+            respect=respect,
         )
         meta["request_id"] = request_id
-        self._commit(images=0, videos=1, ticks=ticks)
         post_check_asset(meta, hook=self._post_check)
         url = video.get("url")
         if not isinstance(url, str) or not url:
@@ -372,28 +458,48 @@ class ImagineProvider:
     def _download(self, url: str) -> bytes:
         if self.config.api_key and self.config.api_key in url:
             raise ImagineError("refusing a download url that contains the api key")
-        response = self._call("GET", url, None)
+        response = self._call("GET", url, None, bill=None)
         if response.status >= _HTTP_BAD:
-            raise ImagineError(f"status {response.status}")
+            raise ImagineError("status")
+        if b"ftyp" not in response.body[:32]:
+            raise ImagineError("video-bytes")
         return response.body
 
     def _request_json(
-        self, method: str, url: str, payload: dict[str, object] | None
+        self,
+        method: str,
+        url: str,
+        payload: dict[str, object] | None,
+        *,
+        bill: tuple[int, int, int] | None = None,
     ) -> dict[str, object]:
         body = None if payload is None else json.dumps(payload).encode()
-        response = self._call(method, url, body)
+        response = self._call(method, url, body, bill=bill)
         try:
-            parsed = json.loads(response.body.decode() or "{}")
+            text = response.body.decode("utf-8")
+        except UnicodeDecodeError:
+            raise ImagineError("encoding") from None
+        try:
+            parsed = json.loads(text or "{}")
         except json.JSONDecodeError:
             raise ImagineError("response was not json") from None
         if not isinstance(parsed, dict):
             raise ImagineError("response was not an object")
         return parsed
 
-    def _call(self, method: str, url: str, body: bytes | None) -> HttpResponse:
+    def _call(
+        self,
+        method: str,
+        url: str,
+        body: bytes | None,
+        *,
+        bill: tuple[int, int, int] | None,
+    ) -> HttpResponse:
         delay = RETRY_SLEEP_S
         last = "request failed"
         for attempt in range(self.config.max_attempts):
+            if bill is not None:
+                self._charge(*bill)
             try:
                 response = self._transport.request(
                     method,
@@ -402,65 +508,106 @@ class ImagineProvider:
                     body,
                     self.config.timeout_s,
                 )
-            except (OSError, TimeoutError) as exc:
+            except CapExceeded:
+                raise
+            except Exception as exc:
                 last = self._redact(str(exc))
+                logger.warning("imagine request failed: %s", last)
                 if attempt + 1 >= self.config.max_attempts:
-                    logger.warning("imagine request failed: %s", last)
-                    raise ImagineError(last) from None
+                    raise ImagineError("transport") from None
                 self._sleeper(delay)
                 delay *= 2
                 continue
             if response.status == _HTTP_TOO_MANY or response.status >= _HTTP_SERVER:
                 last = f"status {response.status}"
                 if attempt + 1 >= self.config.max_attempts:
-                    logger.warning("imagine request failed: %s", last)
                     raise ImagineError(last)
                 self._sleeper(delay)
                 delay *= 2
                 continue
             if response.status >= _HTTP_BAD:
-                message = self._redact(f"status {response.status}")
-                logger.warning("imagine request failed: %s", message)
-                raise ImagineError(message)
+                if bill is not None:
+                    self._release(*bill)
+                raise ImagineError("status")
             return response
-        logger.warning("imagine request failed: %s", last)
-        raise ImagineError(self._redact(last))
+        raise ImagineError(last)
 
-    def _reserve(self, *, images: int, videos: int, estimate_ticks: int) -> None:
-        ledger = self._read_ledger()
-        if ledger[0] + images > self.config.daily_image_cap:
-            raise CapExceeded("daily image cap reached")
-        if ledger[1] + videos > self.config.daily_video_cap:
-            raise CapExceeded("daily video cap reached")
+    def _reject_bad_key(self) -> None:
+        key = self.config.api_key
+        if any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in key):
+            raise ImagineError("invalid-key")
+
+    def _charge(self, images: int, videos: int, ticks: int) -> None:
         cap_ticks = round(self.config.daily_cost_cap_usd * USD_TICKS)
-        if ledger[2] + estimate_ticks > cap_ticks:
-            raise CapExceeded("daily cost cap reached")
 
-    def _commit(self, *, images: int, videos: int, ticks: int) -> None:
-        images_used, videos_used, cost = self._read_ledger()
-        self._write_ledger(images_used + images, videos_used + videos, cost + ticks)
+        def mutate(ledger: dict[str, int]) -> dict[str, int]:
+            if ledger["images"] + images > self.config.daily_image_cap:
+                raise CapExceeded("cap")
+            if ledger["videos"] + videos > self.config.daily_video_cap:
+                raise CapExceeded("cap")
+            if ledger["cost_ticks"] + ticks > cap_ticks:
+                raise CapExceeded("cap")
+            ledger["images"] += images
+            ledger["videos"] += videos
+            ledger["cost_ticks"] += ticks
+            return ledger
+
+        self._mutate_ledger(mutate)
+
+    def _release(self, images: int, videos: int, ticks: int) -> None:
+        def mutate(ledger: dict[str, int]) -> dict[str, int]:
+            ledger["images"] = max(0, ledger["images"] - images)
+            ledger["videos"] = max(0, ledger["videos"] - videos)
+            ledger["cost_ticks"] = max(0, ledger["cost_ticks"] - ticks)
+            return ledger
+
+        self._mutate_ledger(mutate)
+
+    def _reconcile(self, reserved_ticks: int, actual_ticks: int) -> None:
+        delta = actual_ticks - reserved_ticks
+        if delta == 0:
+            return
+
+        def mutate(ledger: dict[str, int]) -> dict[str, int]:
+            ledger["cost_ticks"] = max(0, ledger["cost_ticks"] + delta)
+            return ledger
+
+        self._mutate_ledger(mutate)
 
     def _ledger_path(self) -> Path:
+        root = self.config.budget_dir or self.config.cache_dir
         day = self._clock().date().isoformat()
-        return self.config.cache_dir / f"usage-{day}.json"
+        return root / f"usage-{day}.json"
 
-    def _read_ledger(self) -> tuple[int, int, int]:
-        path = self._ledger_path()
-        if not path.is_file():
-            return (0, 0, 0)
-        raw = json.loads(path.read_text(encoding="utf-8"))
-        return (int(raw["images"]), int(raw["videos"]), int(raw["cost_ticks"]))
-
-    def _write_ledger(self, images: int, videos: int, cost_ticks: int) -> None:
+    def _mutate_ledger(
+        self, mutator: Callable[[dict[str, int]], dict[str, int]]
+    ) -> None:
         path = self._ledger_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "date": self._clock().date().isoformat(),
-            "images": images,
-            "videos": videos,
-            "cost_ticks": cost_ticks,
-        }
-        path.write_text(json.dumps(payload), encoding="utf-8")
+        with path.open("a+") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            handle.seek(0)
+            raw = handle.read()
+            if raw.strip():
+                loaded = json.loads(raw)
+                ledger = {
+                    "images": int(loaded.get("images", 0)),
+                    "videos": int(loaded.get("videos", 0)),
+                    "cost_ticks": int(loaded.get("cost_ticks", 0)),
+                }
+            else:
+                ledger = {"images": 0, "videos": 0, "cost_ticks": 0}
+            updated = mutator(ledger)
+            payload = {
+                "date": self._clock().date().isoformat(),
+                "images": updated["images"],
+                "videos": updated["videos"],
+                "cost_ticks": updated["cost_ticks"],
+            }
+            handle.seek(0)
+            handle.truncate()
+            handle.write(json.dumps(payload))
+            handle.flush()
 
     def _read_cache(self, digest: str) -> tuple[bytes, dict[str, object]] | None:
         folder = self.config.cache_dir / "blobs"
@@ -492,11 +639,10 @@ class ImagineProvider:
         dest.write_bytes(blob)
         stored = dict(meta)
         stored["cache_hit"] = cache_hit
-        if cache_hit:
-            stored["cost_usd"] = 0
         meta_path = meta_path_for(dest)
         meta_path.write_text(json.dumps(stored, indent=2), encoding="utf-8")
-        cost = float(stored["cost_usd"])
+        raw_cost = stored.get("cost_usd")
+        cost = 0.0 if raw_cost is None else float(raw_cost)
         return AssetRecord(dest, meta_path, "imagine", kind, cache_hit, cost)
 
     def _redact(self, text: str) -> str:
@@ -520,11 +666,32 @@ def _digest(payload: dict[str, object]) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def _usage_ticks(payload: dict[str, object], estimate: int) -> int:
+def _usage_ticks(payload: dict[str, object]) -> int | None:
     usage = payload.get("usage")
-    if isinstance(usage, dict) and isinstance(usage.get("cost_in_usd_ticks"), int):
-        return int(usage["cost_in_usd_ticks"])
-    return estimate
+    if not isinstance(usage, dict) or "cost_in_usd_ticks" not in usage:
+        return None
+    ticks = usage.get("cost_in_usd_ticks")
+    if isinstance(ticks, bool) or not isinstance(ticks, int):
+        return None
+    if ticks < 0:
+        raise ImagineError("usage")
+    return ticks
+
+
+def _moderation_flag(value: object) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    return None
+
+
+def _decode_png(encoded: str) -> bytes:
+    try:
+        blob = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError):
+        raise ImagineError("image-bytes") from None
+    if not blob.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise ImagineError("image-bytes")
+    return blob
 
 
 def _meta(
@@ -535,9 +702,11 @@ def _meta(
     style: str,
     kind: str,
     aspect_ratio: str,
-    ticks: int,
-    respect: bool,
+    observed_ticks: int | None,
+    estimate_ticks: int,
+    respect: bool | None,
 ) -> dict[str, object]:
+    observed = None if observed_ticks is None else observed_ticks / USD_TICKS
     return {
         "provider": "imagine",
         "model": model,
@@ -547,7 +716,9 @@ def _meta(
         "kind": kind,
         "aspect_ratio": aspect_ratio,
         "cache_hit": False,
-        "cost_usd": ticks / USD_TICKS,
+        "cost_usd": observed,
+        "cost_estimate_usd": estimate_ticks / USD_TICKS,
+        "cost_observation": "observed" if observed_ticks is not None else "estimated",
         "posted": False,
         "respect_moderation": respect,
     }
