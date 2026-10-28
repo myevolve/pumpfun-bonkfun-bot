@@ -1,0 +1,15 @@
+{
+  "schema": "meme_studio.hub.v1",
+  "games": [
+    {
+      "story_id": "2026-10-28-sock-drawer",
+      "slug": "sock-drawer-drift",
+      "title": "Sock Drawer Drift",
+      "date": "2026-10-28",
+      "template_id": "endless_runner",
+      "page": "games/sock-drawer-drift/index.html",
+      "game_only": false,
+      "ticker": "SOCKDRIFT"
+    }
+  ]
+}
