@@ -1,0 +1,145 @@
+{
+  "sol_usd": "101.47",
+  "sol_usd_source": "fixture",
+  "concepts": [
+    {"story_id": "story-kiwi", "terms": ["kiwi"]},
+    {"story_id": "story-marmot", "terms": ["marmot"]}
+  ],
+  "coins": [
+    {
+      "mint": "So10000paperMint",
+      "create_ts": 1700000000,
+      "creator": "CreatorPaper111",
+      "name": "Kiwi Flight",
+      "symbol": "KIWI",
+      "uri": "https://example.invalid/kiwi.json",
+      "description": "A flightless bird joke about the kiwi story",
+      "dev_buy_sol": "0.05",
+      "mayhem": false,
+      "links": {
+        "telegram": "https://t.me/kiwi",
+        "x": "https://x.com/kiwi",
+        "website": "https://kiwi.example"
+      },
+      "quote_mint": "sol",
+      "graduation_ts": null,
+      "trades": [
+        {
+          "ts": 1700000001,
+          "user": "CreatorPaper111",
+          "is_buy": true,
+          "sol_amount": "0.05",
+          "creator_fee": "0.0001"
+        },
+        {
+          "ts": 1700000100,
+          "user": "BuyerA",
+          "is_buy": true,
+          "sol_amount": "4.0",
+          "creator_fee": "0.012"
+        }
+      ],
+      "pumpswap_coin_creator_fee_rows": []
+    },
+    {
+      "mint": "So10002paperMint",
+      "create_ts": 1700001000,
+      "creator": "CreatorPaper111",
+      "name": "Kiwi Two",
+      "symbol": "KIWI2",
+      "uri": "https://example.invalid/kiwi2.json",
+      "description": "Another kiwi coin",
+      "dev_buy_sol": "0.05",
+      "mayhem": false,
+      "links": {
+        "tg": "https://t.me/kiwi2",
+        "x": "https://x.com/kiwi2",
+        "site": "https://kiwi2.example"
+      },
+      "quote_mint": "sol",
+      "graduation_ts": null,
+      "trades": [
+        {
+          "ts": 1700001100,
+          "user": "BuyerB",
+          "is_buy": true,
+          "sol_amount": "1.0",
+          "creator_fee": "0.003"
+        }
+      ],
+      "pumpswap_coin_creator_fee_rows": [
+        {"ts": 1700002000, "creator_fee": "0.001"}
+      ]
+    },
+    {
+      "mint": "So10001paperMint",
+      "create_ts": 1700002000,
+      "creator": "CreatorPaper111",
+      "name": "Plain Coin",
+      "symbol": "PLAIN",
+      "uri": "https://example.invalid/plain.json",
+      "description": "No news term here",
+      "dev_buy_sol": "0.10",
+      "mayhem": false,
+      "links": {
+        "telegram": "https://t.me/plain",
+        "website": "https://plain.example"
+      },
+      "quote_mint": "sol",
+      "graduation_ts": null,
+      "trades": [],
+      "pumpswap_coin_creator_fee_rows": []
+    },
+    {
+      "mint": "So10003paperMint",
+      "create_ts": 1700003000,
+      "creator": "CreatorPaper111",
+      "name": "Big Kiwi Dev",
+      "symbol": "KIWI",
+      "uri": "https://example.invalid/big.json",
+      "description": "kiwi with a large dev buy",
+      "dev_buy_sol": "1.0",
+      "mayhem": true,
+      "links": {
+        "telegram": "https://t.me/big",
+        "x": "https://x.com/big"
+      },
+      "quote_mint": "sol",
+      "graduation_ts": null,
+      "trades": [],
+      "pumpswap_coin_creator_fee_rows": []
+    },
+    {
+      "mint": "So10004paperMint",
+      "create_ts": 1700004000,
+      "creator": "CreatorPaper111",
+      "name": "Kiwi Dollar",
+      "symbol": "KIWI",
+      "uri": "https://example.invalid/usdc.json",
+      "description": "kiwi but not SOL quoted",
+      "dev_buy_sol": "0.05",
+      "mayhem": false,
+      "links": {"telegram": "https://t.me/usdc", "x": "https://x.com/usdc"},
+      "quote_mint": "usdc",
+      "graduation_ts": null,
+      "trades": [],
+      "pumpswap_coin_creator_fee_rows": []
+    },
+    {
+      "mint": "So10005paperMint",
+      "create_ts": 1700005000,
+      "creator": "CreatorPaper111",
+      "name": "Kiwifruit Squash",
+      "symbol": "SQUASH",
+      "uri": "https://example.invalid/squash.json",
+      "description": "A squash coin whose name is one compound word",
+      "dev_buy_sol": "0.20",
+      "mayhem": false,
+      "links": {"x": "https://x.com/squash"},
+      "quote_mint": "So11111111111111111111111111111111111111112",
+      "graduation_ts": null,
+      "trades": [],
+      "pumpswap_coin_creator_fee_rows": []
+    }
+  ]
+}
