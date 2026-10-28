@@ -142,7 +142,13 @@ def test_missing_token_file_fails_closed(
     monkeypatch.delenv("REDDIT_TOS_ALLOWED", raising=False)
     fixture_dir = tmp_path / "fixtures"
     fixture_dir.mkdir()
-    for name in ("google_news.rss", "history.json", "reddit.json", "x.json"):
+    for name in (
+        "google_news.rss",
+        "history.json",
+        "reddit.json",
+        "x.json",
+        "copycats.json",
+    ):
         (fixture_dir / name).write_bytes((FIXTURES / name).read_bytes())
     out = tmp_path / "out"
     code = main(
@@ -214,6 +220,9 @@ def test_default_output_dir_is_under_the_working_directory(
 def test_module_entrypoint(tmp_path: Path) -> None:
     env = os.environ.copy()
     env.pop("REDDIT_TOS_ALLOWED", None)
+    src = str(ROOT / "src")
+    current = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = src if not current else src + os.pathsep + current
     result = subprocess.run(
         [
             sys.executable,
@@ -240,7 +249,10 @@ def test_module_entrypoint(tmp_path: Path) -> None:
 
 
 def test_package_source_does_not_touch_wallets_or_posts() -> None:
-    roots = [ROOT / "meme_studio" / "trends", ROOT / "meme_studio" / "concept"]
+    roots = [
+        ROOT / "src" / "meme_studio" / "trends",
+        ROOT / "src" / "meme_studio" / "concept",
+    ]
     forbidden = ("SOLANA_PRIVATE_KEY", "load_dotenv", "Keypair", "solders")
     for root in roots:
         for path in root.rglob("*.py"):

@@ -217,7 +217,11 @@ def test_http_x_client_reads_the_named_env_and_never_posts(
             return 200, b'{"data":[{"id":"1","text":"hello raccoon"}]}'
         return 200, b'{"data":[{"name":"Raccoon Donut","tweet_count":3}]}'
 
-    client = HttpXClient(transport=transport, token_env="X_BEARER_TOKEN")
+    client = HttpXClient(
+        transport=transport,
+        token_env="X_BEARER_TOKEN",
+        limiter=_wide_limiter(),
+    )
     trends = client.get_trends(woeid=23424977)
     news = client.search_news(query="raccoon", max_age_hours=1)
     posts = client.search_posts(query="raccoon", limit=5)
@@ -247,13 +251,21 @@ def test_x_client_errors_do_not_echo_the_token(
     ) -> tuple[int, bytes]:
         raise TimeoutError
 
-    client = HttpXClient(transport=transport, token_env="X_BEARER_TOKEN")
+    client = HttpXClient(
+        transport=transport,
+        token_env="X_BEARER_TOKEN",
+        limiter=_wide_limiter(),
+    )
     with pytest.raises(XClientError) as exc:
         client.get_trends(woeid=23424977)
     assert "super-secret-value" not in str(exc.value)
 
     monkeypatch.delenv("X_BEARER_TOKEN")
-    bare = HttpXClient(transport=transport, token_env="X_BEARER_TOKEN")
+    bare = HttpXClient(
+        transport=transport,
+        token_env="X_BEARER_TOKEN",
+        limiter=_wide_limiter(),
+    )
     with pytest.raises(XClientConfigError) as missing:
         bare.get_trends(woeid=23424977)
     assert "X_BEARER_TOKEN" in str(missing.value)
@@ -331,6 +343,15 @@ def test_stories_group_titles_and_attach_trends_and_copycats() -> None:
     )
     assert len(attached[0].copycats) == 1
     assert attached[0].copycats[0].ticker == "SUPRAC"
+
+
+def _wide_limiter() -> RateLimiter:
+    return RateLimiter(
+        max_calls=10,
+        per_seconds=60,
+        clock=lambda: 0.0,
+        sleep=lambda _seconds: None,
+    )
 
 
 def test_unmatched_trend_becomes_its_own_story() -> None:

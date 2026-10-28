@@ -48,18 +48,21 @@ def build_stories(
 
 def attach_copycats(
     stories: Sequence[StoryInput],
-    coins: Sequence[CopycatCoin],
+    coins: Sequence[CopycatCoin] | None,
 ) -> tuple[StoryInput, ...]:
     """Attach coins whose name or ticker contains a title keyword.
 
     Args:
         stories: Grouped stories.
-        coins: Public same-story coins. Matching is case-insensitive.
+        coins: Public same-story coins, or None when no copycat file was loaded.
+            None is unknown coverage, not an observation of zero coins.
 
     Returns:
         Copies of the stories. Keywords shorter than 4 characters and a small
         stop list are ignored.
     """
+    if coins is None:
+        return tuple(_with_copycats(story, None) for story in stories)
     attached: list[StoryInput] = []
     for story in stories:
         keys = _keywords(story.title)
@@ -69,19 +72,24 @@ def attach_copycats(
             if any(word in f"{coin.name} {coin.ticker}".casefold() for word in keys)
         ]
         matched.sort(key=lambda coin: coin.ticker)
-        attached.append(
-            StoryInput(
-                title=story.title,
-                summary=story.summary,
-                detected_at=story.detected_at,
-                sources=story.sources,
-                outlets=story.outlets,
-                post_counts=story.post_counts,
-                copycats=tuple(matched),
-                category=story.category,
-            )
-        )
+        attached.append(_with_copycats(story, tuple(matched)))
     return tuple(attached)
+
+
+def _with_copycats(
+    story: StoryInput,
+    copycats: tuple[CopycatCoin, ...] | None,
+) -> StoryInput:
+    return StoryInput(
+        title=story.title,
+        summary=story.summary,
+        detected_at=story.detected_at,
+        sources=story.sources,
+        outlets=story.outlets,
+        post_counts=story.post_counts,
+        copycats=copycats,
+        category=story.category,
+    )
 
 
 def _synthetic_trends(

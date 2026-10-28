@@ -5,6 +5,7 @@ open question, so the fallback is this local list.
 """
 
 import re
+import unicodedata
 
 BRANDS: frozenset[str] = frozenset(
     {
@@ -64,7 +65,7 @@ def find_brands(text: str) -> tuple[str, ...]:
     Returns:
         Brand keys from ``BRANDS``. Empty when nothing matches.
     """
-    folded = text.casefold()
+    folded = _fold_brand_text(text)
     found: list[tuple[int, str]] = []
     for brand in BRANDS:
         match = re.search(rf"\b{re.escape(brand)}\b", folded)
@@ -75,3 +76,11 @@ def find_brands(text: str) -> tuple[str, ...]:
         found.append((mcdonalds.start(), "mcdonalds"))
     found.sort(key=lambda item: item[0])
     return tuple(brand for _, brand in found)
+
+
+def _fold_brand_text(text: str) -> str:
+    """Fold diacritics and in-word punctuation so Coca-Cola matches cocacola."""
+    decomposed = unicodedata.normalize("NFKD", text)
+    stripped = "".join(char for char in decomposed if not unicodedata.combining(char))
+    folded = stripped.casefold().replace("\u2019", "'")
+    return re.sub(r"(?<=[a-z0-9])[-'](?=[a-z0-9])", "", folded)

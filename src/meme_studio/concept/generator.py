@@ -4,7 +4,12 @@ from collections.abc import Sequence
 
 from meme_studio.concept.collisions import TokenLookup, check_candidate
 from meme_studio.concept.hooks import extract
-from meme_studio.concept.schema import ConceptCandidate, StoryCard, ThemePalette
+from meme_studio.concept.schema import (
+    SHADOW_DISCLOSURE,
+    ConceptCandidate,
+    StoryCard,
+    ThemePalette,
+)
 
 PALETTES: tuple[ThemePalette, ...] = (
     ThemePalette("#1B4D3E", "#F4E8C1", "#E07A5F", "#102A22"),
@@ -147,5 +152,6 @@ def _description(name: str, animal: str, obj: str, joke: str) -> str:
         f"The browser game follows the {animal} and a {obj} through one short level. "
         f"This draft is a collectible meme concept with no launch, no posting, "
         f"and no claim that a holder will gain anything. "
-        f"The character is invented and is not a real person or a brand."
+        f"The character is invented and is not a real person or a brand. "
+        f"{SHADOW_DISCLOSURE}"
     )

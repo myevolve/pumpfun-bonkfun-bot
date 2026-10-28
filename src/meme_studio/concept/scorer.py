@@ -30,7 +30,11 @@ _RECENT = timedelta(minutes=30)
 _BASELINE = timedelta(minutes=390)
 _OUTLET_WINDOW = timedelta(minutes=60)
 _BIN_COUNT = 12
+_MIN_OBSERVED_BINS = 2
 _BIN_SECONDS = 30 * 60
+# The cutoff of 40 outside buyers is the pipeline spec's "OG" crowding cliff.
+# The 0.25 factor is an unvalidated design assumption. Neither number is a
+# fitted result, and the empirical effect is UNKNOWN.
 _OG_BUYERS = 40
 _OG_FACTOR = 0.25
 _STD_FLOOR = 1e-9
@@ -40,10 +44,11 @@ _NEUTRAL = 1.0
 
 @dataclass(frozen=True)
 class ScoredBatch:
-    """Top safe stories and the hard rejects from one scoring pass."""
+    """Top safe stories, hard rejects, and stories that lack coverage."""
 
     top_stories: tuple[StoryCard, ...]
     rejected_stories: tuple[StoryCard, ...]
+    uncovered_stories: tuple[StoryCard, ...] = ()
 
 
 def score_stories(
@@ -65,20 +70,42 @@ def score_stories(
         Ranked safe cards and rejected cards. Safe cards with a zero score
         are omitted from both lists.
     """
+    _reject_non_finite(priors)
+    _reject_non_finite(hour_weights)
     cards = [
         _score_one(story, now=now, priors=priors, hour_weights=hour_weights)
         for story in stories
     ]
-    cards.sort(key=lambda card: (-card.score, card.story_id))
-    top = [card for card in cards if card.safety_gate == 1 and card.score > 0]
+    cards.sort(key=_rank_key)
+    top = [
+        card
+        for card in cards
+        if card.safety_gate == 1 and card.score is not None and card.score > 0
+    ]
     rejected = [card for card in cards if card.safety_gate == 0]
+    uncovered = [card for card in cards if card.safety_gate == 1 and card.score is None]
     ranked = tuple(
         replace(card, rank=index) for index, card in enumerate(top[:_TOP_N], start=1)
     )
     return ScoredBatch(
         top_stories=ranked,
         rejected_stories=tuple(replace(card, rank=None) for card in rejected),
+        uncovered_stories=tuple(uncovered),
     )
+
+
+def _rank_key(card: StoryCard) -> tuple[float, str]:
+    score = card.score if card.score is not None else float("-inf")
+    return (-score, card.story_id)
+
+
+def _reject_non_finite(values: Mapping[object, float] | None) -> None:
+    if not values:
+        return
+    for value in values.values():
+        if not math.isfinite(float(value)):
+            message = "non-finite score input"
+            raise ValueError(message)
 
 
 def _score_one(
@@ -96,7 +123,12 @@ def _score_one(
     penalty, copycats, leader = _crowding(story)
     fit = _NEUTRAL if not priors else float(priors.get(category, _NEUTRAL))
     hour = _hour_multiplier(now, hour_weights)
-    score = velocity * hook.parodyability * safety.gate * penalty * fit * hour
+    if safety.gate == 0:
+        score: float | None = 0.0
+    elif velocity is None or penalty is None:
+        score = None
+    else:
+        score = velocity * hook.parodyability * penalty * fit * hour
     detected = story.detected_at.astimezone(UTC).isoformat(timespec="seconds")
     return StoryCard(
         story_id=story_id_for(story.title),
@@ -121,7 +153,7 @@ def _score_one(
     )
 
 
-def _velocity(story: StoryInput, now: datetime) -> tuple[float, tuple[str, ...]]:
+def _velocity(story: StoryInput, now: datetime) -> tuple[float | None, tuple[str, ...]]:
     now_utc = now.astimezone(UTC)
     window_start = now_utc - _OUTLET_WINDOW
     names: list[str] = []
@@ -136,16 +168,19 @@ def _velocity(story: StoryInput, now: datetime) -> tuple[float, tuple[str, ...]]
                 seen.add(key)
                 names.append(hit.name)
     outlet_term = math.log1p(len(seen))
+    ordered = tuple(sorted(names, key=str.casefold))
     if not story.post_counts:
-        return outlet_term, tuple(sorted(names, key=str.casefold))
+        return outlet_term, ordered
     excess = _recent_z(story.post_counts, now_utc)
-    return max(0.0, excess) + outlet_term, tuple(sorted(names, key=str.casefold))
+    if excess is None:
+        return None, ordered
+    return max(0.0, excess) + outlet_term, ordered
 
 
-def _recent_z(counts: Sequence[CountPoint], now_utc: datetime) -> float:
+def _recent_z(counts: Sequence[CountPoint], now_utc: datetime) -> float | None:
     recent_start = now_utc - _RECENT
     baseline_start = now_utc - _BASELINE
-    bins = [0] * _BIN_COUNT
+    bins: list[int | None] = [None] * _BIN_COUNT
     recent = 0
     for point in counts:
         if point.start.tzinfo is None:
@@ -156,15 +191,20 @@ def _recent_z(counts: Sequence[CountPoint], now_utc: datetime) -> float:
         elif baseline_start <= start < recent_start:
             index = int((start - baseline_start).total_seconds() // _BIN_SECONDS)
             if 0 <= index < _BIN_COUNT:
-                bins[index] += point.count
-    mean = statistics.mean(bins)
-    std = statistics.stdev(bins)
+                bins[index] = (bins[index] or 0) + point.count
+    observed = [value for value in bins if value is not None]
+    if len(observed) < _MIN_OBSERVED_BINS:
+        return None
+    mean = statistics.mean(observed)
+    std = statistics.stdev(observed)
     if std < _STD_FLOOR:
         return float(recent - mean)
     return (recent - mean) / std
 
 
-def _crowding(story: StoryInput) -> tuple[float, int, int]:
+def _crowding(story: StoryInput) -> tuple[float | None, int | None, int | None]:
+    if story.copycats is None:
+        return None, None, None
     count = len(story.copycats)
     leader = max((coin.outside_buyers for coin in story.copycats), default=0)
     penalty = 1.0 / (1.0 + count)

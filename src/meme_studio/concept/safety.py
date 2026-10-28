@@ -44,6 +44,11 @@ _ABUSE = re.compile(
     r"\b(?:sexual abuse|raped|rape|rapist|molest\w*|trafficking)\b",
     re.IGNORECASE,
 )
+# Unambiguous hate markers. Matching is case-insensitive and includes the ticker.
+_HATE = re.compile(
+    r"\b(?:nazis?|neo-?nazis?|swastikas?|kkk|klan)\b|white\s+supremac",
+    re.IGNORECASE,
+)
 _ELECTION_PHRASES = (
     "stolen election",
     "election was stolen",
@@ -119,6 +124,39 @@ _NAME_STOP = frozenset(
         "with",
         "won",
         "wins",
+        "banner",
+        "brand",
+        "cartoon",
+        "character",
+        "coin",
+        "collectible",
+        "colors",
+        "concept",
+        "created",
+        "daily",
+        "disclose",
+        "draft",
+        "flat",
+        "game",
+        "held",
+        "hold",
+        "holding",
+        "invented",
+        "launch",
+        "letters",
+        "logo",
+        "meme",
+        "must",
+        "news",
+        "none",
+        "original",
+        "parody",
+        "person",
+        "posting",
+        "secret",
+        "shadow",
+        "state",
+        "token",
     }
 )
 _ADULT_AGE = 18
@@ -145,6 +183,8 @@ def evaluate_safety(text: str) -> SafetyResult:
         return SafetyResult(gate=0, reasons=("empty_text",))
     reasons: list[str] = []
     reasons.extend(_tragedy_reasons(text))
+    if contains_hate(text):
+        reasons.append("hate_content")
     persons = find_persons(text)
     brands = extract(text).brands
     if persons:
@@ -159,12 +199,24 @@ def evaluate_safety(text: str) -> SafetyResult:
     return SafetyResult(gate=1, reasons=())
 
 
+def contains_hate(text: str) -> bool:
+    """Return whether text contains an unambiguous hate marker.
+
+    Args:
+        text: Story, ticker, or any generated field.
+
+    Returns:
+        True for markers such as Nazi or a swastika. Ordinary words do not match.
+    """
+    return _HATE.search(text) is not None
+
+
 def find_persons(text: str) -> tuple[str, ...]:
     """Return heuristic person mentions.
 
-    Honorific plus a name always counts. A capitalized pair counts only when
-    the same text has a defamation verb, and only when neither word is an
-    animal, object, brand, or headline stop word.
+    Honorifics count, and so does any capitalized pair that is not an animal,
+    object, brand, or headline stop word. A defamation verb is not required:
+    naming an artist or other person is enough. This is not a trained NER model.
 
     Args:
         text: Any generated or source string.
@@ -182,13 +234,12 @@ def find_persons(text: str) -> tuple[str, ...]:
             found.append(f"{first} {second}")
         else:
             found.append(first)
-    if _DEFAMATION.search(text):
-        blocked = _NAME_STOP | set(ANIMALS) | set(OBJECTS)
-        for match in _TWO_CAPS.finditer(text):
-            first, second = match.group(1), match.group(2)
-            if first.casefold() in blocked or second.casefold() in blocked:
-                continue
-            found.append(f"{first} {second}")
+    blocked = _NAME_STOP | set(ANIMALS) | set(OBJECTS)
+    for match in _TWO_CAPS.finditer(text):
+        first, second = match.group(1), match.group(2)
+        if first.casefold() in blocked or second.casefold() in blocked:
+            continue
+        found.append(f"{first} {second}")
     unique: list[str] = []
     for name in found:
         if name not in unique:

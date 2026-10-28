@@ -6,10 +6,13 @@ The document is a draft. ``publish`` and ``transactions`` stay false, and
 
 import hashlib
 import json
+import math
 import re
 from dataclasses import dataclass
 from datetime import datetime
 from zoneinfo import ZoneInfo
+
+from meme_studio.concept.safety import contains_hate, find_persons
 
 SCHEMA_VERSION = "1"
 PHASE = "0"
@@ -27,6 +30,20 @@ SKIP_REASONS = (
     "all_candidates_collided",
     "lookup_unavailable",
     "no_sources",
+    "coverage_unknown",
+)
+# Truthful for an unlaunched shadow draft. It does not claim a coin exists.
+SHADOW_DISCLOSURE = (
+    "Shadow draft: no token has been created and none is held. "
+    "A person must disclose, before any launch, that we created the coin "
+    "and that we hold it."
+)
+_DISCLOSURE_MARKERS = (
+    "no token has been created",
+    "none is held",
+    "we created the coin",
+    "we hold it",
+    "a person must disclose",
 )
 BANNED_PHRASES = (
     "moon",
@@ -209,16 +226,16 @@ class StoryCard:
     sources: tuple[str, ...]
     category: str
     hook: str
-    velocity: float
+    velocity: float | None
     parodyability: float
     safety_gate: int
     safety_reasons: tuple[str, ...]
-    crowding_penalty: float
+    crowding_penalty: float | None
     audience_fit: float
     hour_multiplier: float
-    score: float
-    copycat_count: int
-    leader_outside_buyers: int
+    score: float | None
+    copycat_count: int | None
+    leader_outside_buyers: int | None
     outlets: tuple[str, ...]
     rank: int | None
 
@@ -322,6 +339,20 @@ def studio_date(moment: datetime) -> str:
     return moment.astimezone(PACIFIC).date().isoformat()
 
 
+def has_shadow_disclosure(text: str) -> bool:
+    """Return whether text carries the unlaunched-draft disclosure.
+
+    Args:
+        text: Candidate description.
+
+    Returns:
+        True when every required disclosure marker is present. The markers say
+        no token exists yet and name the human disclosure a later launch needs.
+    """
+    folded = text.casefold()
+    return all(marker in folded for marker in _DISCLOSURE_MARKERS)
+
+
 def dump_concept(document: ConceptDocument) -> str:
     """Serialize a document with stable key order and a trailing newline.
 
@@ -329,9 +360,19 @@ def dump_concept(document: ConceptDocument) -> str:
         document: Draft to write.
 
     Returns:
-        UTF-8 JSON text.
+        UTF-8 JSON text. Non-finite numbers are rejected first.
+
+    Raises:
+        ConceptSchemaError: When the document is not a valid finite draft.
+        ValueError: When serialization would emit a non-standard number.
     """
-    payload = json.dumps(document.to_dict(), indent=2, sort_keys=True)
+    validate_concept(document)
+    payload = json.dumps(
+        document.to_dict(),
+        indent=2,
+        sort_keys=True,
+        allow_nan=False,
+    )
     return payload + "\n"
 
 
@@ -472,8 +513,13 @@ def _validate_story(card: StoryCard, *, rejected: bool) -> None:
     if not card.sources:
         message = "story needs a source"
         raise ConceptSchemaError(message)
-    if card.score < 0:
-        message = "score cannot be negative"
+    if card.score is None or not math.isfinite(card.score) or card.score < 0:
+        message = "score must be a finite non-negative number"
+        raise ConceptSchemaError(message)
+    if not _finite_or_missing(card.velocity) or not _finite_or_missing(
+        card.crowding_penalty
+    ):
+        message = "story metrics must be finite when present"
         raise ConceptSchemaError(message)
     if rejected:
         if card.safety_gate != 0 or card.rank is not None:
@@ -482,6 +528,15 @@ def _validate_story(card: StoryCard, *, rejected: bool) -> None:
         return
     if card.safety_gate != 1 or card.rank is None or card.rank < 1:
         message = "top stories are safe and ranked"
+        raise ConceptSchemaError(message)
+    if (
+        card.score <= 0
+        or card.velocity is None
+        or card.crowding_penalty is None
+        or card.copycat_count is None
+        or card.leader_outside_buyers is None
+    ):
+        message = "top story is missing coverage"
         raise ConceptSchemaError(message)
 
 
@@ -509,12 +564,39 @@ def _validate_candidate(candidate: ConceptCandidate) -> None:
         if _HEX_COLOR.fullmatch(color) is None:
             message = "palette colors must be #RRGGBB"
             raise ConceptSchemaError(message)
+    _reject_unsafe_copy(candidate)
     names = tuple(check.name for check in candidate.collision_checks)
     if names != _CHECK_NAMES or not all(
         check.passed for check in candidate.collision_checks
     ):
         message = "accepted candidate has a failing collision check"
         raise ConceptSchemaError(message)
+
+
+def _reject_unsafe_copy(candidate: ConceptCandidate) -> None:
+    if not has_shadow_disclosure(candidate.description):
+        message = "accepted description is missing the shadow disclosure"
+        raise ConceptSchemaError(message)
+    blob = " ".join(
+        (
+            candidate.name,
+            candidate.ticker,
+            candidate.character,
+            candidate.joke,
+            candidate.description,
+            candidate.art_prompt,
+        )
+    )
+    if contains_hate(blob):
+        message = "accepted candidate contains hate content"
+        raise ConceptSchemaError(message)
+    if find_persons(blob):
+        message = "accepted candidate names a person"
+        raise ConceptSchemaError(message)
+
+
+def _finite_or_missing(value: float | None) -> bool:
+    return value is None or math.isfinite(value)
 
 
 def _story_from(value: object) -> StoryCard:
@@ -532,16 +614,16 @@ def _story_from(value: object) -> StoryCard:
         sources=tuple(_as_str_list(payload, "sources")),
         category=_as_str(payload, "category"),
         hook=_as_str(payload, "hook"),
-        velocity=_as_float(payload, "velocity"),
+        velocity=_as_optional_float(payload, "velocity"),
         parodyability=_as_float(payload, "parodyability"),
         safety_gate=_as_int(payload, "safety_gate"),
         safety_reasons=tuple(_as_str_list(payload, "safety_reasons")),
-        crowding_penalty=_as_float(payload, "crowding_penalty"),
+        crowding_penalty=_as_optional_float(payload, "crowding_penalty"),
         audience_fit=_as_float(payload, "audience_fit"),
         hour_multiplier=_as_float(payload, "hour_multiplier"),
-        score=_as_float(payload, "score"),
-        copycat_count=_as_int(payload, "copycat_count"),
-        leader_outside_buyers=_as_int(payload, "leader_outside_buyers"),
+        score=_as_optional_float(payload, "score"),
+        copycat_count=_as_optional_int(payload, "copycat_count"),
+        leader_outside_buyers=_as_optional_int(payload, "leader_outside_buyers"),
         outlets=tuple(_as_str_list(payload, "outlets")),
         rank=rank,
     )
@@ -643,11 +725,35 @@ def _as_int(payload: dict[str, object], key: str) -> int:
 
 
 def _as_float(payload: dict[str, object], key: str) -> float:
-    value = payload[key]
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    number = _as_optional_float(payload, key)
+    if number is None:
         message = f"{key} must be a number"
         raise ConceptSchemaError(message)
-    return float(value)
+    return number
+
+
+def _as_optional_float(payload: dict[str, object], key: str) -> float | None:
+    value = payload[key]
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        message = f"{key} must be a number"
+        raise ConceptSchemaError(message)
+    number = float(value)
+    if not math.isfinite(number):
+        message = f"{key} must be finite"
+        raise ConceptSchemaError(message)
+    return number
+
+
+def _as_optional_int(payload: dict[str, object], key: str) -> int | None:
+    value = payload[key]
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        message = f"{key} must be an integer"
+        raise ConceptSchemaError(message)
+    return value
 
 
 def _as_str_list(payload: dict[str, object], key: str) -> list[str]:

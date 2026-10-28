@@ -7,6 +7,7 @@ import pytest
 
 from meme_studio.concept.schema import (
     BASE_UNKNOWNS,
+    SHADOW_DISCLOSURE,
     CollisionCheck,
     ConceptCandidate,
     ConceptDocument,
@@ -20,7 +21,7 @@ from meme_studio.concept.schema import (
 )
 
 NOW = "2026-10-28T15:00:00+00:00"
-DESCRIPTION = " ".join(["cartoon"] * 20)
+DESCRIPTION = " ".join(["cartoon"] * 20) + " " + SHADOW_DISCLOSURE
 
 
 def _candidate(*, accepted: bool = True, ticker: str = "RACODONU") -> ConceptCandidate:

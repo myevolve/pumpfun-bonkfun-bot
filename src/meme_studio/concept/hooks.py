@@ -85,6 +85,8 @@ _ABSURD_WORDS: tuple[str, ...] = (
     "parade",
 )
 
+# Unvalidated design assumptions for the v1 rubric. They are not a fitted
+# model, and their empirical effect on buyers is UNKNOWN.
 ANIMAL_WEIGHT = 0.5
 OBJECT_WEIGHT = 0.4
 ABSURD_WEIGHT = 0.3

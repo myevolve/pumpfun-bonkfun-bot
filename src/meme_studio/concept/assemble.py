@@ -61,11 +61,19 @@ def assemble_concept(
         A phase-0 document with publish and transactions left false.
     """
     history_tuple = tuple(history)
-    unknown_tuple = _unknowns(unknowns)
     generated_at = now.astimezone(UTC).isoformat(timespec="seconds")
     date = studio_date(now)
-    if not batch.top_stories and not batch.rejected_stories:
+    unknown_tuple = _unknowns((*unknowns, *_coverage_unknowns(batch)))
+    if (
+        not batch.top_stories
+        and not batch.rejected_stories
+        and not batch.uncovered_stories
+    ):
         return _skipped(batch, (generated_at, date, "no_sources", (), unknown_tuple))
+    if not batch.top_stories and batch.uncovered_stories:
+        return _skipped(
+            batch, (generated_at, date, "coverage_unknown", (), unknown_tuple)
+        )
     if not batch.top_stories:
         return _skipped(batch, (generated_at, date, "no_safe_story", (), unknown_tuple))
     active = lookup if lookup is not None else _ClosedLookup()
@@ -124,6 +132,15 @@ def _skipped(
         transactions=False,
         network_writes=NETWORK_WRITES,
     )
+
+
+def _coverage_unknowns(batch: ScoredBatch) -> tuple[str, ...]:
+    tokens: list[str] = []
+    if any(card.copycat_count is None for card in batch.uncovered_stories):
+        tokens.append("copycat_coverage_unknown")
+    if any(card.velocity is None for card in batch.uncovered_stories):
+        tokens.append("post_count_baseline_unknown")
+    return tuple(tokens)
 
 
 def _unknowns(extra: Iterable[str]) -> tuple[str, ...]:

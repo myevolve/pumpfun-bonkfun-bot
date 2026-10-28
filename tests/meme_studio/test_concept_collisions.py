@@ -16,13 +16,14 @@ from meme_studio.concept.collisions import (
     parse_dexscreener_search,
 )
 from meme_studio.concept.schema import (
+    SHADOW_DISCLOSURE,
     ConceptCandidate,
     ThemePalette,
 )
 from meme_studio.trends.cache import TtlCache
 from meme_studio.trends.ratelimit import RateLimiter
 
-DESCRIPTION = " ".join(["cartoon"] * 20)
+DESCRIPTION = " ".join(["cartoon"] * 20) + " " + SHADOW_DISCLOSURE
 
 
 def _candidate(

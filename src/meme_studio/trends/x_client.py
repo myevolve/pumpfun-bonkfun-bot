@@ -76,17 +76,17 @@ class HttpXClient:
         self,
         *,
         transport: _Transport,
+        limiter: RateLimiter,
         token_env: str = "X_BEARER_TOKEN",  # noqa: S107
         cache: TtlCache | None = None,
-        limiter: RateLimiter | None = None,
     ) -> None:
         """Create a client. The token is not read until a request is made.
 
         Args:
             transport: ``(url, headers, method) -> (status, body)``.
+            limiter: Required call window. Unbounded reads are refused.
             token_env: Environment variable name. The value is not logged.
             cache: Optional TTL cache for trend reads.
-            limiter: Optional call window applied on cache misses.
         """
         self._transport = transport
         self._token_env = token_env
@@ -175,8 +175,7 @@ class HttpXClient:
         if not token:
             message = f"missing environment variable {self._token_env}"
             raise XClientConfigError(message)
-        if self._limiter is not None:
-            self._limiter.acquire()
+        self._limiter.acquire()
         headers = {
             "Authorization": f"Bearer {token}",
             "Accept": "application/json",
@@ -184,17 +183,17 @@ class HttpXClient:
         }
         try:
             status, body = self._transport(url, headers, "GET")
-        except (TimeoutError, OSError) as exc:
+        except (TimeoutError, OSError):
             message = "x read failed"
-            raise XClientError(message) from exc
+            raise XClientError(message) from None
         if status != _HTTP_OK:
             message = "x read status"
-            raise XClientError(message)
+            raise XClientError(message) from None
         try:
             payload = json.loads(body)
-        except json.JSONDecodeError as exc:
+        except (json.JSONDecodeError, UnicodeDecodeError):
             message = "x read payload"
-            raise XClientError(message) from exc
+            raise XClientError(message) from None
         if not isinstance(payload, dict):
             message = "x read payload"
             raise XClientError(message)
@@ -253,4 +252,8 @@ def _rows(payload: dict[str, object]) -> list[dict[str, object]]:
 
 
 def _parse_time(value: str) -> datetime:
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        message = "x read payload"
+        raise XClientError(message) from None

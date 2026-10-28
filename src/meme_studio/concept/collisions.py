@@ -6,13 +6,14 @@ figure and the gap stays in the concept unknowns.
 """
 
 import json
+import math
 import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from urllib.parse import quote
 
 from meme_studio.concept.blocklist import BRANDS, find_brands
-from meme_studio.concept.safety import find_persons
+from meme_studio.concept.safety import contains_hate, find_persons
 from meme_studio.concept.schema import (
     BANNED_PHRASES,
     DESCRIPTION_MIN_WORDS,
@@ -20,6 +21,7 @@ from meme_studio.concept.schema import (
     NAME_MAX,
     CollisionCheck,
     ConceptCandidate,
+    has_shadow_disclosure,
 )
 from meme_studio.trends.cache import TtlCache
 from meme_studio.trends.ratelimit import RateLimiter
@@ -27,6 +29,8 @@ from meme_studio.trends.ratelimit import RateLimiter
 DEXSCREENER_SEARCH = "https://api.dexscreener.com/latest/dex/search?q="
 _HTTP_OK = 200
 _CACHE_TTL_SECONDS = 300.0
+# Design rules from the pipeline spec, not measurements from this repository.
+# Whether these cutoffs change buyer behavior is UNKNOWN.
 _MCAP_ABOVE_USD = 10_000
 _NAME_DISTANCE_MAX = 2
 _TICKER_DISTANCE_MAX = 1
@@ -48,8 +52,8 @@ class TokenHit:
 
     symbol: str
     name: str
-    volume_7d_usd: float
-    market_cap_usd: float
+    volume_7d_usd: float | None
+    market_cap_usd: float | None
     chain: str
 
 
@@ -175,16 +179,16 @@ def parse_dexscreener_search(body: bytes) -> list[TokenHit]:
     """
     try:
         payload = json.loads(body)
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, UnicodeDecodeError):
         message = "token lookup payload"
-        raise LookupUnavailableError(message) from exc
-    if not isinstance(payload, dict):
+        raise LookupUnavailableError(message) from None
+    if not isinstance(payload, dict) or "pairs" not in payload:
         message = "token lookup payload"
-        raise LookupUnavailableError(message)
-    pairs = payload.get("pairs") or []
+        raise LookupUnavailableError(message) from None
+    pairs = payload["pairs"]
     if not isinstance(pairs, list):
         message = "token lookup payload"
-        raise LookupUnavailableError(message)
+        raise LookupUnavailableError(message) from None
     hits: list[TokenHit] = []
     for pair in pairs:
         hit = _pair_hit(pair)
@@ -283,21 +287,29 @@ def _hit_reasons(candidate: ConceptCandidate, hit: TokenHit) -> list[str]:
     ticker = _alnum(candidate.ticker)
     symbol = _alnum(hit.symbol)
     distance = levenshtein(ticker, symbol)
-    if ticker == symbol and hit.volume_7d_usd > 0:
-        reasons.append("exact_ticker_volume")
-    elif (
-        distance <= _TICKER_DISTANCE_MAX
+    ticker_exact = ticker == symbol
+    ticker_fuzzy = (
+        not ticker_exact
+        and distance <= _TICKER_DISTANCE_MAX
         and len(ticker) >= _TICKER_FUZZY_MIN
         and len(symbol) >= _TICKER_FUZZY_MIN
-        and hit.volume_7d_usd > 0
-    ):
-        reasons.append("fuzzy_ticker")
-    if (
-        hit.market_cap_usd > _MCAP_ABOVE_USD
-        and levenshtein(_norm_name(candidate.name), _norm_name(hit.name))
+    )
+    name_close = (
+        levenshtein(_norm_name(candidate.name), _norm_name(hit.name))
         <= _NAME_DISTANCE_MAX
-    ):
-        reasons.append("fuzzy_name")
+    )
+    if ticker_exact or ticker_fuzzy:
+        if hit.volume_7d_usd is None:
+            reasons.append("metrics_unknown")
+        elif ticker_exact and hit.volume_7d_usd > 0:
+            reasons.append("exact_ticker_volume")
+        elif ticker_fuzzy and hit.volume_7d_usd > 0:
+            reasons.append("fuzzy_ticker")
+    if name_close:
+        if hit.market_cap_usd is None:
+            reasons.append("metrics_unknown")
+        elif hit.market_cap_usd > _MCAP_ABOVE_USD:
+            reasons.append("fuzzy_name")
     return reasons
 
 
@@ -364,6 +376,18 @@ def _shape_ok(candidate: ConceptCandidate) -> bool:
     joke_ok = "\n" not in candidate.joke
     colors_ok = all(_HEX_COLOR.fullmatch(color) is not None for color in colors)
     banned_ok = all(phrase not in blob for phrase in BANNED_PHRASES)
+    disclosed = has_shadow_disclosure(candidate.description)
+    fields = " ".join(
+        (
+            candidate.name,
+            candidate.ticker,
+            candidate.character,
+            candidate.joke,
+            candidate.description,
+            candidate.art_prompt,
+        )
+    )
+    hate_ok = not contains_hate(fields)
     return (
         name_ok
         and ticker_ok
@@ -372,6 +396,8 @@ def _shape_ok(candidate: ConceptCandidate) -> bool:
         and joke_ok
         and colors_ok
         and banned_ok
+        and disclosed
+        and hate_ok
     )
 
 
@@ -386,13 +412,22 @@ def _pair_hit(pair: object) -> TokenHit | None:
         return None
     symbol = str(base.get("symbol") or "")
     name = str(base.get("name") or "")
-    volume = pair.get("volume")
-    h24 = 0.0
-    if isinstance(volume, dict) and isinstance(volume.get("h24"), (int, float)):
-        h24 = float(volume["h24"])
-    market = pair.get("marketCap")
-    mcap = float(market) if isinstance(market, (int, float)) else 0.0
+    h24 = _metric(pair.get("volume"), "h24")
+    mcap = _metric(pair, "marketCap")
     return TokenHit(symbol, name, h24, mcap, chain)
+
+
+def _metric(payload: object, key: str) -> float | None:
+    """Return a finite metric, or None when the field is absent or unusable."""
+    if not isinstance(payload, dict) or key not in payload:
+        return None
+    value = payload[key]
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    number = float(value)
+    if not math.isfinite(number):
+        return None
+    return number
 
 
 def _alnum(value: str) -> str:

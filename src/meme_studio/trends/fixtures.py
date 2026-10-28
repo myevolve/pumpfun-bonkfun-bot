@@ -18,7 +18,7 @@ class FixtureBundle:
 
     items: tuple[RawItem, ...]
     trends: tuple[TrendSignal, ...]
-    copycats: tuple[CopycatCoin, ...]
+    copycats: tuple[CopycatCoin, ...] | None
     lookup: TokenLookup | None
     history: tuple[str, ...]
     hour_weights: dict[int, float] | None
@@ -35,7 +35,7 @@ def empty_bundle() -> FixtureBundle:
     return FixtureBundle(
         items=(),
         trends=(),
-        copycats=(),
+        copycats=None,
         lookup=None,
         history=(),
         hour_weights=None,
@@ -81,7 +81,7 @@ def load_fixtures(path: Path, *, reddit_tos_allowed: bool) -> FixtureBundle:
     history_path = path / "history.json"
     history = _load_history(history_path) if history_path.is_file() else ()
     copycats_path = path / "copycats.json"
-    copycats = _load_copycats(copycats_path) if copycats_path.is_file() else ()
+    copycats = _load_copycats(copycats_path) if copycats_path.is_file() else None
     weights_path = path / "hour_weights.json"
     priors_path = path / "priors.json"
     return FixtureBundle(
@@ -162,15 +162,13 @@ def _load_tokens(path: Path) -> list[TokenHit]:
         name = row.get("name")
         if not isinstance(symbol, str) or not isinstance(name, str):
             continue
-        volume = row.get("volume_7d_usd", 0)
-        market = row.get("market_cap_usd", 0)
         chain = row.get("chain")
         hits.append(
             TokenHit(
                 symbol,
                 name,
-                float(volume) if isinstance(volume, (int, float)) else 0.0,
-                float(market) if isinstance(market, (int, float)) else 0.0,
+                _optional_metric(row, "volume_7d_usd"),
+                _optional_metric(row, "market_cap_usd"),
                 chain if isinstance(chain, str) else "",
             )
         )
@@ -206,8 +204,8 @@ def _load_copycats(path: Path) -> tuple[CopycatCoin, ...]:
                 name,
                 ticker,
                 buyers,
-                float(volume) if isinstance(volume, (int, float)) else 0.0,
-                float(market) if isinstance(market, (int, float)) else 0.0,
+                float(volume) if isinstance(volume, int | float) else 0.0,
+                float(market) if isinstance(market, int | float) else 0.0,
             )
         )
     return tuple(coins)
@@ -219,7 +217,7 @@ def _load_weights(path: Path) -> dict[int, float]:
     if not isinstance(payload, dict):
         return weights
     for key, value in payload.items():
-        if isinstance(value, (int, float)):
+        if isinstance(value, int | float):
             weights[int(key)] = float(value)
     return weights
 
@@ -230,9 +228,18 @@ def _load_priors(path: Path) -> dict[str, float]:
     if not isinstance(payload, dict):
         return priors
     for key, value in payload.items():
-        if isinstance(key, str) and isinstance(value, (int, float)):
+        if isinstance(key, str) and isinstance(value, int | float):
             priors[key] = float(value)
     return priors
+
+
+def _optional_metric(row: dict[str, object], key: str) -> float | None:
+    if key not in row:
+        return None
+    value = row[key]
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    return float(value)
 
 
 def _read_json(path: Path) -> object:

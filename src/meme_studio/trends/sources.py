@@ -154,9 +154,9 @@ def parse_google_news_rss(body: bytes) -> tuple[RawItem, ...]:
     """
     try:
         root = ElementTree.fromstring(body)  # noqa: S314
-    except ElementTree.ParseError as exc:
+    except ElementTree.ParseError:
         message = "rss parse failed"
-        raise SourceParseError(message) from exc
+        raise SourceParseError(message) from None
     items: list[RawItem] = []
     for node in root.iter("item"):
         parsed = _rss_item(node)
@@ -179,9 +179,9 @@ def parse_reddit_listing(body: bytes) -> tuple[RawItem, ...]:
     """
     try:
         payload = json.loads(body)
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, UnicodeDecodeError):
         message = "reddit parse failed"
-        raise SourceParseError(message) from exc
+        raise SourceParseError(message) from None
     data = payload.get("data") if isinstance(payload, dict) else None
     children = data.get("children") if isinstance(data, dict) else None
     if not isinstance(children, list):
@@ -209,7 +209,11 @@ def _rss_item(node: ElementTree.Element) -> RawItem | None:
         headline, suffix = title.rsplit(" - ", 1)
         title = headline.strip()
         outlet = suffix.strip()
-    published = parsedate_to_datetime(published_raw)
+    try:
+        published = parsedate_to_datetime(published_raw)
+    except (TypeError, ValueError):
+        message = "rss parse failed"
+        raise SourceParseError(message) from None
     if published.tzinfo is None:
         published = published.replace(tzinfo=UTC)
     else:
@@ -232,7 +236,7 @@ def _reddit_child(child: object) -> RawItem | None:
         return None
     title = data.get("title")
     created = data.get("created_utc")
-    if not isinstance(title, str) or not isinstance(created, (int, float)):
+    if not isinstance(title, str) or not isinstance(created, int | float):
         return None
     permalink = data.get("permalink")
     url = "https://www.reddit.com" + permalink if isinstance(permalink, str) else ""
