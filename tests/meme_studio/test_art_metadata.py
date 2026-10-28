@@ -105,6 +105,9 @@ def test_rejected_prompt_writes_no_asset(tmp_path: Path) -> None:
     assert result.asset_path is None
     assert not (tmp_path / "blocked.png").exists()
     assert not (tmp_path / "blocked.meta.json").exists()
+    assert not (tmp_path / "blocked.png.meta.json").exists()
+    assert result.metadata_path is None
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_tiktok_coin_overlay_is_not_written(tmp_path: Path) -> None:

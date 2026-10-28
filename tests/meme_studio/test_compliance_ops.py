@@ -46,6 +46,15 @@ def test_secrets_in_logs_fail() -> None:
     assert "ops_secret" in bearer.reasons
     clean = ops_guard(OpsCheck(log_text="lint pass payload hash abc"))
     assert clean.passed is True
+    for leaked_log in (
+        '{"api_key": "canary"}',
+        '{"X_BEARER_TOKEN": "canary"}',
+        '{"GEYSER_API_TOKEN": "canary"}',
+        '{"service_SECRET": "canary"}',
+    ):
+        structured = ops_guard(OpsCheck(log_text=leaked_log))
+        assert structured.passed is False
+        assert "ops_secret" in structured.reasons
 
 
 def test_reply_and_unknown_actions_are_not_approved() -> None:

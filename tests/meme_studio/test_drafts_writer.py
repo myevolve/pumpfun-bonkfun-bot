@@ -129,6 +129,7 @@ def test_missing_metrics_stay_unknown_and_sells_reconcile(tmp_path: Path) -> Non
     assert "900" not in m7.text
     assert "0.01" not in m10.text
     assert "UNKNOWN" in m10.text
+    assert "all per plan" not in m10.text
     plan = "Recover cost at 2.5 times, then stop. It can go to zero."
     planned = ConceptPackage(
         story_id="story-pigeon",
@@ -162,19 +163,122 @@ def test_missing_metrics_stay_unknown_and_sells_reconcile(tmp_path: Path) -> Non
     )
     drafted = write_launch_drafts(planned, t0, tmp_path / "planned")
     p1 = next(record for record in drafted if record.template_id == "P1")
-    digest = hashlib.sha256(plan.encode("utf-8")).hexdigest()
-    assert digest in p1.text
-    assert "not-the-real-hash" not in p1.text
-    assert "5 times, 8 times" not in p1.text
     recap = next(
         record
         for record in drafted
         if record.template_id == "M10" and record.channel == "x"
     )
+    digest = hashlib.sha256(plan.encode("utf-8")).hexdigest()
+    assert digest in p1.text
+    assert "not-the-real-hash" not in p1.text
+    assert "5 times, 8 times" not in p1.text
+    page = next(record for record in drafted if record.offset == "T+30s")
+    site = next(record for record in drafted if record.template_id == "site_recap")
+    assert digest in page.text
+    assert digest in recap.text
+    assert digest in site.text
+    assert "not-the-real-hash" not in page.text
+    assert "not-the-real-hash" not in recap.text
+    assert "all per plan" in recap.text
+    assert "we created this coin" in recap.text.lower()
+    assert "dev bag" in recap.text.lower()
     assert "dev sells 1" in recap.text
     assert "55%" in recap.text
     assert "dev sells 0" not in recap.text
     assert "100%" not in recap.text
+
+
+def test_recap_uses_time_order_and_ignores_later_sells(tmp_path: Path) -> None:
+    t0 = datetime(2026, 10, 28, 18, 0, tzinfo=UTC)
+    concept = ConceptPackage(
+        story_id="story-pigeon",
+        story_one_liner="park pigeons started a tiny union",
+        joke_line="The pigeons elected a bench.",
+        game_title="Bench Birds",
+        ticker="BENCH",
+        character="a round cartoon pigeon in a paper hat",
+        mint=MINT,
+        game_url="https://games.example/bench",
+        plan_url="https://games.example/bench/plan",
+        plan_hash="ab" * 32,
+        wallet=CREATOR,
+        dev_buy_sol="0.1",
+        studio="ParodyDesk",
+        steve_handle="steve",
+        hub_domain="games.example",
+        sells=(
+            SellEvent(
+                n=2,
+                step="T1",
+                tokens="10",
+                sol="0.1",
+                multiple="5",
+                pct="55",
+                sig="5" * 88,
+                at=t0 + timedelta(hours=2),
+            ),
+            SellEvent(
+                n=1,
+                step="R",
+                tokens="10",
+                sol="0.1",
+                multiple="2.5",
+                pct="70",
+                sig="6" * 88,
+                at=t0 + timedelta(hours=1),
+            ),
+            SellEvent(
+                n=3,
+                step="T2",
+                tokens="10",
+                sol="0.1",
+                multiple="8",
+                pct="10",
+                sig="7" * 88,
+                at=t0 + timedelta(hours=48),
+            ),
+        ),
+    )
+    drafted = write_launch_drafts(concept, t0, tmp_path)
+    recap = next(
+        record
+        for record in drafted
+        if record.template_id == "M10" and record.channel == "x"
+    )
+    assert "dev sells 2" in recap.text
+    assert "left 55%" in recap.text
+    assert "left 70%" not in recap.text
+    assert "left 10%" not in recap.text
+
+
+def test_whitespace_plan_text_is_not_a_plan(tmp_path: Path) -> None:
+    t0 = datetime(2026, 10, 28, 18, 0, tzinfo=UTC)
+    concept = ConceptPackage(
+        story_id="story-pigeon",
+        story_one_liner="park pigeons started a tiny union",
+        joke_line="The pigeons elected a bench.",
+        game_title="Bench Birds",
+        ticker="BENCH",
+        character="a round cartoon pigeon in a paper hat",
+        mint=MINT,
+        game_url="https://games.example/bench",
+        plan_url="https://games.example/bench/plan",
+        plan_hash="not-the-real-hash",
+        plan_text="   \n\t",
+        wallet=CREATOR,
+        dev_buy_sol="0.1",
+        studio="ParodyDesk",
+        steve_handle="steve",
+        hub_domain="games.example",
+    )
+    drafted = write_launch_drafts(concept, t0, tmp_path)
+    empty_hash = hashlib.sha256(b"").hexdigest()
+    for template_id in ("P1", "M10", "game_page", "site_recap"):
+        record = next(item for item in drafted if item.template_id == template_id)
+        assert empty_hash not in record.text
+        assert "not-the-real-hash" not in record.text
+        assert "UNKNOWN" in record.text
+        assert "all per plan" not in record.text
 
 
 def test_naive_sell_timestamp_writes_nothing(tmp_path: Path) -> None:
@@ -261,6 +365,8 @@ def test_sell_log_draft_is_written_not_sent(tmp_path: Path) -> None:
     sell = next(record for record in records if record.template_id == "P2")
     assert sell.lint.passed is True
     assert "Dev sell #1" in sell.text
+    assert "we created this coin" in sell.text.lower()
+    assert "dev bag" in sell.text.lower()
     assert sell.scheduled_at == datetime(2026, 10, 28, 19, 0, tzinfo=UTC)
 
 

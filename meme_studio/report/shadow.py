@@ -10,8 +10,11 @@ sol_amount, creator_fee), graduation_ts, and coin_creator_fee rows.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+
+from meme_studio.report.contract import validate_shadow_document
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -45,12 +48,17 @@ class ShadowSnapshot:
     random_control: dict[str, object]
     by_story: dict[str, dict[str, object]]
     coverage_known: bool
+    document_valid: bool
+    violations: tuple[str, ...]
 
 
 def load_shadow_tracker(path: Path) -> ShadowSnapshot:
     """Load a JSON shadow-join fixture and compute outside buyers and fees."""
     payload = json.loads(path.read_text(encoding="utf-8"))
-    coverage_known = isinstance(payload, dict) and "cohorts" in payload
+    violations = validate_shadow_document(payload)
+    if violations:
+        return _rejected_snapshot(violations)
+    coverage_known = True
     cohorts = payload.get("cohorts", []) if isinstance(payload, dict) else []
     mints: list[MintMetrics] = []
     story_ids: list[str] = []
@@ -87,6 +95,23 @@ def load_shadow_tracker(path: Path) -> ShadowSnapshot:
         random_control=random_control,
         by_story=by_story,
         coverage_known=coverage_known,
+        document_valid=True,
+        violations=(),
+    )
+
+
+def _rejected_snapshot(violations: tuple[str, ...]) -> ShadowSnapshot:
+    """Invalid input is not a measured sample of zero mints."""
+    return ShadowSnapshot(
+        date="",
+        mints=(),
+        story_ids=(),
+        paper_replay={},
+        random_control={},
+        by_story={},
+        coverage_known=False,
+        document_valid=False,
+        violations=violations,
     )
 
 
@@ -125,16 +150,25 @@ def _mint_metrics(mint: dict[str, object], story_id: str) -> MintMetrics:
 def _optional_float(mint: dict[str, object], key: str) -> float | None:
     if key not in mint or mint[key] is None:
         return None
-    value = mint[key]
+    return _finite_nonnegative(mint[key])
+
+
+def _finite_nonnegative(value: object) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    return float(value)
+    number = float(value)
+    if not math.isfinite(number) or number < 0:
+        return None
+    return number
 
 
 def _optional_bool(mint: dict[str, object], key: str) -> bool | None:
     if key not in mint or mint[key] is None:
         return None
-    return bool(mint[key])
+    value = mint[key]
+    if value is True or value is False:
+        return value
+    return None
 
 
 def _optional_bool_timestamp(mint: dict[str, object], key: str) -> bool | None:
@@ -155,19 +189,35 @@ def _usable_user(trade: dict[str, object]) -> str | None:
     return stripped
 
 
+def _strict_bool(value: object) -> bool | None:
+    if value is True or value is False:
+        return value
+    return None
+
+
 def _outside_buyers(trades: list[object], creator: str) -> int | None:
     users: set[str] = set()
-    saw_invalid_buy = False
+    saw_invalid = False
     for trade in trades:
-        if not isinstance(trade, dict) or not trade.get("is_buy"):
+        if not isinstance(trade, dict):
+            saw_invalid = True
+            continue
+        if "is_buy" not in trade:
+            saw_invalid = True
+            continue
+        is_buy = _strict_bool(trade.get("is_buy"))
+        if is_buy is None:
+            saw_invalid = True
+            continue
+        if not is_buy:
             continue
         user = _usable_user(trade)
         if user is None:
-            saw_invalid_buy = True
+            saw_invalid = True
             continue
         if user != creator:
             users.add(user)
-    if saw_invalid_buy:
+    if saw_invalid:
         return None
     return len(users)
 
@@ -177,15 +227,15 @@ def _creator_fees(trades: list[object], fee_rows: list[object]) -> float | None:
     for trade in trades:
         if not isinstance(trade, dict) or "creator_fee" not in trade:
             return None
-        fee = trade.get("creator_fee")
-        if isinstance(fee, bool) or not isinstance(fee, (int, float)):
+        parsed = _finite_nonnegative(trade.get("creator_fee"))
+        if parsed is None:
             return None
-        total += float(fee)
+        total += parsed
     for row in fee_rows:
         if not isinstance(row, dict) or "amount_sol" not in row:
             return None
-        amount = row.get("amount_sol")
-        if isinstance(amount, bool) or not isinstance(amount, (int, float)):
+        parsed_fee = _finite_nonnegative(row.get("amount_sol"))
+        if parsed_fee is None:
             return None
-        total += float(amount)
+        total += parsed_fee
     return round(total, 10)

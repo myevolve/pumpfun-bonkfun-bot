@@ -5,6 +5,9 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
+
+import pytest
 
 from meme_studio.compliance import (
     Asset,
@@ -16,6 +19,8 @@ from meme_studio.compliance import (
 from tests.meme_studio.conftest import CREATOR, HIDDEN, MINT
 
 _HASH_HEX_LEN = 64
+_DISCLOSURE = " We created this coin. We hold a dev bag."
+_GAME_DISCLOSURE = " We created this token. We hold a dev bag."
 
 
 def _launch_text() -> str:
@@ -90,9 +95,9 @@ def test_banned_promises_and_leetspeak_fail() -> None:
 
 def test_allowed_negations_and_honeymoon_pass() -> None:
     samples = (
-        "This is not investment advice and not guaranteed.",
-        "The honeymoon of the pigeons was a cartoon.",
-        "We return nothing because there is no promise.",
+        "This is not investment advice and not guaranteed." + _DISCLOSURE,
+        "The honeymoon of the pigeons was a cartoon." + _DISCLOSURE,
+        "We return nothing because there is no promise." + _DISCLOSURE,
     )
     for sample in samples:
         result = compliance_lint(Post(text=sample, channel="telegram"))
@@ -130,7 +135,7 @@ def test_tiktok_shorts_and_reddit_reject_coin_ticker_and_address() -> None:
 
 def test_tiktok_game_only_caption_passes() -> None:
     post = Post(
-        text="The pigeons elected a bench. Play free.",
+        text="The pigeons elected a bench. Play free." + _GAME_DISCLOSURE,
         channel="tiktok",
     )
     assert compliance_lint(post).passed is True
@@ -149,7 +154,7 @@ def test_trend_and_keyword_replies_require_human_approval() -> None:
     assert "human_approval_required:trend_ref" in refused.reasons
 
     tapped = Post(
-        text="A joke about the story. (automated post)",
+        text="A joke about the story. (automated post)" + _DISCLOSURE,
         channel="x",
         trend_ref=True,
         human_tap=True,
@@ -201,7 +206,10 @@ def test_paid_posts_need_ad_hash_not_spon() -> None:
         assert result.passed is False, sample
         assert "paid_engagement" in result.reasons
     organic = compliance_lint(
-        Post(text="Cartoon pigeon. (automated post)", channel="telegram")
+        Post(
+            text="Cartoon pigeon. (automated post)" + _DISCLOSURE,
+            channel="telegram",
+        )
     )
     assert organic.passed is True
 
@@ -234,7 +242,7 @@ def test_artist_and_franchise_prompts_fail() -> None:
 
 
 def test_duplicate_posts_use_last_50_only() -> None:
-    text = "identical phrase alpha beta gamma"
+    text = "identical phrase alpha beta gamma" + _DISCLOSURE
     duplicate = compliance_lint(
         Post(text=text, channel="x"),
         LintContext(history=(text,)),
@@ -251,7 +259,7 @@ def test_duplicate_posts_use_last_50_only() -> None:
 def test_telegram_rate_governor() -> None:
     now = datetime(2026, 10, 28, 18, 0, tzinfo=UTC)
     burst = compliance_lint(
-        Post(text="hello friends", channel="telegram"),
+        Post(text="hello friends" + _DISCLOSURE, channel="telegram"),
         LintContext(
             now=now,
             recent_timestamps=(now - timedelta(milliseconds=200),),
@@ -260,12 +268,12 @@ def test_telegram_rate_governor() -> None:
     assert "rate_limit:telegram_per_second" in burst.reasons
     priors = tuple(now - timedelta(seconds=50 - index) for index in range(20))
     minute = compliance_lint(
-        Post(text="hello friends", channel="telegram"),
+        Post(text="hello friends" + _DISCLOSURE, channel="telegram"),
         LintContext(now=now, recent_timestamps=priors),
     )
     assert "rate_limit:telegram_per_minute" in minute.reasons
     quiet = compliance_lint(
-        Post(text="hello friends", channel="telegram"),
+        Post(text="hello friends" + _DISCLOSURE, channel="telegram"),
         LintContext(now=now, recent_timestamps=(now - timedelta(seconds=5),)),
     )
     assert quiet.passed is True
@@ -274,7 +282,7 @@ def test_telegram_rate_governor() -> None:
 def test_hidden_wallet_in_post_fails() -> None:
     leaked = compliance_lint(
         Post(
-            text=f"Also send fees to {HIDDEN}",
+            text=f"Also send fees to {HIDDEN}" + _DISCLOSURE,
             channel="x",
             registered_wallets=(CREATOR, MINT),
         )
@@ -282,7 +290,7 @@ def test_hidden_wallet_in_post_fails() -> None:
     assert "hidden_wallet" in leaked.reasons
     disclosed = compliance_lint(
         Post(
-            text=f"One creator wallet: {CREATOR}",
+            text=f"One creator wallet: {CREATOR}" + _DISCLOSURE,
             channel="x",
             registered_wallets=(CREATOR, MINT),
         )
@@ -297,7 +305,10 @@ def test_token_prizes_fail_and_shoutouts_pass() -> None:
     assert "giveaway" in prize.reasons
     shout = compliance_lint(
         Post(
-            text="Top score gets a shout-out. (No prizes, no tokens. Just glory.)",
+            text=(
+                "Top score gets a shout-out. (No prizes, no tokens. Just glory.)"
+                + _DISCLOSURE
+            ),
             channel="telegram",
         )
     )
@@ -385,3 +396,61 @@ def test_m0_teaser_rejects_ticker() -> None:
         )
     )
     assert "teaser_leaks_ticker" in leaked.reasons
+
+
+def test_generic_we_hold_is_not_token_disclosure() -> None:
+    tournaments = compliance_lint(
+        Post(
+            text=(
+                "We hold weekly game tournaments. (automated post) "
+                "We created this coin."
+            ),
+            channel="x",
+            template_id="M10",
+        )
+    )
+    assert tournaments.passed is False
+    assert "missing_disclosure:holding" in tournaments.reasons
+    unnamed = compliance_lint(Post(text="Hello there.", channel="x", template_id=""))
+    assert unnamed.passed is False
+    assert "missing_disclosure:created" in unnamed.reasons
+    assert "missing_disclosure:holding" in unnamed.reasons
+
+
+def test_paid_shill_wording_fails_without_a_negation_loophole() -> None:
+    conditional = compliance_lint(
+        Post(
+            text=(
+                "Studio rules. No paid shills without #ad. "
+                "We created this coin. We hold a dev bag. (automated post)"
+            ),
+            channel="x",
+            template_id="M3-rules",
+            paid=False,
+        )
+    )
+    assert conditional.passed is False
+    assert "paid_engagement" in conditional.reasons
+    tricky = compliance_lint(
+        Post(
+            text="No fake replies? Buy fake replies #ad." + _DISCLOSURE,
+            channel="x",
+            paid=False,
+        )
+    )
+    assert tricky.passed is False
+    assert "paid_engagement" in tricky.reasons
+
+
+def test_telegram_rate_limit_survives_dst_rollback() -> None:
+    pacific = ZoneInfo("America/Los_Angeles")
+    earlier = datetime(2026, 11, 1, 1, 59, 59, 750000, tzinfo=pacific, fold=0)
+    later = datetime(2026, 11, 1, 1, 0, 0, 250000, tzinfo=pacific, fold=1)
+    elapsed = (later.astimezone(UTC) - earlier.astimezone(UTC)).total_seconds()
+    half_second = 0.5
+    assert elapsed == pytest.approx(half_second)
+    result = compliance_lint(
+        Post(text="hello friends" + _DISCLOSURE, channel="telegram"),
+        LintContext(now=later, recent_timestamps=(earlier,)),
+    )
+    assert "rate_limit:telegram_per_second" in result.reasons

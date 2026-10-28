@@ -88,7 +88,10 @@ def test_generated_media_posts_need_ai_generated_label(channel: str) -> None:
     assert "missing_ai_generated_label" in missing.reasons
     labeled = compliance_lint(
         Post(
-            text="Pigeons wobble (automated post) AI-generated",
+            text=(
+                "Pigeons wobble (automated post) AI-generated "
+                "We created this token. We hold a dev bag."
+            ),
             channel=channel,
             uses_generated_media=True,
         )
@@ -99,7 +102,10 @@ def test_generated_media_posts_need_ai_generated_label(channel: str) -> None:
 def test_telegram_does_not_require_ai_generated_label() -> None:
     result = compliance_lint(
         Post(
-            text="Pigeons wobble (automated post)",
+            text=(
+                "Pigeons wobble (automated post) "
+                "We created this coin. We hold a dev bag."
+            ),
             channel="telegram",
             uses_generated_media=True,
         )

@@ -9,6 +9,8 @@ zero. A present empty list is a measured empty observation.
 
 from __future__ import annotations
 
+import math
+
 PARQUET_PRODUCER_STATUS = "UNKNOWN"
 CONTRACT_VERSION = "phase0-shadow-join-json-1"
 MINT_IDENTITY_FIELDS = ("mint", "creator", "name", "symbol")
@@ -76,10 +78,33 @@ def _mint_reasons(cohort_index: int, mint_index: int, mint: object) -> list[str]
         mint.get("coin_creator_fees"), list
     ):
         reasons.append(f"{prefix}_fees_not_list")
-    trades = mint.get("trades")
-    if isinstance(trades, list):
-        for trade_index, trade in enumerate(trades):
-            reasons.extend(_trade_reasons(prefix, trade_index, trade))
+    reasons.extend(_mayhem_reasons(prefix, mint))
+    reasons.extend(_trade_list_reasons(prefix, mint.get("trades")))
+    reasons.extend(_fee_list_reasons(prefix, mint.get("coin_creator_fees")))
+    return reasons
+
+
+def _mayhem_reasons(prefix: str, mint: dict[str, object]) -> list[str]:
+    if "mayhem" in mint and not isinstance(mint.get("mayhem"), bool):
+        return [f"{prefix}_mayhem_not_bool"]
+    return []
+
+
+def _trade_list_reasons(prefix: str, trades: object) -> list[str]:
+    if not isinstance(trades, list):
+        return []
+    reasons: list[str] = []
+    for trade_index, trade in enumerate(trades):
+        reasons.extend(_trade_reasons(prefix, trade_index, trade))
+    return reasons
+
+
+def _fee_list_reasons(prefix: str, fees: object) -> list[str]:
+    if not isinstance(fees, list):
+        return []
+    reasons: list[str] = []
+    for fee_index, fee in enumerate(fees):
+        reasons.extend(_fee_reasons(prefix, fee_index, fee))
     return reasons
 
 
@@ -90,4 +115,26 @@ def _trade_reasons(prefix: str, trade_index: int, trade: object) -> list[str]:
     for field in TRADE_FIELDS:
         if field not in trade:
             reasons.append(f"{prefix}_trade_{trade_index}_missing_{field}")
+    if "is_buy" in trade and not isinstance(trade.get("is_buy"), bool):
+        reasons.append(f"{prefix}_trade_{trade_index}_is_buy_not_bool")
+    if "creator_fee" in trade and _bad_fee(trade.get("creator_fee")):
+        reasons.append(f"{prefix}_trade_{trade_index}_creator_fee")
     return reasons
+
+
+def _fee_reasons(prefix: str, fee_index: int, fee: object) -> list[str]:
+    label = f"{prefix}_fee_{fee_index}"
+    if not isinstance(fee, dict):
+        return [f"{label}_not_object"]
+    if "amount_sol" not in fee:
+        return [f"{label}_missing_amount_sol"]
+    if _bad_fee(fee.get("amount_sol")):
+        return [f"{label}_amount_sol"]
+    return []
+
+
+def _bad_fee(value: object) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return True
+    number = float(value)
+    return not math.isfinite(number) or number < 0

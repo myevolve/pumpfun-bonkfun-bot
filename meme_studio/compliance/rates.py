@@ -7,10 +7,7 @@ local conservative stand-in: the official automation ceiling is UNKNOWN.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from datetime import datetime
+from datetime import UTC, datetime
 
 TELEGRAM_PER_SECOND = 1
 TELEGRAM_PER_MINUTE = 20
@@ -38,10 +35,21 @@ POLICIES: dict[str, RatePolicy] = {
 }
 
 
+def _elapsed_seconds(later: datetime, earlier: datetime) -> float:
+    """Return absolute elapsed seconds, including across a DST rollback."""
+    return (_as_utc(later) - _as_utc(earlier)).total_seconds()
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
 def _within(now: datetime, recent: tuple[datetime, ...], window: int) -> int:
     count = 0
     for stamp in recent:
-        delta = (now - stamp).total_seconds()
+        delta = _elapsed_seconds(now, stamp)
         if 0 <= delta < window:
             count += 1
     return count

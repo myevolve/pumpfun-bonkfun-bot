@@ -254,7 +254,7 @@ def test_missing_tracker_fields_stay_unknown(tmp_path: Path) -> None:
                                 "creator": "Creator",
                                 "name": "Bare",
                                 "symbol": "BARE",
-                                "trades": [{"is_buy": True, "sol_amount": 1.0}],
+                                "uri": "https://example.invalid/bare.json",
                             }
                         ],
                     }
@@ -287,6 +287,86 @@ def test_missing_tracker_fields_stay_unknown(tmp_path: Path) -> None:
     assert reported["creator_fees_sol"] is None
     markdown = (tmp_path / "out" / "report.md").read_text(encoding="utf-8")
     assert "UNKNOWN" in markdown
+
+
+def test_invalid_tracker_is_not_a_measured_zero(tmp_path: Path) -> None:
+    invalid_docs = (
+        {"cohorts": [{"story_id": "story-bare"}]},
+        {
+            "cohorts": [
+                {
+                    "story_id": "story-bare",
+                    "mints": [
+                        {
+                            "mint": "MintBare",
+                            "creator": "Creator",
+                            "name": "Bare",
+                            "symbol": "BARE",
+                            "mayhem": "false",
+                            "trades": [
+                                {
+                                    "ts": "2026-10-28T00:00:00+00:00",
+                                    "user": "BuyerA",
+                                    "is_buy": "false",
+                                    "sol_amount": 1.0,
+                                    "creator_fee": 0.0,
+                                }
+                            ],
+                            "coin_creator_fees": [],
+                        }
+                    ],
+                }
+            ]
+        },
+        {
+            "cohorts": [
+                {
+                    "story_id": "story-bare",
+                    "mints": [
+                        {
+                            "mint": "MintBare",
+                            "creator": "Creator",
+                            "name": "Bare",
+                            "symbol": "BARE",
+                            "trades": [
+                                {
+                                    "ts": "2026-10-28T00:00:00+00:00",
+                                    "user": "BuyerA",
+                                    "is_buy": None,
+                                    "sol_amount": 1.0,
+                                    "creator_fee": float("nan"),
+                                }
+                            ],
+                            "coin_creator_fees": [{"amount_sol": -1.0}],
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    for index, payload in enumerate(invalid_docs):
+        assert validate_shadow_document(payload)
+        path = tmp_path / f"bad-{index}.json"
+        path.write_text(json.dumps(payload, allow_nan=True), encoding="utf-8")
+        snapshot = load_shadow_tracker(path)
+        assert snapshot.document_valid is False
+        assert snapshot.coverage_known is False
+        assert snapshot.mints == ()
+        drafts = tmp_path / f"drafts-{index}"
+        _draft_manifest(drafts)
+        body = generate_daily_report(
+            ReportRequest(
+                output_dir=tmp_path / f"out-{index}",
+                concept={"story_id": "story-bare", "stories_seen": []},
+                compliance_results=(),
+                drafts_dir=drafts,
+                shadow_path=path,
+                now=datetime(2026, 10, 28, 15, 0, tzinfo=UTC),
+            )
+        )
+        assert "Observed shadow mints: 0" not in str(body["priors"])
+        assert "UNKNOWN" in str(body["priors"])
+        assert PARQUET_PRODUCER_STATUS == "UNKNOWN"
 
 
 def test_selected_story_keeps_its_own_replay(tmp_path: Path) -> None:

@@ -83,13 +83,19 @@ def write_launch_drafts(
 
 
 def _write_slot(outbox: _Outbox, slot: Slot, index: int) -> DraftRecord:
-    text = render_template(slot.template_id, outbox.concept, slot.variant)
+    scheduled_at = outbox.t0 + timedelta(seconds=slot.delta_seconds)
+    text = render_template(
+        slot.template_id,
+        outbox.concept,
+        slot.variant,
+        as_of=scheduled_at,
+    )
     spec = _DraftSpec(
         template_id=slot.template_id,
         channel=slot.channel,
         target=slot.target,
         offset=slot.offset,
-        scheduled_at=outbox.t0 + timedelta(seconds=slot.delta_seconds),
+        scheduled_at=scheduled_at,
         text=text,
         index=index,
         reply=slot.reply,

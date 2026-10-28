@@ -71,12 +71,14 @@ def ensure_creator_holding_disclosure(text: str) -> str:
 
 
 def disclosure_reasons(post: Post) -> list[str]:
-    """Required creator disclosure, bot label, and teaser secrecy."""
+    """Required creator disclosure, bot label, and teaser secrecy.
+
+    Every post is checked, including one whose template id is empty.
+    """
     reasons: list[str] = []
     text = post.text
     template = post.template_id
-    if template:
-        reasons.extend(_creator_holding(text))
+    reasons.extend(_creator_holding(text))
     if template in _COIN_TEMPLATES:
         reasons.extend(_coin_disclosure(text))
     if template in _ZERO_TEMPLATES and "go to zero" not in text.lower():
@@ -92,13 +94,25 @@ def disclosure_reasons(post: Post) -> list[str]:
 
 def _created(text: str) -> bool:
     return (
-        re.search(r"launched by us|we created (?:this|the) coin", text, re.IGNORECASE)
+        re.search(
+            r"launched by us|we created (?:this|the) (?:coin|token)",
+            text,
+            re.IGNORECASE,
+        )
         is not None
     )
 
 
 def _holding(text: str) -> bool:
-    return re.search(r"dev bag|dev buy|\bwe hold\b", text, re.IGNORECASE) is not None
+    """Match a token-holding statement, not an unrelated 'we hold'."""
+    return (
+        re.search(
+            r"\bdev bag\b|\bdev buy\b|\bwe hold (?:this|the) (?:coin|token)\b",
+            text,
+            re.IGNORECASE,
+        )
+        is not None
+    )
 
 
 def _creator_holding(text: str) -> list[str]:
@@ -183,11 +197,9 @@ def paid_reasons(post: Post) -> list[str]:
 
 
 def _offers_fake_engagement(text: str) -> bool:
+    """Flag paid or shill wording with no negation exemption."""
     lowered = text.lower()
-    for phrase in _FAKE_ENGAGEMENT:
-        if phrase in lowered and f"no {phrase}" not in lowered:
-            return True
-    return False
+    return any(phrase in lowered for phrase in _FAKE_ENGAGEMENT)
 
 
 def approval_reasons(post: Post) -> list[str]:

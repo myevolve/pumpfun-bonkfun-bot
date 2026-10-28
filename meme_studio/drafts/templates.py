@@ -7,6 +7,7 @@ the AI-generated label where the compliance checker requires them.
 from __future__ import annotations
 
 import hashlib
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from meme_studio.compliance.text_rules import ensure_creator_holding_disclosure
@@ -19,10 +20,24 @@ def render_template(
     template_id: str,
     concept: ConceptPackage,
     variant: str = "",
+    *,
+    as_of: datetime | None = None,
 ) -> str:
     """Return the draft text for one template id."""
     renderer = _RENDERERS[template_id]
-    return ensure_creator_holding_disclosure(renderer(concept, variant))
+    viewed = _AsOf(concept, as_of)
+    return ensure_creator_holding_disclosure(renderer(viewed, variant))
+
+
+class _AsOf:
+    """Concept plus the recap cutoff used to select sell events."""
+
+    def __init__(self, concept: ConceptPackage, as_of: datetime | None) -> None:
+        self._concept = concept
+        self.as_of = as_of
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._concept, name)
 
 
 def render_sell(concept: ConceptPackage, sell: SellEvent) -> str:
@@ -41,16 +56,56 @@ def _known(value: str | None) -> str:
     return value
 
 
+def canonical_plan(concept: ConceptPackage) -> tuple[str | None, str | None]:
+    """Return stripped plan text and its SHA-256, or nothing when no plan exists.
+
+    Whitespace-only text is not a plan. The caller-supplied ``plan_hash`` is
+    not used here.
+    """
+    raw = concept.plan_text
+    if raw is None or not raw.strip():
+        return None, None
+    body = raw.strip()
+    return body, hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def _eligible_sells(concept: ConceptPackage) -> tuple[SellEvent, ...]:
+    """Sort sells by time and drop any event after the recap cutoff."""
+    chosen = list(concept.sells)
+    cutoff = getattr(concept, "as_of", None)
+    if isinstance(cutoff, datetime):
+        chosen = [sell for sell in chosen if sell.at <= cutoff]
+    chosen.sort(key=lambda sell: (sell.at, sell.n))
+    return tuple(chosen)
+
+
 def _sell_count(concept: ConceptPackage) -> str:
     if concept.sells:
-        return str(len(concept.sells))
+        return str(len(_eligible_sells(concept)))
     return _known(concept.sell_count)
 
 
 def _bag_left(concept: ConceptPackage) -> str:
+    eligible = _eligible_sells(concept)
+    if eligible:
+        return eligible[-1].pct
     if concept.sells:
-        return concept.sells[-1].pct
+        return "UNKNOWN"
     return _known(concept.dev_bag_pct)
+
+
+def _plan_claim(concept: ConceptPackage) -> str:
+    _body, digest = canonical_plan(concept)
+    if digest is None:
+        return "plan adherence UNKNOWN"
+    return f"all per plan SHA-256 {digest}"
+
+
+def _plan_hash_line(concept: ConceptPackage) -> str:
+    _body, digest = canonical_plan(concept)
+    if digest is None:
+        return "Plan hash: UNKNOWN"
+    return f"Plan hash: {digest}"
 
 
 def _m0(concept: ConceptPackage, _variant: str) -> str:
@@ -64,14 +119,15 @@ def _game_page(concept: ConceptPackage, variant: str) -> str:
     if variant == "pending":
         contract = "CA: pending"
         links = (
-            "The contract address is filled in when the create transaction confirms."
+            "The contract address is filled in when the create transaction confirms.\n"
+            f"{_plan_hash_line(concept)}"
         )
     else:
         contract = f"CA: {concept.mint}"
         links = (
             f"Pump: https://pump.fun/coin/{concept.mint}\n"
             f"Plan: {concept.plan_url}\n"
-            f"Plan hash: {concept.plan_hash}"
+            f"{_plan_hash_line(concept)}"
         )
     return (
         f"# {concept.game_title}\n\n"
@@ -109,14 +165,13 @@ def _m1_tg(concept: ConceptPackage, _variant: str) -> str:
 
 def _plan_section(concept: ConceptPackage) -> str:
     """Render only the plan text that was supplied, and hash that same text."""
-    if concept.plan_text:
-        body = concept.plan_text.strip()
-        digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
-        return f"Plan text: {body} SHA-256 {digest}"
-    return (
-        "Sell plan schedule: UNKNOWN. "
-        "No plan text was supplied, so no ladder is stated and no hash is claimed."
-    )
+    body, digest = canonical_plan(concept)
+    if body is None or digest is None:
+        return (
+            "Sell plan schedule: UNKNOWN. "
+            "No plan text was supplied, so no ladder is stated and no hash is claimed."
+        )
+    return f"Plan text: {body} SHA-256 {digest}"
 
 
 def _p1(concept: ConceptPackage, _variant: str) -> str:
@@ -151,10 +206,7 @@ def _m3(_concept: ConceptPackage, _variant: str) -> str:
 
 
 def _m3_rules(_concept: ConceptPackage, _variant: str) -> str:
-    return (
-        "Studio rules: one wallet, no bundles, no paid shills, "
-        "no bought followers, every sell posted. (automated post)"
-    )
+    return "Studio rules: one wallet, no bundles, every sell posted. (automated post)"
 
 
 def _m4(concept: ConceptPackage, _variant: str) -> str:
@@ -202,7 +254,7 @@ def _m10(concept: ConceptPackage, _variant: str) -> str:
         f"24h of {concept.game_title}: {_known(concept.plays)} plays · "
         f"{_known(concept.buyers)} buyers · "
         f"creator fees {_known(concept.fees_sol)} SOL · dev sells {_sell_count(concept)} "
-        f"(all per plan) · dev bag left {_bag_left(concept)}%. "
+        f"({_plan_claim(concept)}) · dev bag left {_bag_left(concept)}%. "
         f"Tomorrow: a new game. (automated post)"
     )
 
@@ -219,7 +271,7 @@ def _site_recap(concept: ConceptPackage, _variant: str) -> str:
         f"24h archive of {concept.game_title}. Plays {_known(concept.plays)}. "
         f"Buyers {_known(concept.buyers)}. "
         f"Creator fees {_known(concept.fees_sol)} SOL. "
-        f"Dev sells {_sell_count(concept)}, all per the published sell plan. "
+        f"Dev sells {_sell_count(concept)}, {_plan_claim(concept)}. "
         f"Dev bag left {_bag_left(concept)}%. "
         f"We created this coin and it can go to zero. "
         f"Not financial advice. Automated post (bot).\n"

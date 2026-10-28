@@ -22,8 +22,10 @@ _FORBIDDEN = {
     "ai_reply": "action_forbidden:ai_reply",
 }
 _SECRET = re.compile(
-    r"solana_private_key|private[_ -]?key|api_key\s*=|authorization:\s*bearer|"
-    r"bot\d+:[A-Za-z0-9_-]{20,}",
+    r"solana_private_key|private[_ -]?key|authorization:\s*bearer|"
+    r"bot\d+:[A-Za-z0-9_-]{20,}|"
+    r"\bapi_key\b|\b[A-Za-z0-9_]*TOKEN\b|\b[A-Za-z0-9_]*SECRET\b|"
+    r"X_BEARER_TOKEN|GEYSER_API_TOKEN",
     re.IGNORECASE,
 )
 _SECOND_ACCOUNT = 1
