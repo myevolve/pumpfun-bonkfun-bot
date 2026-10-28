@@ -327,7 +327,7 @@ def test_package_source_has_no_wallet_rpc_or_network_client() -> None:
         ".env",
         "AsyncClient",
     )
-    root = _ROOT / "meme_studio"
+    root = _ROOT / "src" / "meme_studio"
     offenders: list[str] = []
     for path in sorted(root.rglob("*.py")):
         text = path.read_text(encoding="utf-8")
