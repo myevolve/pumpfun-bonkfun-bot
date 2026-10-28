@@ -154,7 +154,7 @@ def _optional_float(mint: dict[str, object], key: str) -> float | None:
 
 
 def _finite_nonnegative(value: object) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if isinstance(value, bool) or not isinstance(value, int | float):
         return None
     number = float(value)
     if not math.isfinite(number) or number < 0:

@@ -371,7 +371,7 @@ def test_sell_log_draft_is_written_not_sent(tmp_path: Path) -> None:
 
 
 def test_drafts_package_has_no_publish_function() -> None:
-    root = Path(__file__).resolve().parents[2] / "meme_studio" / "drafts"
+    root = Path(__file__).resolve().parents[2] / "src" / "meme_studio" / "drafts"
     banned = {"publish", "send_message", "post_tweet", "create_tweet"}
     found: list[str] = []
     for path in root.rglob("*.py"):

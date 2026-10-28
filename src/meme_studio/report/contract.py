@@ -134,7 +134,7 @@ def _fee_reasons(prefix: str, fee_index: int, fee: object) -> list[str]:
 
 
 def _bad_fee(value: object) -> bool:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if isinstance(value, bool) or not isinstance(value, int | float):
         return True
     number = float(value)
     return not math.isfinite(number) or number < 0

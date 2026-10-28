@@ -82,7 +82,7 @@ def test_phase_shadow_blocks_publish_and_allows_drafts() -> None:
 
 
 def test_package_source_has_no_network_client() -> None:
-    root = Path(__file__).resolve().parents[2] / "meme_studio"
+    root = Path(__file__).resolve().parents[2] / "src" / "meme_studio"
     assert root.is_dir()
     offenders: list[str] = []
     for path in root.rglob("*.py"):

@@ -73,7 +73,7 @@ def _numeric_reasons(tx: TxIntent) -> list[str]:
 
 
 def _bad_number(value: float) -> bool:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if isinstance(value, bool) or not isinstance(value, int | float):
         return True
     return not math.isfinite(value) or value < 0
 
