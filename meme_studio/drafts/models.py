@@ -45,16 +45,17 @@ class ConceptPackage:
     studio: str
     steve_handle: str
     hub_domain: str
-    plays: str = "12"
-    score: str = "900"
-    handle: str = "player1"
-    buyers: str = "4"
-    holders: str = "3"
-    fees_sol: str = "0.01"
-    sell_count: str = "0"
-    dev_bag_pct: str = "100"
-    time_label: str = "18:00"
-    graduated: bool = False
+    plan_text: str | None = None
+    plays: str | None = None
+    score: str | None = None
+    handle: str | None = None
+    buyers: str | None = None
+    holders: str | None = None
+    fees_sol: str | None = None
+    sell_count: str | None = None
+    dev_bag_pct: str | None = None
+    time_label: str | None = None
+    graduated: bool | None = None
     sells: tuple[SellEvent, ...] = ()
 
 

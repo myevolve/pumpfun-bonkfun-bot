@@ -12,11 +12,13 @@ import pytest
 
 from meme_studio.drafts import ConceptPackage, write_launch_drafts
 from meme_studio.report import (
+    PARQUET_PRODUCER_STATUS,
     ReportRequest,
     generate_daily_report,
     load_shadow_tracker,
     report_due_at_0800_pt,
     run_scheduled_report,
+    validate_shadow_document,
 )
 from tests.meme_studio.conftest import CREATOR, FIXTURES, MINT
 
@@ -25,6 +27,8 @@ if TYPE_CHECKING:
 
 _PIGEON_BUYERS = 2
 _CONTROL_BUYERS = 3
+_SECOND_ADHERENCE = 0.5
+_SECOND_CONTROL_BUYERS = 9
 
 
 def test_report_due_only_during_the_0800_pt_minute() -> None:
@@ -225,3 +229,194 @@ def test_report_does_not_open_sockets(
             art,
         )
     )
+
+
+def _draft_manifest(path: Path) -> None:
+    path.mkdir()
+    (path / "manifest.json").write_text(
+        json.dumps({"phase": "shadow", "schedule": [], "posts": []}),
+        encoding="utf-8",
+    )
+
+
+def test_missing_tracker_fields_stay_unknown(tmp_path: Path) -> None:
+    path = tmp_path / "partial.json"
+    path.write_text(
+        json.dumps(
+            {
+                "date": "2026-10-28",
+                "cohorts": [
+                    {
+                        "story_id": "story-bare",
+                        "mints": [
+                            {
+                                "mint": "MintBare",
+                                "creator": "Creator",
+                                "name": "Bare",
+                                "symbol": "BARE",
+                                "trades": [{"is_buy": True, "sol_amount": 1.0}],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    snapshot = load_shadow_tracker(path)
+    mint = snapshot.mints[0]
+    assert mint.outside_buyers is None
+    assert mint.creator_fees_sol is None
+    assert mint.dev_buy_sol is None
+    assert mint.graduated is None
+    assert mint.mayhem is None
+    drafts = tmp_path / "drafts"
+    _draft_manifest(drafts)
+    body = generate_daily_report(
+        ReportRequest(
+            output_dir=tmp_path / "out",
+            concept={"story_id": "story-bare", "stories_seen": []},
+            compliance_results=(),
+            drafts_dir=drafts,
+            shadow_path=path,
+            now=datetime(2026, 10, 28, 15, 0, tzinfo=UTC),
+        )
+    )
+    reported = body["shadow"]["mints"][0]
+    assert reported["outside_buyers"] is None
+    assert reported["creator_fees_sol"] is None
+    markdown = (tmp_path / "out" / "report.md").read_text(encoding="utf-8")
+    assert "UNKNOWN" in markdown
+
+
+def test_selected_story_keeps_its_own_replay(tmp_path: Path) -> None:
+    path = tmp_path / "two.json"
+    path.write_text(
+        json.dumps(
+            {
+                "date": "2026-10-28",
+                "cohorts": [
+                    {
+                        "story_id": "story-first",
+                        "paper_replay": {
+                            "0.1": {
+                                "pnl_sol": -1.0,
+                                "label": "PAPER",
+                                "plan_adherence": 0.0,
+                            }
+                        },
+                        "random_control": {"outside_buyers_24h": 1},
+                        "mints": [
+                            {
+                                "mint": "MintA",
+                                "creator": "A",
+                                "name": "A",
+                                "symbol": "AAA",
+                                "dev_buy_sol": 0.1,
+                                "mayhem": False,
+                                "graduation_ts": None,
+                                "trades": [],
+                                "coin_creator_fees": [],
+                            }
+                        ],
+                    },
+                    {
+                        "story_id": "story-second",
+                        "paper_replay": {
+                            "0.1": {
+                                "pnl_sol": 0.2,
+                                "label": "PAPER",
+                                "plan_adherence": 0.5,
+                            }
+                        },
+                        "random_control": {"outside_buyers_24h": 9},
+                        "mints": [
+                            {
+                                "mint": "MintB",
+                                "creator": "B",
+                                "name": "B",
+                                "symbol": "BBB",
+                                "dev_buy_sol": 0.1,
+                                "mayhem": False,
+                                "graduation_ts": None,
+                                "trades": [],
+                                "coin_creator_fees": [],
+                            }
+                        ],
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    drafts = tmp_path / "drafts"
+    _draft_manifest(drafts)
+    body = generate_daily_report(
+        ReportRequest(
+            output_dir=tmp_path / "out",
+            concept={"story_id": "story-second", "stories_seen": []},
+            compliance_results=(),
+            drafts_dir=drafts,
+            shadow_path=path,
+            now=datetime(2026, 10, 28, 15, 0, tzinfo=UTC),
+        )
+    )
+    assert body["plan_adherence"] == _SECOND_ADHERENCE
+    control = body["shadow"]["random_control"]
+    assert control["outside_buyers_24h"] == _SECOND_CONTROL_BUYERS
+
+
+def test_priors_follow_observed_mint_count(tmp_path: Path) -> None:
+    mints = [
+        {
+            "mint": f"Mint{index}",
+            "creator": "C",
+            "name": "N",
+            "symbol": "SYM",
+            "dev_buy_sol": 0.0,
+            "mayhem": False,
+            "graduation_ts": None,
+            "trades": [],
+            "coin_creator_fees": [],
+        }
+        for index in range(31)
+    ]
+    path = tmp_path / "many.json"
+    path.write_text(
+        json.dumps(
+            {
+                "date": "2026-10-28",
+                "cohorts": [
+                    {
+                        "story_id": "story-many",
+                        "paper_replay": {},
+                        "random_control": {},
+                        "mints": mints,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    drafts = tmp_path / "drafts"
+    _draft_manifest(drafts)
+    body = generate_daily_report(
+        ReportRequest(
+            output_dir=tmp_path / "out",
+            concept={"story_id": "story-many", "stories_seen": []},
+            compliance_results=(),
+            drafts_dir=drafts,
+            shadow_path=path,
+            now=datetime(2026, 10, 28, 15, 0, tzinfo=UTC),
+        )
+    )
+    assert "31" in body["priors"]
+    assert "below that threshold" not in body["priors"]
+
+
+def test_shadow_contract_keeps_parquet_unknown() -> None:
+    payload = json.loads((FIXTURES / "shadow_join.json").read_text(encoding="utf-8"))
+    assert validate_shadow_document(payload) == ()
+    assert PARQUET_PRODUCER_STATUS == "UNKNOWN"
+    incomplete = {"date": "2026-10-28"}
+    assert "missing_cohorts" in validate_shadow_document(incomplete)

@@ -8,6 +8,8 @@ import socket
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+import pytest
+
 from meme_studio.art import (
     MODEL_IMAGE,
     MODEL_VIDEO,
@@ -17,6 +19,7 @@ from meme_studio.art import (
     write_imagine_asset,
 )
 from meme_studio.compliance import MediaMetadata, compliance_lint
+from meme_studio.errors import UnsafeStemError
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -76,8 +79,8 @@ def test_fixture_image_and_video_write_sidecar_metadata(
     assert image_result.asset_path.read_bytes() == b"fixture-png-bytes"
     assert image_result.asset_path.suffix == ".png"
     assert video_result.asset_path.suffix == ".mp4"
-    assert image_result.metadata_path == tmp_path / "logo.meta.json"
-    assert video_result.metadata_path == tmp_path / "clip.meta.json"
+    assert image_result.metadata_path == tmp_path / "logo.png.meta.json"
+    assert video_result.metadata_path == tmp_path / "clip.mp4.meta.json"
     meta = json.loads(image_result.metadata_path.read_text(encoding="utf-8"))
     assert meta["prompt"] == image.prompt
     assert meta["provider"] == PROVIDER
@@ -120,6 +123,65 @@ def test_tiktok_coin_overlay_is_not_written(tmp_path: Path) -> None:
     assert result.written is False
     assert any(reason.startswith("media_overlay:") for reason in result.lint.reasons)
     assert list(tmp_path.iterdir()) == []
+
+
+def test_stem_cannot_escape_output_directory(tmp_path: Path) -> None:
+    assets = tmp_path / "assets"
+    spec = ArtSpec(
+        stem="../escaped",
+        kind="image",
+        prompt=build_wild_meme_prompt(
+            character="a round cartoon pigeon in a paper hat",
+            joke_line="The pigeons elected a bench.",
+            game_title="Bench Birds",
+        ),
+        body=b"fixture-png-bytes",
+        timestamp=datetime(2026, 10, 28, 18, 0, tzinfo=UTC),
+    )
+    with pytest.raises(UnsafeStemError):
+        write_imagine_asset(assets, spec)
+    assert not (tmp_path / "escaped.png").exists()
+    assert not (tmp_path / "escaped.png.meta.json").exists()
+
+
+def test_same_stem_keeps_separate_image_and_video_sidecars(tmp_path: Path) -> None:
+    stamp = datetime(2026, 10, 28, 18, 0, tzinfo=UTC)
+    prompt = build_wild_meme_prompt(
+        character="a round cartoon pigeon in a paper hat",
+        joke_line="The pigeons elected a bench.",
+        game_title="Bench Birds",
+    )
+    image = write_imagine_asset(
+        tmp_path,
+        ArtSpec(
+            stem="same",
+            kind="image",
+            prompt=prompt,
+            body=b"png",
+            timestamp=stamp,
+        ),
+    )
+    video = write_imagine_asset(
+        tmp_path,
+        ArtSpec(
+            stem="same",
+            kind="video",
+            prompt=prompt,
+            body=b"mp4",
+            timestamp=stamp,
+        ),
+    )
+    assert image.written is True
+    assert video.written is True
+    assert image.metadata_path != video.metadata_path
+    assert image.metadata_path is not None
+    assert video.metadata_path is not None
+    image_meta = json.loads(image.metadata_path.read_text(encoding="utf-8"))
+    video_meta = json.loads(video.metadata_path.read_text(encoding="utf-8"))
+    assert image_meta["kind"] == "image"
+    assert image_meta["model"] == MODEL_IMAGE
+    assert video_meta["kind"] == "video"
+    assert video_meta["model"] == MODEL_VIDEO
 
 
 def test_writer_does_not_open_sockets(

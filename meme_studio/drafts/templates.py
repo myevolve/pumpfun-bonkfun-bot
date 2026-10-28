@@ -6,7 +6,10 @@ the AI-generated label where the compliance checker requires them.
 
 from __future__ import annotations
 
+import hashlib
 from typing import TYPE_CHECKING
+
+from meme_studio.compliance.text_rules import ensure_creator_holding_disclosure
 
 if TYPE_CHECKING:
     from meme_studio.drafts.models import ConceptPackage, SellEvent
@@ -19,16 +22,35 @@ def render_template(
 ) -> str:
     """Return the draft text for one template id."""
     renderer = _RENDERERS[template_id]
-    return renderer(concept, variant)
+    return ensure_creator_holding_disclosure(renderer(concept, variant))
 
 
 def render_sell(concept: ConceptPackage, sell: SellEvent) -> str:
     """Return the P2 dev-sell log line."""
-    return (
+    text = (
         f"Dev sell #{sell.n} per plan step {sell.step}: {sell.tokens} "
         f"${concept.ticker} for {sell.sol} SOL at {sell.multiple} times entry. "
         f"Remaining dev bag {sell.pct}%. tx: {sell.sig} (automated post)"
     )
+    return ensure_creator_holding_disclosure(text)
+
+
+def _known(value: str | None) -> str:
+    if value is None or value == "":
+        return "UNKNOWN"
+    return value
+
+
+def _sell_count(concept: ConceptPackage) -> str:
+    if concept.sells:
+        return str(len(concept.sells))
+    return _known(concept.sell_count)
+
+
+def _bag_left(concept: ConceptPackage) -> str:
+    if concept.sells:
+        return concept.sells[-1].pct
+    return _known(concept.dev_bag_pct)
 
 
 def _m0(concept: ConceptPackage, _variant: str) -> str:
@@ -85,16 +107,25 @@ def _m1_tg(concept: ConceptPackage, _variant: str) -> str:
     )
 
 
+def _plan_section(concept: ConceptPackage) -> str:
+    """Render only the plan text that was supplied, and hash that same text."""
+    if concept.plan_text:
+        body = concept.plan_text.strip()
+        digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+        return f"Plan text: {body} SHA-256 {digest}"
+    return (
+        "Sell plan schedule: UNKNOWN. "
+        "No plan text was supplied, so no ladder is stated and no hash is claimed."
+    )
+
+
 def _p1(concept: ConceptPackage, _variant: str) -> str:
     return (
-        f"${concept.ticker}: creator disclosure + sell plan (SHA-256 {concept.plan_hash})\n"
+        f"${concept.ticker}: creator disclosure + sell plan\n"
         f"• We created this coin. One creator wallet: {concept.wallet}. "
         f"Dev buy {concept.dev_buy_sol} SOL in the create tx.\n"
         f"• We earn pump.fun creator fees on trading volume.\n"
-        "• Plan: at 2.5 times our entry we sell enough to recover cost; then 25% of "
-        "what's left at 5 times, 8 times, and 12 times; then trailing 25% steps. "
-        "If 2.5 times isn't hit in 24 h we sell the rest in 4 steps, "
-        "each announced 1 h ahead.\n"
+        f"• {_plan_section(concept)}\n"
         f"• Every sell is posted here with the tx. No other wallets. No promises: "
         f"it's a collectible meme, it can go to zero.\n"
         f"(automated post) Not financial advice."
@@ -121,53 +152,57 @@ def _m3(_concept: ConceptPackage, _variant: str) -> str:
 
 def _m3_rules(_concept: ConceptPackage, _variant: str) -> str:
     return (
-        "Studio rules: one wallet, no bundles, no paid shills without #ad, "
-        "every sell posted. (automated post)"
+        "Studio rules: one wallet, no bundles, no paid shills, "
+        "no bought followers, every sell posted. (automated post)"
     )
 
 
 def _m4(concept: ConceptPackage, _variant: str) -> str:
     return (
         f"Post your {concept.game_title} score in the group. "
-        f"Top score at {concept.time_label} PT gets a shout-out. "
+        f"Top score at {_known(concept.time_label)} PT gets a shout-out. "
         f"(No prizes, no tokens. Just glory.) (automated post)"
     )
 
 
 def _m5(concept: ConceptPackage, _variant: str) -> str:
     return (
-        f"{concept.joke_line} — play free at {concept.hub_domain} "
-        f"(automated post) AI-generated"
+        f"Second still, hours after the drop: {concept.joke_line} "
+        f"The free game is still up at {concept.hub_domain}. "
+        f"No price talk in this caption. (automated post) AI-generated"
     )
 
 
 def _m7(concept: ConceptPackage, _variant: str) -> str:
     return (
-        f"{concept.plays} plays, top score {concept.score} by {concept.handle}. "
+        f"{_known(concept.plays)} plays, top score {_known(concept.score)} "
+        f"by {_known(concept.handle)}. "
         f"Game: (reply). (automated post)"
     )
 
 
 def _m8(concept: ConceptPackage, _variant: str) -> str:
     return (
-        f"High-score shout-out for {concept.game_title}: {concept.handle} "
-        f"leads after {concept.plays} plays. Glory only. (automated post)"
+        f"High-score shout-out for {concept.game_title}: {_known(concept.handle)} "
+        f"leads after {_known(concept.plays)} plays. Glory only. (automated post)"
     )
 
 
 def _m9(concept: ConceptPackage, _variant: str) -> str:
     return (
         f"${concept.ticker} completed the pump.fun bonding curve. "
-        f"Facts: {concept.holders} holders, {concept.buyers} unique buyers. "
+        f"Facts: {_known(concept.holders)} holders, "
+        f"{_known(concept.buyers)} unique buyers. "
         f"Plan continues unchanged. (automated post)"
     )
 
 
 def _m10(concept: ConceptPackage, _variant: str) -> str:
     return (
-        f"24h of {concept.game_title}: {concept.plays} plays · {concept.buyers} buyers · "
-        f"creator fees {concept.fees_sol} SOL · dev sells {concept.sell_count} "
-        f"(all per plan) · dev bag left {concept.dev_bag_pct}%. "
+        f"24h of {concept.game_title}: {_known(concept.plays)} plays · "
+        f"{_known(concept.buyers)} buyers · "
+        f"creator fees {_known(concept.fees_sol)} SOL · dev sells {_sell_count(concept)} "
+        f"(all per plan) · dev bag left {_bag_left(concept)}%. "
         f"Tomorrow: a new game. (automated post)"
     )
 
@@ -181,10 +216,11 @@ def _m11(concept: ConceptPackage, _variant: str) -> str:
 
 def _site_recap(concept: ConceptPackage, _variant: str) -> str:
     return (
-        f"24h archive of {concept.game_title}. Plays {concept.plays}. "
-        f"Buyers {concept.buyers}. Creator fees {concept.fees_sol} SOL. "
-        f"Dev sells {concept.sell_count}, all per the published sell plan. "
-        f"Dev bag left {concept.dev_bag_pct}%. "
+        f"24h archive of {concept.game_title}. Plays {_known(concept.plays)}. "
+        f"Buyers {_known(concept.buyers)}. "
+        f"Creator fees {_known(concept.fees_sol)} SOL. "
+        f"Dev sells {_sell_count(concept)}, all per the published sell plan. "
+        f"Dev bag left {_bag_left(concept)}%. "
         f"We created this coin and it can go to zero. "
         f"Not financial advice. Automated post (bot).\n"
     )

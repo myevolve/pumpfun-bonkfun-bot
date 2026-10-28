@@ -11,6 +11,8 @@ from meme_studio.compliance.models import LintResult, OpsCheck
 
 _LOG = logging.getLogger(__name__)
 _SEND_ACTIONS = frozenset({"publish", "send", "post"})
+_SHADOW_PHASE = "shadow"
+_SHADOW_ACTION = "draft"
 _FORBIDDEN = {
     "like": "action_forbidden:like",
     "bulk_follow": "action_forbidden:bulk_follow",
@@ -56,8 +58,10 @@ def _reasons(check: OpsCheck) -> list[str]:
         reasons.append("ops_paid_engagement")
     if _SECRET.search(check.log_text):
         reasons.append("ops_secret")
-    if check.action in _SEND_ACTIONS:
+    if check.phase != _SHADOW_PHASE or check.action in _SEND_ACTIONS:
         reasons.append("ops_phase")
+    if check.action != _SHADOW_ACTION:
+        reasons.append("ops_action")
     forbidden = _FORBIDDEN.get(check.action)
     if forbidden:
         reasons.append(forbidden)

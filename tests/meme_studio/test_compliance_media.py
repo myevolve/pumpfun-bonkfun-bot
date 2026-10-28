@@ -49,6 +49,19 @@ def test_disallowed_prompt_categories(prompt: str, code: str) -> None:
     assert code in result.reasons
 
 
+def test_overlays_are_screened_on_every_channel() -> None:
+    result = compliance_lint(
+        MediaMetadata(
+            prompt="cartoon pigeon",
+            overlays=("Elon Musk",),
+            channel="x",
+            kind="image",
+        )
+    )
+    assert result.passed is False
+    assert "person_blocked" in result.reasons
+
+
 def test_provocative_wild_cartoon_prompt_passes() -> None:
     result = compliance_lint(
         MediaMetadata(

@@ -42,25 +42,25 @@ _PHOTOISH = re.compile(
 
 
 def media_reasons(media: MediaMetadata) -> list[str]:
-    """Screen a generated-media prompt and its burned-in overlays."""
-    prompt = media.prompt
+    """Screen a generated-media prompt and every burned-in overlay."""
+    blob = "\n".join((media.prompt, *media.overlays))
     reasons: list[str] = []
-    if person_blocked(prompt):
+    if person_blocked(blob):
         reasons.append("person_blocked")
-    if brand_blocked(prompt):
+    if brand_blocked(blob):
         reasons.append("media_brand")
-    if franchise_or_artist(prompt):
+    if franchise_or_artist(blob):
         reasons.append("artist_or_franchise")
-    if tragedy_hit(prompt):
+    if tragedy_hit(blob):
         reasons.append("tragedy")
-    reasons.extend(_likeness_reasons(prompt))
-    if _SEXUAL.search(prompt):
+    reasons.extend(_likeness_reasons(blob))
+    if _SEXUAL.search(blob):
         reasons.append("media_sexual")
-    if _GORE.search(prompt):
+    if _GORE.search(blob):
         reasons.append("media_gore")
-    if hate_hit(prompt):
+    if hate_hit(blob):
         reasons.append("media_hate")
-    if _MINOR.search(prompt):
+    if _MINOR.search(blob):
         reasons.append("media_minor")
     reasons.extend(_overlay_reasons(media))
     return reasons

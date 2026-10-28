@@ -17,7 +17,8 @@ if TYPE_CHECKING:
 _PT = ZoneInfo("America/Los_Angeles")
 _DUE_HOUR = 8
 _DUE_MINUTE = 0
-_PRIORS = "No prior update: shadow sample is below 30 launches."
+# Design assumption from the QD1955 pipeline note, not a measured result.
+_DESIGN_SAMPLE_THRESHOLD = 30
 
 
 @dataclass(frozen=True)
@@ -60,10 +61,12 @@ def generate_daily_report(request: ReportRequest) -> dict[str, object]:
         "stories": list(request.concept.get("stories_seen", [])),
         "compliance": _compliance(request.compliance_results),
         "drafts": _drafts(request.drafts_dir),
-        "shadow": _shadow_body(snapshot),
-        "plan_adherence": _adherence(snapshot),
+        "shadow": _shadow_body(snapshot, str(request.concept.get("story_id") or "")),
+        "plan_adherence": _adherence(
+            snapshot, str(request.concept.get("story_id") or "")
+        ),
         "incidents": list(request.incidents),
-        "priors": _PRIORS,
+        "priors": _priors(snapshot),
         "art": _art(request.art_dir),
     }
     request.output_dir.mkdir(parents=True, exist_ok=True)
@@ -125,7 +128,7 @@ def _art(art_dir: Path | None) -> list[dict[str, object]]:
     return rows
 
 
-def _shadow_body(snapshot: ShadowSnapshot) -> dict[str, object]:
+def _shadow_body(snapshot: ShadowSnapshot, story_id: str) -> dict[str, object]:
     mints = [
         {
             "mint": item.mint,
@@ -140,20 +143,47 @@ def _shadow_body(snapshot: ShadowSnapshot) -> dict[str, object]:
         }
         for item in snapshot.mints
     ]
+    selected = snapshot.by_story.get(story_id, {})
+    replay = selected.get("paper_replay") if isinstance(selected, dict) else None
+    control = selected.get("random_control") if isinstance(selected, dict) else None
     return {
         "date": snapshot.date,
         "mints": mints,
-        "paper_replay": snapshot.paper_replay,
-        "random_control": snapshot.random_control,
+        "selected_story_id": story_id,
+        "paper_replay": replay if isinstance(replay, dict) else None,
+        "random_control": control if isinstance(control, dict) else None,
         "story_ids": list(snapshot.story_ids),
     }
 
 
-def _adherence(snapshot: ShadowSnapshot) -> object:
-    sized = snapshot.paper_replay.get("0.1")
+def _adherence(snapshot: ShadowSnapshot, story_id: str) -> object:
+    selected = snapshot.by_story.get(story_id)
+    if not isinstance(selected, dict):
+        return "UNKNOWN"
+    replay = selected.get("paper_replay")
+    if not isinstance(replay, dict):
+        return "UNKNOWN"
+    sized = replay.get("0.1")
     if isinstance(sized, dict) and "plan_adherence" in sized:
         return sized["plan_adherence"]
-    return None
+    return "UNKNOWN"
+
+
+def _priors(snapshot: ShadowSnapshot) -> str:
+    """State the observed mint count against the design threshold of 30."""
+    if not snapshot.coverage_known:
+        return "Sample size: UNKNOWN."
+    observed = len(snapshot.mints)
+    threshold = _DESIGN_SAMPLE_THRESHOLD
+    if observed < threshold:
+        relation = "below that threshold"
+    else:
+        relation = "at or above that threshold"
+    return (
+        f"Observed shadow mints: {observed}. "
+        f"Design-assumption threshold is {threshold}. "
+        f"Sample is {relation}."
+    )
 
 
 def _markdown(body: dict[str, object]) -> str:
@@ -238,9 +268,16 @@ def _shadow_lines(shadow: object) -> list[str]:
 
 def _mint_line(mint: dict[str, object]) -> str:
     return (
-        f"- {mint.get('symbol')} outside_buyers={mint.get('outside_buyers')} "
-        f"fees={mint.get('creator_fees_sol')} graduated={mint.get('graduated')}"
+        f"- {mint.get('symbol')} outside_buyers={_show(mint.get('outside_buyers'))} "
+        f"fees={_show(mint.get('creator_fees_sol'))} "
+        f"graduated={_show(mint.get('graduated'))}"
     )
+
+
+def _show(value: object) -> str:
+    if value is None:
+        return "UNKNOWN"
+    return str(value)
 
 
 def _art_lines(art: object) -> list[str]:

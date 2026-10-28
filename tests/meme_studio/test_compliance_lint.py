@@ -177,7 +177,9 @@ def test_x_urls_belong_in_replies() -> None:
         channel="x",
     )
     reply = Post(
-        text="Play https://games.example/bench",
+        text=(
+            "Play https://games.example/bench We created this coin. We hold a dev bag."
+        ),
         channel="x",
         is_reply=True,
         template_id="M2",
@@ -187,19 +189,21 @@ def test_x_urls_belong_in_replies() -> None:
 
 
 def test_paid_posts_need_ad_hash_not_spon() -> None:
-    weak = compliance_lint(Post(text="collab spon", channel="x", paid=True))
-    assert weak.passed is False
-    assert "missing_ad_disclosure" in weak.reasons
-    strong = compliance_lint(Post(text="Cartoon pigeon. #ad", channel="x", paid=True))
-    assert strong.passed is True
-    partner = compliance_lint(
-        Post(
-            text="Cartoon pigeon. paid partnership with ParodyDesk",
-            channel="x",
-            paid=True,
-        )
+    """Paid and fake engagement fail even when the post says #ad."""
+    samples = (
+        "collab spon",
+        "Cartoon pigeon. #ad",
+        "Cartoon pigeon. paid partnership with ParodyDesk",
+        "Buy followers and fake replies #ad",
     )
-    assert partner.passed is True
+    for sample in samples:
+        result = compliance_lint(Post(text=sample, channel="x", paid=True))
+        assert result.passed is False, sample
+        assert "paid_engagement" in result.reasons
+    organic = compliance_lint(
+        Post(text="Cartoon pigeon. (automated post)", channel="telegram")
+    )
+    assert organic.passed is True
 
 
 def test_person_brand_tragedy_and_official_names_fail() -> None:
@@ -360,7 +364,8 @@ def test_m0_teaser_rejects_ticker() -> None:
         Post(
             text=(
                 "New parody game in 5 min. Theme: pigeons. "
-                "Automated post by ParodyDesk (bot). Not financial advice."
+                "Automated post by ParodyDesk (bot). Not financial advice. "
+                "We created this coin. We hold a dev bag."
             ),
             channel="telegram",
             template_id="M0",
@@ -372,7 +377,7 @@ def test_m0_teaser_rejects_ticker() -> None:
         Post(
             text=(
                 "New parody game $BENCH. Automated post by ParodyDesk (bot). "
-                "Not financial advice."
+                "Not financial advice. We created this coin. We hold a dev bag."
             ),
             channel="telegram",
             template_id="M0",

@@ -5,15 +5,15 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import UTC
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from meme_studio.compliance.lint import compliance_lint
 from meme_studio.compliance.models import LintResult, MediaMetadata
-from meme_studio.errors import NaiveTimeError, UnknownMediaKindError
+from meme_studio.errors import NaiveTimeError, UnknownMediaKindError, UnsafeStemError
 
 if TYPE_CHECKING:
     from datetime import datetime
-    from pathlib import Path
 
 PROVIDER = "xai-grok-imagine"
 MODEL_IMAGE = "grok-imagine"
@@ -66,8 +66,7 @@ def write_imagine_asset(directory: Path, spec: ArtSpec) -> ArtWriteResult:
             lint=lint,
         )
     directory.mkdir(parents=True, exist_ok=True)
-    asset_path = directory / f"{spec.stem}{_SUFFIXES[spec.kind]}"
-    metadata_path = directory / f"{spec.stem}.meta.json"
+    asset_path, metadata_path = _contained_paths(directory, spec.stem, spec.kind)
     asset_path.write_bytes(spec.body)
     metadata_path.write_text(
         json.dumps(_sidecar(metadata, spec, lint), indent=2) + "\n",
@@ -79,6 +78,29 @@ def write_imagine_asset(directory: Path, spec: ArtSpec) -> ArtWriteResult:
         metadata_path=metadata_path,
         lint=lint,
     )
+
+
+def _contained_paths(directory: Path, stem: str, kind: str) -> tuple[Path, Path]:
+    if not _stem_is_single_name(stem):
+        raise UnsafeStemError
+    suffix = _SUFFIXES[kind]
+    root = directory.resolve()
+    asset_path = (directory / f"{stem}{suffix}").resolve()
+    metadata_path = (directory / f"{stem}{suffix}.meta.json").resolve()
+    if asset_path.parent != root or metadata_path.parent != root:
+        raise UnsafeStemError
+    return asset_path, metadata_path
+
+
+def _stem_is_single_name(stem: str) -> bool:
+    if not stem or stem.strip() != stem:
+        return False
+    if stem in {".", ".."}:
+        return False
+    path = Path(stem)
+    if path.is_absolute():
+        return False
+    return len(path.parts) == 1 and "/" not in stem and "\\" not in stem
 
 
 def _metadata(spec: ArtSpec) -> MediaMetadata:

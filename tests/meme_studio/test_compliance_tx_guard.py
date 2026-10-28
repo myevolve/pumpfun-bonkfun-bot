@@ -110,6 +110,24 @@ def test_dev_buy_daily_and_balance_caps() -> None:
     assert "tx_balance_cap" in heavy.reasons
 
 
+def test_unknown_kinds_fail_closed() -> None:
+    for kind in ("bundle_buy", "wash_trade", "fund_wallet", "round_trip"):
+        result = tx_guard(_create(kind=kind, sol_amount=0.0))
+        assert result.passed is False
+        assert "tx_kind_unsupported" in result.reasons
+
+
+def test_non_finite_and_negative_amounts_fail() -> None:
+    nan = tx_guard(_create(sol_amount=float("nan")))
+    assert nan.passed is False
+    assert "tx_amount" in nan.reasons
+    negative = tx_guard(_create(sol_amount=-1.0))
+    assert negative.passed is False
+    assert "tx_amount" in negative.reasons
+    bad_balance = tx_guard(_create(wallet_balance_sol=float("inf")))
+    assert "tx_amount" in bad_balance.reasons
+
+
 def test_token_transfer_and_withdraw_destinations() -> None:
     moved = tx_guard(
         _create(kind="token_transfer", sol_amount=0.0, token_destination=HIDDEN)

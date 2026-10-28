@@ -94,7 +94,13 @@ class LintContext:
 
 @dataclass(frozen=True)
 class TxIntent:
-    """A transaction the launch wrapper would sign. This object is never signed."""
+    """A transaction the launch wrapper would sign. This object is never signed.
+
+    ``dev_buy_cap_sol`` defaults to 0.25 as an assumption copied from the
+    QD1955 compliance design (per-launch dev-buy cap). It is not a signed
+    spending approval. ``daily_sol_cap`` and ``wallet_balance_cap_sol`` stay
+    unset until a caller supplies them; an unset cap fails closed.
+    """
 
     creator_wallet: str
     signers: tuple[str, ...]
@@ -107,10 +113,10 @@ class TxIntent:
     plan_hash: str = ""
     committed_plan_hash: str = ""
     daily_sol_spent: float = 0.0
-    daily_sol_cap: float = 10.0
+    daily_sol_cap: float | None = None
     dev_buy_cap_sol: float = 0.25
     wallet_balance_sol: float = 0.0
-    wallet_balance_cap_sol: float = 10.0
+    wallet_balance_cap_sol: float | None = None
     destination: str = ""
     cold_address: str = ""
     token_destination: str = ""

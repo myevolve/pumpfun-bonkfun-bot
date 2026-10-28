@@ -48,6 +48,17 @@ def test_secrets_in_logs_fail() -> None:
     assert clean.passed is True
 
 
+def test_reply_and_unknown_actions_are_not_approved() -> None:
+    reply = ops_guard(OpsCheck(phase="shadow", action="reply"))
+    assert reply.passed is False
+    assert reply.human_approval_required is False
+    assert "ops_action" in reply.reasons
+    live = ops_guard(OpsCheck(phase="live", action="send_transaction"))
+    assert live.passed is False
+    assert "ops_phase" in live.reasons
+    assert "ops_action" in live.reasons
+
+
 def test_phase_shadow_blocks_publish_and_allows_drafts() -> None:
     draft = ops_guard(OpsCheck(phase="shadow", action="draft"))
     assert draft.passed is True

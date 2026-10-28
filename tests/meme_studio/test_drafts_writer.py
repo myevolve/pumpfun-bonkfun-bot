@@ -4,12 +4,16 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import socket
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from meme_studio.drafts import ConceptPackage, SellEvent, write_launch_drafts
+from meme_studio.errors import NaiveTimeError
 from tests.meme_studio.conftest import CREATOR, MINT
 
 _M1_CHAR_LIMIT = 280
@@ -88,6 +92,9 @@ def test_schedule_writes_channel_drafts(tmp_path: Path) -> None:
     )
     assert m10.scheduled_at == t0 + timedelta(hours=24)
     for record in records:
+        lowered = record.text.lower()
+        assert "we created this coin" in lowered or "launched by us" in lowered
+        assert "dev bag" in lowered or "dev buy" in lowered
         if record.template_id == "M1":
             continue
         assert record.lint.passed, (
@@ -106,6 +113,105 @@ def test_schedule_writes_channel_drafts(tmp_path: Path) -> None:
     for path in tmp_path.rglob("*"):
         if path.is_file():
             assert path.suffix == ".json"
+
+
+def test_missing_metrics_stay_unknown_and_sells_reconcile(tmp_path: Path) -> None:
+    t0 = datetime(2026, 10, 28, 18, 0, tzinfo=UTC)
+    bare = write_launch_drafts(_concept(), t0, tmp_path / "bare")
+    m7 = next(record for record in bare if record.template_id == "M7")
+    m10 = next(
+        record
+        for record in bare
+        if record.template_id == "M10" and record.channel == "x"
+    )
+    assert "UNKNOWN" in m7.text
+    assert "player1" not in m7.text
+    assert "900" not in m7.text
+    assert "0.01" not in m10.text
+    assert "UNKNOWN" in m10.text
+    plan = "Recover cost at 2.5 times, then stop. It can go to zero."
+    planned = ConceptPackage(
+        story_id="story-pigeon",
+        story_one_liner="park pigeons started a tiny union",
+        joke_line="The pigeons elected a bench.",
+        game_title="Bench Birds",
+        ticker="BENCH",
+        character="a round cartoon pigeon in a paper hat",
+        mint=MINT,
+        game_url="https://games.example/bench",
+        plan_url="https://games.example/bench/plan",
+        plan_hash="not-the-real-hash",
+        plan_text=plan,
+        wallet=CREATOR,
+        dev_buy_sol="0.1",
+        studio="ParodyDesk",
+        steve_handle="steve",
+        hub_domain="games.example",
+        sells=(
+            SellEvent(
+                n=1,
+                step="R",
+                tokens="1000",
+                sol="0.2",
+                multiple="2.5",
+                pct="55",
+                sig="5" * 88,
+                at=datetime(2026, 10, 28, 19, 0, tzinfo=UTC),
+            ),
+        ),
+    )
+    drafted = write_launch_drafts(planned, t0, tmp_path / "planned")
+    p1 = next(record for record in drafted if record.template_id == "P1")
+    digest = hashlib.sha256(plan.encode("utf-8")).hexdigest()
+    assert digest in p1.text
+    assert "not-the-real-hash" not in p1.text
+    assert "5 times, 8 times" not in p1.text
+    recap = next(
+        record
+        for record in drafted
+        if record.template_id == "M10" and record.channel == "x"
+    )
+    assert "dev sells 1" in recap.text
+    assert "55%" in recap.text
+    assert "dev sells 0" not in recap.text
+    assert "100%" not in recap.text
+
+
+def test_naive_sell_timestamp_writes_nothing(tmp_path: Path) -> None:
+    concept = ConceptPackage(
+        story_id="story-pigeon",
+        story_one_liner="park pigeons started a tiny union",
+        joke_line="The pigeons elected a bench.",
+        game_title="Bench Birds",
+        ticker="BENCH",
+        character="a round cartoon pigeon in a paper hat",
+        mint=MINT,
+        game_url="https://games.example/bench",
+        plan_url="https://games.example/bench/plan",
+        plan_hash="ab" * 32,
+        wallet=CREATOR,
+        dev_buy_sol="0.1",
+        studio="ParodyDesk",
+        steve_handle="steve",
+        hub_domain="games.example",
+        sells=(
+            SellEvent(
+                n=1,
+                step="R",
+                tokens="1000",
+                sol="0.2",
+                multiple="2.5",
+                pct="55",
+                sig="5" * 88,
+                at=datetime(2026, 10, 28, 19, 0),
+            ),
+        ),
+    )
+    with pytest.raises(NaiveTimeError):
+        write_launch_drafts(
+            concept, datetime(2026, 10, 28, 18, 0, tzinfo=UTC), tmp_path
+        )
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_recap_only_keeps_the_24h_post_and_drops_leaderboard(tmp_path: Path) -> None:

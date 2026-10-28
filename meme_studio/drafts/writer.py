@@ -66,6 +66,9 @@ def write_launch_drafts(
         raise NaiveTimeError
     if mode not in {"full", "recap_only"}:
         raise UnknownDraftModeError
+    for sell in concept.sells:
+        if sell.at.tzinfo is None:
+            raise NaiveTimeError
     output_dir.mkdir(parents=True, exist_ok=True)
     outbox = _Outbox(concept=concept, t0=t0, output_dir=output_dir, history=[])
     records: list[DraftRecord] = []

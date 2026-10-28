@@ -60,11 +60,23 @@ ADDRESS = re.compile(
 )
 
 
+def ensure_creator_holding_disclosure(text: str) -> str:
+    """Append the created-and-hold clauses when a draft does not already say them."""
+    parts = [text.rstrip()]
+    if not _created(text):
+        parts.append("We created this coin.")
+    if not _holding(text):
+        parts.append("We hold a dev bag.")
+    return " ".join(part for part in parts if part)
+
+
 def disclosure_reasons(post: Post) -> list[str]:
     """Required creator disclosure, bot label, and teaser secrecy."""
     reasons: list[str] = []
     text = post.text
     template = post.template_id
+    if template:
+        reasons.extend(_creator_holding(text))
     if template in _COIN_TEMPLATES:
         reasons.extend(_coin_disclosure(text))
     if template in _ZERO_TEMPLATES and "go to zero" not in text.lower():
@@ -78,14 +90,28 @@ def disclosure_reasons(post: Post) -> list[str]:
     return reasons
 
 
+def _created(text: str) -> bool:
+    return (
+        re.search(r"launched by us|we created (?:this|the) coin", text, re.IGNORECASE)
+        is not None
+    )
+
+
+def _holding(text: str) -> bool:
+    return re.search(r"dev bag|dev buy|\bwe hold\b", text, re.IGNORECASE) is not None
+
+
+def _creator_holding(text: str) -> list[str]:
+    reasons: list[str] = []
+    if not _created(text):
+        reasons.append("missing_disclosure:created")
+    if not _holding(text):
+        reasons.append("missing_disclosure:holding")
+    return reasons
+
+
 def _coin_disclosure(text: str) -> list[str]:
     reasons: list[str] = []
-    if not re.search(
-        r"launched by us|we created (?:this|the) coin", text, re.IGNORECASE
-    ):
-        reasons.append("missing_disclosure:created")
-    if not re.search(r"dev bag|dev buy", text, re.IGNORECASE):
-        reasons.append("missing_disclosure:holding")
     if not re.search(r"creator fees?", text, re.IGNORECASE):
         reasons.append("missing_disclosure:creator_fee")
     if not re.search(r"sell plan|\bplan\b", text, re.IGNORECASE):
@@ -139,15 +165,29 @@ def link_reasons(post: Post) -> list[str]:
     return []
 
 
+_FAKE_ENGAGEMENT = (
+    "buy followers",
+    "bought followers",
+    "fake replies",
+    "fake engagement",
+    "paid shill",
+    "paid partnership",
+)
+
+
 def paid_reasons(post: Post) -> list[str]:
-    """Paid posts need #ad or a paid-partnership phrase in the post itself."""
-    if not post.paid:
-        return []
-    if re.search(r"(?<![A-Za-z0-9_])#ad\b", post.text, re.IGNORECASE):
-        return []
-    if "paid partnership" in post.text.lower():
-        return []
-    return ["missing_ad_disclosure"]
+    """Reject paid posts and fake engagement. A label does not permit them."""
+    if post.paid or _offers_fake_engagement(post.text):
+        return ["paid_engagement"]
+    return []
+
+
+def _offers_fake_engagement(text: str) -> bool:
+    lowered = text.lower()
+    for phrase in _FAKE_ENGAGEMENT:
+        if phrase in lowered and f"no {phrase}" not in lowered:
+            return True
+    return False
 
 
 def approval_reasons(post: Post) -> list[str]:
