@@ -12,7 +12,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from meme_studio.concept.safety import contains_hate, find_persons
+from meme_studio.concept.blocklist import find_brands
+from meme_studio.concept.safety import contains_hate, evaluate_safety, find_persons
 
 SCHEMA_VERSION = "1"
 PHASE = "0"
@@ -44,6 +45,13 @@ _DISCLOSURE_MARKERS = (
     "we created the coin",
     "we hold it",
     "a person must disclose",
+)
+_CONTRADICTION = re.compile(
+    r"\b(?:we created the coin|we hold (?:it|the|this)|we currently hold|"
+    r"we do hold|we already hold|already created|token exists|coin exists|"
+    r"describes the present|this (?:coin|token) is live|"
+    r"(?:the )?token has been created)\b",
+    re.IGNORECASE,
 )
 BANNED_PHRASES = (
     "moon",
@@ -339,18 +347,40 @@ def studio_date(moment: datetime) -> str:
     return moment.astimezone(PACIFIC).date().isoformat()
 
 
+def disclosure_problems(text: str) -> tuple[str, ...]:
+    """Return disclosure failures, including contradictory ownership claims.
+
+    The exact unlaunched sentence must appear. Markers copied into a different
+    sentence do not count. Present-tense claims that a coin already exists or
+    is held, outside that sentence, are a contradiction.
+
+    Args:
+        text: One candidate description.
+
+    Returns:
+        Stable problem tokens. Empty when the description is a truthful draft.
+    """
+    problems: list[str] = []
+    if SHADOW_DISCLOSURE not in text:
+        problems.append("missing_shadow_disclosure")
+    remainder = text.replace(SHADOW_DISCLOSURE, " ")
+    folded = remainder.casefold()
+    if _CONTRADICTION.search(folded):
+        problems.append("contradicts_unlaunched")
+    return tuple(problems)
+
+
 def has_shadow_disclosure(text: str) -> bool:
-    """Return whether text carries the unlaunched-draft disclosure.
+    """Return whether a description is a truthful unlaunched disclosure.
 
     Args:
         text: Candidate description.
 
     Returns:
-        True when every required disclosure marker is present. The markers say
-        no token exists yet and name the human disclosure a later launch needs.
+        True only when the exact shadow sentence is present and the rest of
+        the text does not claim a coin already exists or is held.
     """
-    folded = text.casefold()
-    return all(marker in folded for marker in _DISCLOSURE_MARKERS)
+    return not disclosure_problems(text)
 
 
 def dump_concept(document: ConceptDocument) -> str:
@@ -513,14 +543,8 @@ def _validate_story(card: StoryCard, *, rejected: bool) -> None:
     if not card.sources:
         message = "story needs a source"
         raise ConceptSchemaError(message)
-    if card.score is None or not math.isfinite(card.score) or card.score < 0:
-        message = "score must be a finite non-negative number"
-        raise ConceptSchemaError(message)
-    if not _finite_or_missing(card.velocity) or not _finite_or_missing(
-        card.crowding_penalty
-    ):
-        message = "story metrics must be finite when present"
-        raise ConceptSchemaError(message)
+    _reject_non_finite_story(card)
+    _recheck_story_text(card)
     if rejected:
         if card.safety_gate != 0 or card.rank is not None:
             message = "rejected stories have gate 0 and no rank"
@@ -541,6 +565,7 @@ def _validate_story(card: StoryCard, *, rejected: bool) -> None:
 
 
 def _validate_candidate(candidate: ConceptCandidate) -> None:
+    _reject_unsafe_copy(candidate)
     if not candidate.accepted:
         return
     if len(candidate.name) < 1 or len(candidate.name) > NAME_MAX:
@@ -564,7 +589,6 @@ def _validate_candidate(candidate: ConceptCandidate) -> None:
         if _HEX_COLOR.fullmatch(color) is None:
             message = "palette colors must be #RRGGBB"
             raise ConceptSchemaError(message)
-    _reject_unsafe_copy(candidate)
     names = tuple(check.name for check in candidate.collision_checks)
     if names != _CHECK_NAMES or not all(
         check.passed for check in candidate.collision_checks
@@ -573,9 +597,40 @@ def _validate_candidate(candidate: ConceptCandidate) -> None:
         raise ConceptSchemaError(message)
 
 
+def _reject_non_finite_story(card: StoryCard) -> None:
+    if card.score is None or not math.isfinite(card.score) or card.score < 0:
+        message = "score must be a finite non-negative number"
+        raise ConceptSchemaError(message)
+    for label, value in (
+        ("parodyability", card.parodyability),
+        ("audience_fit", card.audience_fit),
+        ("hour_multiplier", card.hour_multiplier),
+    ):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int | float)
+            or not math.isfinite(value)
+        ):
+            message = f"{label} must be finite"
+            raise ConceptSchemaError(message)
+    if not _finite_or_missing(card.velocity) or not _finite_or_missing(
+        card.crowding_penalty
+    ):
+        message = "story metrics must be finite when present"
+        raise ConceptSchemaError(message)
+
+
+def _recheck_story_text(card: StoryCard) -> None:
+    text = f"{card.title}\n{card.summary}"
+    if evaluate_safety(text).gate == 0 and card.safety_gate != 0:
+        message = "story text fails the safety gate"
+        raise ConceptSchemaError(message)
+
+
 def _reject_unsafe_copy(candidate: ConceptCandidate) -> None:
-    if not has_shadow_disclosure(candidate.description):
-        message = "accepted description is missing the shadow disclosure"
+    problems = disclosure_problems(candidate.description)
+    if problems:
+        message = "description failed the shadow disclosure: " + ",".join(problems)
         raise ConceptSchemaError(message)
     blob = " ".join(
         (
@@ -592,6 +647,9 @@ def _reject_unsafe_copy(candidate: ConceptCandidate) -> None:
         raise ConceptSchemaError(message)
     if find_persons(blob):
         message = "accepted candidate names a person"
+        raise ConceptSchemaError(message)
+    if find_brands(blob):
+        message = "accepted candidate names a brand"
         raise ConceptSchemaError(message)
 
 

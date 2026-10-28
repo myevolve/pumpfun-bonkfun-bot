@@ -75,7 +75,6 @@ _HONORIFIC = re.compile(
     r"([A-Za-z]+)(?:\s+([A-Za-z]+))?",
     re.IGNORECASE,
 )
-_TWO_CAPS = re.compile(r"\b([A-Z][a-z]+)\s+([A-Z][a-z]+)\b")
 _NAME_STOP = frozenset(
     {
         "a",
@@ -157,8 +156,56 @@ _NAME_STOP = frozenset(
         "shadow",
         "state",
         "token",
+        "short",
+        "level",
+        "one",
+        "through",
+        "follows",
+        "browser",
+        "like",
+        "treats",
+        "picks",
+        "guards",
+        "nothing",
+        "needs",
+        "only",
+        "answers",
+        "for",
+        "to",
+        "as",
+        "will",
+        "gain",
+        "anything",
+        "claim",
+        "holder",
+        "this",
+        "that",
+        "not",
+        "no",
+        "any",
+        "we",
+        "in",
+        "on",
+        "at",
+        "by",
+        "or",
+        "be",
+        "it",
+        "its",
+        "our",
+        "has",
+        "been",
+        "minor",
+        "delay",
+        "city",
+        "council",
+        "scheduled",
+        "election",
+        "near",
     }
 )
+_MIN_NAME_CHARS = 2
+_NAME_WORD = re.compile(r"[A-Za-z][A-Za-z'-]*")
 _ADULT_AGE = 18
 
 
@@ -199,6 +246,11 @@ def evaluate_safety(text: str) -> SafetyResult:
     return SafetyResult(gate=1, reasons=())
 
 
+def _is_ticker(word: str) -> bool:
+    """Return whether a token is an all-caps ticker rather than a name."""
+    return len(word) >= _MIN_NAME_CHARS and word.isupper()
+
+
 def contains_hate(text: str) -> bool:
     """Return whether text contains an unambiguous hate marker.
 
@@ -235,9 +287,12 @@ def find_persons(text: str) -> tuple[str, ...]:
         else:
             found.append(first)
     blocked = _NAME_STOP | set(ANIMALS) | set(OBJECTS)
-    for match in _TWO_CAPS.finditer(text):
-        first, second = match.group(1), match.group(2)
+    words = [word for word in _NAME_WORD.findall(text) if not _is_ticker(word)]
+    for index in range(len(words) - 1):
+        first, second = words[index], words[index + 1]
         if first.casefold() in blocked or second.casefold() in blocked:
+            continue
+        if len(first) < _MIN_NAME_CHARS or len(second) < _MIN_NAME_CHARS:
             continue
         found.append(f"{first} {second}")
     unique: list[str] = []

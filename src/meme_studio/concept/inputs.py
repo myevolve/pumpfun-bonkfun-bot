@@ -41,5 +41,5 @@ class StoryInput:
     sources: tuple[str, ...]
     outlets: tuple[OutletHit, ...]
     post_counts: tuple[CountPoint, ...]
-    copycats: tuple[CopycatCoin, ...] | None = ()
+    copycats: tuple[CopycatCoin, ...] | None = None
     category: str = ""

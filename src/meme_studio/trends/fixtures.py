@@ -20,7 +20,7 @@ class FixtureBundle:
     trends: tuple[TrendSignal, ...]
     copycats: tuple[CopycatCoin, ...] | None
     lookup: TokenLookup | None
-    history: tuple[str, ...]
+    history: tuple[str, ...] | None
     hour_weights: dict[int, float] | None
     priors: dict[str, float] | None
     unknowns: tuple[str, ...]
@@ -37,7 +37,7 @@ def empty_bundle() -> FixtureBundle:
         trends=(),
         copycats=None,
         lookup=None,
-        history=(),
+        history=None,
         hour_weights=None,
         priors=None,
         unknowns=(),
@@ -77,9 +77,11 @@ def load_fixtures(path: Path, *, reddit_tos_allowed: bool) -> FixtureBundle:
     tokens_path = path / "tokens.json"
     lookup: TokenLookup | None = None
     if tokens_path.is_file():
-        lookup = MemoryTokenLookup(_load_tokens(tokens_path))
+        loaded_tokens = _load_tokens(tokens_path)
+        if loaded_tokens is not None:
+            lookup = MemoryTokenLookup(loaded_tokens)
     history_path = path / "history.json"
-    history = _load_history(history_path) if history_path.is_file() else ()
+    history = _load_history(history_path) if history_path.is_file() else None
     copycats_path = path / "copycats.json"
     copycats = _load_copycats(copycats_path) if copycats_path.is_file() else None
     weights_path = path / "hour_weights.json"
@@ -150,10 +152,10 @@ def _load_x(path: Path) -> tuple[list[RawItem], list[TrendSignal]]:
     return items, trends
 
 
-def _load_tokens(path: Path) -> list[TokenHit]:
+def _load_tokens(path: Path) -> list[TokenHit] | None:
     payload = _read_json(path)
     if not isinstance(payload, list):
-        return []
+        return None
     hits: list[TokenHit] = []
     for row in payload:
         if not isinstance(row, dict):
@@ -175,39 +177,33 @@ def _load_tokens(path: Path) -> list[TokenHit]:
     return hits
 
 
-def _load_history(path: Path) -> tuple[str, ...]:
+def _load_history(path: Path) -> tuple[str, ...] | None:
     payload = _read_json(path)
     if not isinstance(payload, list):
-        return ()
+        return None
     return tuple(item for item in payload if isinstance(item, str))
 
 
-def _load_copycats(path: Path) -> tuple[CopycatCoin, ...]:
+def _load_copycats(path: Path) -> tuple[CopycatCoin, ...] | None:
     payload = _read_json(path)
     if not isinstance(payload, list):
-        return ()
+        return None
     coins: list[CopycatCoin] = []
     for row in payload:
         if not isinstance(row, dict):
-            continue
+            return None
         name = row.get("name")
         ticker = row.get("ticker")
         buyers = row.get("outside_buyers")
         if not isinstance(name, str) or not isinstance(ticker, str):
-            continue
+            return None
         if not isinstance(buyers, int):
-            continue
-        volume = row.get("volume_7d_usd", 0)
-        market = row.get("market_cap_usd", 0)
-        coins.append(
-            CopycatCoin(
-                name,
-                ticker,
-                buyers,
-                float(volume) if isinstance(volume, int | float) else 0.0,
-                float(market) if isinstance(market, int | float) else 0.0,
-            )
-        )
+            return None
+        volume = _optional_metric(row, "volume_7d_usd")
+        market = _optional_metric(row, "market_cap_usd")
+        if volume is None or market is None:
+            return None
+        coins.append(CopycatCoin(name, ticker, buyers, volume, market))
     return tuple(coins)
 
 

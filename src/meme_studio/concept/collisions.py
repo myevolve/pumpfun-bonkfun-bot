@@ -23,6 +23,7 @@ from meme_studio.concept.schema import (
     ConceptCandidate,
     has_shadow_disclosure,
 )
+from meme_studio.errors import raise_without_context
 from meme_studio.trends.cache import TtlCache
 from meme_studio.trends.ratelimit import RateLimiter
 
@@ -180,17 +181,16 @@ def parse_dexscreener_search(body: bytes) -> list[TokenHit]:
     try:
         payload = json.loads(body)
     except (json.JSONDecodeError, UnicodeDecodeError):
-        message = "token lookup payload"
-        raise LookupUnavailableError(message) from None
+        raise_without_context(LookupUnavailableError("token lookup payload"))
     if not isinstance(payload, dict) or "pairs" not in payload:
-        message = "token lookup payload"
-        raise LookupUnavailableError(message) from None
+        raise_without_context(LookupUnavailableError("token lookup payload"))
     pairs = payload["pairs"]
     if not isinstance(pairs, list):
-        message = "token lookup payload"
-        raise LookupUnavailableError(message) from None
+        raise_without_context(LookupUnavailableError("token lookup payload"))
     hits: list[TokenHit] = []
     for pair in pairs:
+        if not _pair_well_formed(pair):
+            raise_without_context(LookupUnavailableError("token lookup payload"))
         hit = _pair_hit(pair)
         if hit is not None:
             hits.append(hit)
@@ -229,7 +229,7 @@ def check_candidate(
     candidate: ConceptCandidate,
     *,
     lookup: TokenLookup,
-    history: Iterable[str],
+    history: Iterable[str] | None,
 ) -> ConceptCandidate:
     """Run every collision check and set ``accepted``.
 
@@ -299,18 +299,22 @@ def _hit_reasons(candidate: ConceptCandidate, hit: TokenHit) -> list[str]:
         <= _NAME_DISTANCE_MAX
     )
     if ticker_exact or ticker_fuzzy:
-        if hit.volume_7d_usd is None:
+        if not _known_metric(hit.volume_7d_usd):
             reasons.append("metrics_unknown")
         elif ticker_exact and hit.volume_7d_usd > 0:
             reasons.append("exact_ticker_volume")
         elif ticker_fuzzy and hit.volume_7d_usd > 0:
             reasons.append("fuzzy_ticker")
     if name_close:
-        if hit.market_cap_usd is None:
+        if not _known_metric(hit.market_cap_usd):
             reasons.append("metrics_unknown")
         elif hit.market_cap_usd > _MCAP_ABOVE_USD:
             reasons.append("fuzzy_name")
     return reasons
+
+
+def _known_metric(value: float | None) -> bool:
+    return value is not None and math.isfinite(value)
 
 
 def _trademark(candidate: ConceptCandidate) -> CollisionCheck:
@@ -352,7 +356,14 @@ def _real_person(candidate: ConceptCandidate) -> CollisionCheck:
     return CollisionCheck(name="real_person", passed=True, reason="ok")
 
 
-def _own_history(candidate: ConceptCandidate, history: Iterable[str]) -> CollisionCheck:
+def _own_history(
+    candidate: ConceptCandidate,
+    history: Iterable[str] | None,
+) -> CollisionCheck:
+    if history is None:
+        return CollisionCheck(
+            name="own_history", passed=False, reason="history_unknown"
+        )
     known = {item.casefold() for item in history}
     if candidate.ticker.casefold() in known:
         return CollisionCheck(name="own_history", passed=False, reason="ticker_reused")
@@ -399,6 +410,20 @@ def _shape_ok(candidate: ConceptCandidate) -> bool:
         and disclosed
         and hate_ok
     )
+
+
+def _pair_well_formed(pair: object) -> bool:
+    if not isinstance(pair, dict):
+        return False
+    base = pair.get("baseToken")
+    if not isinstance(base, dict):
+        return False
+    symbol = base.get("symbol")
+    name = base.get("name")
+    if not isinstance(symbol, str) and not isinstance(name, str):
+        return False
+    chain = pair.get("chainId")
+    return chain is None or isinstance(chain, str)
 
 
 def _pair_hit(pair: object) -> TokenHit | None:

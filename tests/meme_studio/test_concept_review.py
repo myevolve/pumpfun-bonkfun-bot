@@ -32,6 +32,7 @@ from meme_studio.concept.schema import (
     validate_concept,
 )
 from meme_studio.concept.scorer import score_stories
+from meme_studio.concept.writer_contract import FORMAT_NAME, writer_packages
 
 NOW = datetime(2026, 10, 28, 15, 0, tzinfo=UTC)
 GENERATED = "2026-10-28T15:00:00+00:00"
@@ -152,9 +153,14 @@ def test_generator_draft_states_the_shadow_disclosure() -> None:
 
 
 def test_taylor_swift_without_an_allegation_is_a_person() -> None:
-    result = evaluate_safety("A raccoon escaped with a donut near Taylor Swift")
-    assert result.gate == 0
-    assert "real_person" in result.reasons
+    for text in (
+        "A raccoon escaped with a donut near Taylor Swift",
+        "Cartoon Taylor Swift holding a donut",
+        "taylor swift",
+    ):
+        result = evaluate_safety(text)
+        assert result.gate == 0, text
+        assert "real_person" in result.reasons
 
 
 def test_nazi_banner_story_is_hate() -> None:
@@ -191,6 +197,43 @@ def test_artist_prompt_and_hate_ticker_are_not_accepted() -> None:
         validate_concept(document)
 
 
+def test_rejected_candidate_still_needs_a_truthful_disclosure() -> None:
+    rejected = replace(
+        _candidate(accepted=False), description=" ".join(["cartoon"] * 20)
+    )
+    document = replace(_document(), candidates=(_candidate(), rejected))
+    with pytest.raises(ConceptSchemaError):
+        dump_concept(document)
+
+
+def test_disclosure_markers_cannot_contradict_the_unlaunched_sentence() -> None:
+    text = (
+        "No token has been created. None is held. We created the coin and we "
+        "hold it. A person must disclose that this paragraph describes the present."
+    )
+    candidate = replace(_candidate(), description=text)
+    document = replace(_document(), candidates=(candidate,))
+    with pytest.raises(ConceptSchemaError):
+        dump_concept(document)
+
+
+def test_stale_story_flags_and_brand_prompts_are_rechecked() -> None:
+    hate = replace(
+        _story(),
+        title="A raccoon waved a Nazi banner",
+        summary="A raccoon waved a Nazi banner",
+        safety_gate=1,
+    )
+    with pytest.raises(ConceptSchemaError):
+        dump_concept(replace(_document(), top_stories=(hate,)))
+    branded = replace(
+        _candidate(),
+        art_prompt="original cartoon with a Coca-Cola logo",
+    )
+    with pytest.raises(ConceptSchemaError):
+        dump_concept(replace(_document(), candidates=(branded,)))
+
+
 def test_brand_punctuation_and_diacritics_match_the_blocklist() -> None:
     branded = check_candidate(
         replace(
@@ -203,6 +246,18 @@ def test_brand_punctuation_and_diacritics_match_the_blocklist() -> None:
     )
     assert branded.accepted is False
     assert branded.collision_checks[1].passed is False
+    for prompt in (
+        "original cartoon holding Coca\u2011Cola",
+        "original cartoon of Nike's shoes",
+        "original cartoon in Nike-branded colors",
+    ):
+        hit = check_candidate(
+            replace(_candidate(accepted=False), art_prompt=prompt, collision_checks=()),
+            lookup=MemoryTokenLookup([]),
+            history=set(),
+        )
+        assert hit.accepted is False, prompt
+        assert hit.collision_checks[1].passed is False
 
 
 def test_absent_token_metrics_do_not_clear_a_collision() -> None:
@@ -218,10 +273,60 @@ def test_absent_token_metrics_do_not_clear_a_collision() -> None:
 
 
 def test_malformed_dex_payloads_fail_closed_without_echoing_the_body() -> None:
-    for body in (b"{}", b'{"pairs":{}}', b"\xffSECRET_MARKER"):
+    for body in (b"{}", b'{"pairs":{}}', b'{"pairs":[{}]}', b"\xffSECRET_MARKER"):
         with pytest.raises(LookupUnavailableError) as exc:
             parse_dexscreener_search(body)
         assert "SECRET_MARKER" not in str(exc.value)
+
+
+def test_nan_metrics_do_not_clear_a_collision() -> None:
+    reviewed = check_candidate(
+        _candidate(),
+        lookup=MemoryTokenLookup(
+            [TokenHit("RACODONU", "Elsewhere", float("nan"), float("nan"), "solana")]
+        ),
+        history=set(),
+    )
+    assert reviewed.accepted is False
+    assert "metrics_unknown" in reviewed.collision_checks[0].reason
+
+
+def test_two_zero_bins_are_not_a_full_baseline() -> None:
+    baseline = NOW - timedelta(minutes=390)
+    story = _input(
+        "A raccoon escaped with a donut",
+        counts=(
+            CountPoint(start=baseline, count=0),
+            CountPoint(start=baseline + timedelta(minutes=30), count=0),
+            CountPoint(start=NOW - timedelta(minutes=10), count=100),
+        ),
+    )
+    batch = score_stories([story], now=NOW)
+    assert batch.top_stories == ()
+    assert batch.uncovered_stories[0].velocity is None
+
+
+def test_non_finite_story_factors_are_rejected() -> None:
+    card = replace(_story(), parodyability=math.inf)
+    with pytest.raises(ConceptSchemaError):
+        validate_concept(replace(_document(), top_stories=(card,)))
+    card = replace(_story(), audience_fit=math.nan)
+    with pytest.raises(ConceptSchemaError):
+        validate_concept(replace(_document(), top_stories=(card,)))
+    card = replace(_story(), hour_multiplier=math.inf)
+    with pytest.raises(ConceptSchemaError):
+        validate_concept(replace(_document(), top_stories=(card,)))
+
+
+def test_writer_package_leaves_launch_facts_unknown() -> None:
+    packages = writer_packages(_document())
+    assert packages[0]["format"] == FORMAT_NAME
+    assert packages[0]["lifecycle"] == "shadow-unlaunched"
+    assert packages[0]["ticker"] == "RACODONU"
+    assert packages[0]["mint"] is None
+    assert packages[0]["wallet"] is None
+    assert packages[0]["dev_buy_sol"] is None
+    assert packages[0]["disclosure"]
 
 
 def test_recent_counts_without_a_baseline_are_not_a_surge() -> None:

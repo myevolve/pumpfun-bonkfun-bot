@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from xml.etree import ElementTree
 
+from meme_studio.errors import raise_without_context
 from meme_studio.trends.cache import TtlCache
 from meme_studio.trends.models import RawItem
 from meme_studio.trends.ratelimit import RateLimiter
@@ -155,8 +156,7 @@ def parse_google_news_rss(body: bytes) -> tuple[RawItem, ...]:
     try:
         root = ElementTree.fromstring(body)  # noqa: S314
     except ElementTree.ParseError:
-        message = "rss parse failed"
-        raise SourceParseError(message) from None
+        raise_without_context(SourceParseError("rss parse failed"))
     items: list[RawItem] = []
     for node in root.iter("item"):
         parsed = _rss_item(node)
@@ -180,8 +180,7 @@ def parse_reddit_listing(body: bytes) -> tuple[RawItem, ...]:
     try:
         payload = json.loads(body)
     except (json.JSONDecodeError, UnicodeDecodeError):
-        message = "reddit parse failed"
-        raise SourceParseError(message) from None
+        raise_without_context(SourceParseError("reddit parse failed"))
     data = payload.get("data") if isinstance(payload, dict) else None
     children = data.get("children") if isinstance(data, dict) else None
     if not isinstance(children, list):
@@ -212,8 +211,7 @@ def _rss_item(node: ElementTree.Element) -> RawItem | None:
     try:
         published = parsedate_to_datetime(published_raw)
     except (TypeError, ValueError):
-        message = "rss parse failed"
-        raise SourceParseError(message) from None
+        raise_without_context(SourceParseError("rss parse failed"))
     if published.tzinfo is None:
         published = published.replace(tzinfo=UTC)
     else:

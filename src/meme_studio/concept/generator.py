@@ -86,7 +86,7 @@ def select_concept(
     stories: Sequence[StoryCard],
     *,
     lookup: TokenLookup,
-    history: Sequence[str],
+    history: Sequence[str] | None,
 ) -> tuple[StoryCard | None, tuple[ConceptCandidate, ...], str | None]:
     """Pick the first safe story that still has a clean candidate.
 

@@ -30,11 +30,7 @@ def test_bearer_token_is_absent_from_the_traceback(
         token_env="X_BEARER_TOKEN",
         limiter=_limiter(),
     )
-    with pytest.raises(XClientError) as exc:
-        client.get_trends(woeid=23424977)
-    formatted = "".join(traceback.format_exception(exc.value))
-    assert "super-secret-value" not in formatted
-    assert exc.value.__cause__ is None
+    logger = logging.getLogger("meme_studio.trends.x_client")
     records: list[logging.LogRecord] = []
 
     class _Capture(logging.Handler):
@@ -42,12 +38,17 @@ def test_bearer_token_is_absent_from_the_traceback(
             records.append(record)
 
     handler = _Capture()
-    logger = logging.getLogger("meme_studio.trends.x_client")
     logger.addHandler(handler)
+    logger.setLevel(logging.ERROR)
     try:
-        logger.error("%s", exc.value)
+        with pytest.raises(XClientError) as exc:
+            client.get_trends(woeid=23424977)
     finally:
         logger.removeHandler(handler)
+    formatted = "".join(traceback.format_exception(exc.value))
+    assert "super-secret-value" not in formatted
+    assert exc.value.__cause__ is None
+    assert exc.value.__context__ is None
     rendered = " ".join(record.getMessage() for record in records)
     assert "super-secret-value" not in rendered
 
@@ -67,6 +68,23 @@ def test_x_client_requires_a_limiter() -> None:
 def test_missing_copycats_file_is_not_zero(tmp_path: Path) -> None:
     bundle = load_fixtures(tmp_path, reddit_tos_allowed=False)
     assert bundle.copycats is None
+    assert bundle.history is None
+
+
+def test_malformed_fixture_objects_are_unknown(tmp_path: Path) -> None:
+    (tmp_path / "tokens.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "copycats.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "history.json").write_text("{}", encoding="utf-8")
+    bundle = load_fixtures(tmp_path, reddit_tos_allowed=False)
+    assert bundle.lookup is None
+    assert bundle.copycats is None
+    assert bundle.history is None
+    (tmp_path / "copycats.json").write_text(
+        '[{"name":"Raccoon","ticker":"RACC","outside_buyers":1}]',
+        encoding="utf-8",
+    )
+    partial = load_fixtures(tmp_path, reddit_tos_allowed=False)
+    assert partial.copycats is None
 
 
 def test_bad_rss_timestamp_does_not_echo_the_payload() -> None:
@@ -78,6 +96,8 @@ def test_bad_rss_timestamp_does_not_echo_the_payload() -> None:
         parse_google_news_rss(body)
     formatted = "".join(traceback.format_exception(exc.value))
     assert "SECRET_MARKER" not in formatted
+    assert exc.value.__cause__ is None
+    assert exc.value.__context__ is None
 
 
 def _limiter() -> RateLimiter:

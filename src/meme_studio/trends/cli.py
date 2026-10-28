@@ -11,6 +11,7 @@ from pathlib import Path
 from meme_studio.concept.assemble import assemble_concept
 from meme_studio.concept.schema import ConceptDocument, dump_concept, validate_concept
 from meme_studio.concept.scorer import score_stories
+from meme_studio.concept.writer_contract import writer_packages
 from meme_studio.trends.collect import attach_copycats
 from meme_studio.trends.fixtures import empty_bundle, grouped_stories, load_fixtures
 
@@ -92,6 +93,8 @@ def _write(output: Path, document: ConceptDocument) -> None:
     output.mkdir(parents=True, exist_ok=True)
     text = dump_concept(document)
     (output / "concept.json").write_text(text, encoding="utf-8")
+    packages = json.dumps(writer_packages(document), indent=2, sort_keys=True) + "\n"
+    (output / "writer_package.json").write_text(packages, encoding="utf-8")
     cards = [card.to_dict() for card in document.top_stories]
     card_text = json.dumps(cards, indent=2, sort_keys=True) + "\n"
     (output / "story_cards.json").write_text(card_text, encoding="utf-8")

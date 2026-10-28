@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from urllib.parse import quote
 
+from meme_studio.errors import raise_without_context
 from meme_studio.trends.cache import TtlCache
 from meme_studio.trends.ratelimit import RateLimiter
 from meme_studio.trends.sources import USER_AGENT
@@ -184,16 +185,13 @@ class HttpXClient:
         try:
             status, body = self._transport(url, headers, "GET")
         except (TimeoutError, OSError):
-            message = "x read failed"
-            raise XClientError(message) from None
+            raise_without_context(XClientError("x read failed"))
         if status != _HTTP_OK:
-            message = "x read status"
-            raise XClientError(message) from None
+            raise_without_context(XClientError("x read status"))
         try:
             payload = json.loads(body)
         except (json.JSONDecodeError, UnicodeDecodeError):
-            message = "x read payload"
-            raise XClientError(message) from None
+            raise_without_context(XClientError("x read payload"))
         if not isinstance(payload, dict):
             message = "x read payload"
             raise XClientError(message)
@@ -255,5 +253,4 @@ def _parse_time(value: str) -> datetime:
     try:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
-        message = "x read payload"
-        raise XClientError(message) from None
+        raise_without_context(XClientError("x read payload"))

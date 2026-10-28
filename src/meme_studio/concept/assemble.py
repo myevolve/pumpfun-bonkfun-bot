@@ -60,7 +60,7 @@ def assemble_concept(
     Returns:
         A phase-0 document with publish and transactions left false.
     """
-    history_tuple = tuple(history)
+    history_tuple = None if history is None else tuple(history)
     generated_at = now.astimezone(UTC).isoformat(timespec="seconds")
     date = studio_date(now)
     unknown_tuple = _unknowns((*unknowns, *_coverage_unknowns(batch)))
@@ -84,6 +84,9 @@ def assemble_concept(
     )
     if chosen is None:
         skip_reason = reason or "all_candidates_collided"
+        if _history_unknown(candidates):
+            skip_reason = "coverage_unknown"
+            unknown_tuple = _unknowns((*unknown_tuple, "history_coverage_unknown"))
         return _skipped(
             batch,
             (generated_at, date, skip_reason, candidates, unknown_tuple),
@@ -132,6 +135,14 @@ def _skipped(
         transactions=False,
         network_writes=NETWORK_WRITES,
     )
+
+
+def _history_unknown(candidates: tuple[ConceptCandidate, ...]) -> bool:
+    for candidate in candidates:
+        for check in candidate.collision_checks:
+            if check.name == "own_history" and check.reason == "history_unknown":
+                return True
+    return False
 
 
 def _coverage_unknowns(batch: ScoredBatch) -> tuple[str, ...]:

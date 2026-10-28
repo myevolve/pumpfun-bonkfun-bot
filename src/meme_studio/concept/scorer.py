@@ -192,6 +192,8 @@ def _recent_z(counts: Sequence[CountPoint], now_utc: datetime) -> float | None:
             index = int((start - baseline_start).total_seconds() // _BIN_SECONDS)
             if 0 <= index < _BIN_COUNT:
                 bins[index] = (bins[index] or 0) + point.count
+    if any(value is None for value in bins):
+        return None
     observed = [value for value in bins if value is not None]
     if len(observed) < _MIN_OBSERVED_BINS:
         return None
