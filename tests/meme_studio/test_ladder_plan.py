@@ -85,5 +85,9 @@ def test_plan_records_fee_unknowns_instead_of_hiding_them() -> None:
         "playbook_0.95pct_post_grad_creator_fee_conflicts_with_measured_30bps"
         in unknowns
     )
-    assert plan.to_dict()["fees"]["pumpswap_creator_bps"] == 30
+    fees = plan.to_dict()["fees"]
+    assert isinstance(fees, dict)
+    assert fees["pumpswap_creator_fee_status"] == "UNKNOWN"
+    assert fees["pumpswap_creator_bps_measured_assumption"] == 30
+    assert fees["pumpswap_creator_bps_research_assumption"] == 95
     assert isinstance(FeeAssumptions().priority_fee_microlamports, int)

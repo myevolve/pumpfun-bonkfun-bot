@@ -91,6 +91,19 @@ def test_join_replays_each_dev_buy_and_writes_parquet(tmp_path: Path) -> None:
     }
     summary = written.summary_path.read_text(encoding="utf-8")
     assert '"paper": true' in summary
+    assert "UNKNOWN post-graduation creator fee" in summary
+    assert "selected_plan_sha256" in summary
+    assert "selected_dev_buy_sol" in summary
+    assert "we created this token and we hold it" in summary
+    assert table.column("pumpswap_creator_fee_status").to_pylist() == ["UNKNOWN"] * (
+        len(population) * 3
+    )
+    splits = {
+        row["mint"]: (row["population_split"], row["sweep_split"])
+        for row in table.to_pylist()
+        if row["dev_buy_sol"] == "0.100000000"
+    }
+    assert splits["So10002paperMint"] == ("train", "test")
     assert "So10004paperMint" not in summary or "excluded" in summary
     cohorts = {
         row.cohort: row for row in report.cohorts if row.dev_buy_sol == "0.100000000"
@@ -101,17 +114,20 @@ def test_join_replays_each_dev_buy_and_writes_parquet(tmp_path: Path) -> None:
     assert report.excluded_non_sol == 1
 
 
+def _after(create_ts: int, *, dump: bool) -> list[TrackerTrade]:
+    trades = [_buy(create_ts + 10, 75_000_000_000)]
+    if dump:
+        trades.append(_sell(create_ts + 500, 60_000_000_000))
+    return trades
+
+
 def test_parameter_sweep_selects_on_train_and_reports_test() -> None:
-    train_dump = [
-        _buy(_CREATE + 10, 75_000_000_000),
-        _sell(_CREATE + 500, 60_000_000_000),
-    ]
-    test_moon = [_buy(_CREATE + 10, 75_000_000_000)]
+    late = _CREATE + 100_000
     coins = [
-        _coin("early-a", _CREATE, train_dump),
-        _coin("early-b", _CREATE + 1, train_dump),
-        _coin("late-a", _CREATE + 100_000, test_moon),
-        _coin("late-b", _CREATE + 100_001, test_moon),
+        _coin("early-a", _CREATE, _after(_CREATE, dump=True)),
+        _coin("early-b", _CREATE + 1, _after(_CREATE + 1, dump=True)),
+        _coin("late-a", late, _after(late, dump=False)),
+        _coin("late-b", late + 1, _after(late + 1, dump=False)),
     ]
     concepts = (Concept(story_id="story-kiwi", terms=("kiwi",)),)
     sweep = sweep_thresholds(
@@ -121,14 +137,16 @@ def test_parameter_sweep_selects_on_train_and_reports_test() -> None:
         dev_buy_sols=("0.10",),
     )
 
-    assert sweep.selection_basis == "train_closeout_pnl"
+    assert sweep.selection_basis == "train_realized_pnl"
     assert sweep.published_plan_unchanged is True
     assert sweep.n_train == 2
     assert sweep.n_test == 2
     assert len(sweep.rows) == 27
-    train_scores = [row.train_mean_closeout_lamports for row in sweep.rows]
-    assert sweep.selected_train_mean_closeout_lamports == max(train_scores)
-    assert sweep.selected_test_mean_closeout_lamports is not None
+    train_scores = [row.train_mean_realized_lamports for row in sweep.rows]
+    assert sweep.selected_train_mean_realized_lamports == max(train_scores)
+    assert sweep.selected_test_mean_realized_lamports is not None
+    assert sweep.selected_dev_buy_sol == "0.100000000"
+    assert sweep.selected_plan_sha256
     published = build_plan("0.1", sol_usd="100")
     assert sweep.published_plan_sha256 == published.sha256
     assert any(row.plan_sha256 == published.sha256 for row in sweep.rows)
@@ -140,8 +158,8 @@ def test_parameter_sweep_selects_on_train_and_reports_test() -> None:
     )
     assert again.selected_params == sweep.selected_params
     assert (
-        again.selected_test_mean_closeout_lamports
-        == sweep.selected_test_mean_closeout_lamports
+        again.selected_test_mean_realized_lamports
+        == sweep.selected_test_mean_realized_lamports
     )
 
 

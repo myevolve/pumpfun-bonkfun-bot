@@ -1,4 +1,3 @@
-# ruff: noqa: TRY003
 """Threshold sweep scored on an earlier time half and reported on the later half.
 
 The published plan does not change. A sweep winner is a diagnostic, not a
@@ -12,7 +11,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from meme_studio.ladder import LadderThresholds, build_plan, replay
-from meme_studio.ladder.engine import CoinPath, PathTrade
+from meme_studio.ladder.engine import CoinPath, FeeRow, PathTrade
 from meme_studio.ladder.money import mean_lamports
 
 if TYPE_CHECKING:
@@ -36,27 +35,33 @@ class SweepParams:
 
 @dataclass(frozen=True, slots=True)
 class SweepRow:
-    """Train and test closeout for one grid point."""
+    """Train and test recorded-fill P&L for one grid point."""
 
+    dev_buy_sol: str
     params: SweepParams
     plan_sha256: str
-    train_mean_closeout_lamports: int
+    train_mean_realized_lamports: int | None
+    test_mean_realized_lamports: int | None
+    train_mean_closeout_lamports: int | None
     test_mean_closeout_lamports: int | None
 
 
 @dataclass(frozen=True, slots=True)
 class SweepReport:
-    """Out-of-sample sweep. Selection uses the train half only."""
+    """Out-of-sample sweep. Selection uses recorded fills on the train half."""
 
     selection_basis: str
     published_plan_unchanged: bool
-    published_plan_sha256: str
+    published_plan_sha256: str | None
     n_train: int
     n_test: int
     rows: tuple[SweepRow, ...]
-    selected_params: SweepParams
-    selected_train_mean_closeout_lamports: int
-    selected_test_mean_closeout_lamports: int | None
+    selected_params: SweepParams | None
+    selected_dev_buy_sol: str | None
+    selected_plan_sha256: str | None
+    selected_train_mean_realized_lamports: int | None
+    selected_test_mean_realized_lamports: int | None
+    unavailable_reason: str | None = None
 
 
 def sweep_thresholds(
@@ -86,7 +91,22 @@ def sweep_thresholds(
     n_train = len(ordered) // 2
     train = ordered[:n_train]
     test = ordered[n_train:]
-    published = build_plan(dev_buy_sols[0], sol_usd=sol_usd)
+    published = build_plan(dev_buy_sols[0], sol_usd=sol_usd) if dev_buy_sols else None
+    if not train or not test:
+        return SweepReport(
+            selection_basis="unavailable",
+            published_plan_unchanged=True,
+            published_plan_sha256=None if published is None else published.sha256,
+            n_train=len(train),
+            n_test=len(test),
+            rows=(),
+            selected_params=None,
+            selected_dev_buy_sol=None,
+            selected_plan_sha256=None,
+            selected_train_mean_realized_lamports=None,
+            selected_test_mean_realized_lamports=None,
+            unavailable_reason="train and test splits both need at least one coin",
+        )
     rows: list[SweepRow] = []
     for dev_buy in dev_buy_sols:
         for recover in _RECOVERS:
@@ -102,35 +122,86 @@ def sweep_thresholds(
                             trail_drawdown=draw,
                         ),
                     )
-                    train_mean = _mean_closeout(train, plan)
-                    test_mean = _mean_closeout(test, plan) if test else None
+                    train_realized, train_closeout = _means(train, plan)
+                    test_realized, test_closeout = _means(test, plan)
                     rows.append(
                         SweepRow(
+                            dev_buy_sol=plan.to_dict()["dev_buy_sol"]
+                            if isinstance(plan.to_dict()["dev_buy_sol"], str)
+                            else dev_buy,
                             params=params,
                             plan_sha256=plan.sha256,
-                            train_mean_closeout_lamports=train_mean,
-                            test_mean_closeout_lamports=test_mean,
+                            train_mean_realized_lamports=train_realized,
+                            test_mean_realized_lamports=test_realized,
+                            train_mean_closeout_lamports=train_closeout,
+                            test_mean_closeout_lamports=test_closeout,
                         )
                     )
-    selected = min(rows, key=_rank)
+    ranked = [row for row in rows if row.train_mean_realized_lamports is not None]
+    if not ranked:
+        return SweepReport(
+            selection_basis="unavailable",
+            published_plan_unchanged=True,
+            published_plan_sha256=None if published is None else published.sha256,
+            n_train=len(train),
+            n_test=len(test),
+            rows=tuple(rows),
+            selected_params=None,
+            selected_dev_buy_sol=None,
+            selected_plan_sha256=None,
+            selected_train_mean_realized_lamports=None,
+            selected_test_mean_realized_lamports=None,
+            unavailable_reason="recorded-fill P&L is UNKNOWN on the train split",
+        )
+    selected = min(ranked, key=_rank)
     return SweepReport(
-        selection_basis="train_closeout_pnl",
+        selection_basis="train_realized_pnl",
         published_plan_unchanged=True,
-        published_plan_sha256=published.sha256,
+        published_plan_sha256=None if published is None else published.sha256,
         n_train=len(train),
         n_test=len(test),
         rows=tuple(rows),
         selected_params=selected.params,
-        selected_train_mean_closeout_lamports=selected.train_mean_closeout_lamports,
-        selected_test_mean_closeout_lamports=selected.test_mean_closeout_lamports,
+        selected_dev_buy_sol=selected.dev_buy_sol,
+        selected_plan_sha256=selected.plan_sha256,
+        selected_train_mean_realized_lamports=selected.train_mean_realized_lamports,
+        selected_test_mean_realized_lamports=selected.test_mean_realized_lamports,
     )
 
 
-def _mean_closeout(coins: list[TrackerCoin], plan: SellPlan) -> int:
+def sweep_membership(
+    coins: tuple[TrackerCoin, ...] | list[TrackerCoin],
+    concepts: tuple[Concept, ...] | list[Concept],
+) -> dict[str, str]:
+    """Return mint -> train/test/not_applicable for the sweep population."""
+    pool = [
+        coin
+        for coin in coins
+        if is_sol_quote(coin.quote_mint) and matches_any_concept(coin, concepts)
+    ]
+    ordered = sorted(pool, key=lambda coin: (coin.create_ts, coin.mint))
+    n_train = len(ordered) // 2
+    membership = {coin.mint: "not_applicable" for coin in coins}
+    for index, coin in enumerate(ordered):
+        membership[coin.mint] = "train" if index < n_train else "test"
+    return membership
+
+
+def _means(coins: list[TrackerCoin], plan: SellPlan) -> tuple[int | None, int | None]:
     if not coins:
-        raise ValueError("closeout mean of an empty split is UNKNOWN")
-    values = [replay(coin_to_path(coin), plan).closeout_pnl_lamports for coin in coins]
-    return mean_lamports(values)
+        return None, None
+    results = [replay(coin_to_path(coin), plan) for coin in coins]
+    realized = [item.realized_pnl_lamports for item in results]
+    closeout = [item.closeout_pnl_lamports for item in results]
+    if any(value is None for value in realized):
+        realized_mean = None
+    else:
+        realized_mean = mean_lamports([int(value) for value in realized])
+    if any(value is None for value in closeout):
+        closeout_mean = None
+    else:
+        closeout_mean = mean_lamports([int(value) for value in closeout])
+    return realized_mean, closeout_mean
 
 
 def coin_to_path(coin: TrackerCoin) -> CoinPath:
@@ -142,6 +213,7 @@ def coin_to_path(coin: TrackerCoin) -> CoinPath:
             is_buy=trade.is_buy,
             sol_amount_raw=trade.sol_amount_raw,
             creator_fee_raw=trade.creator_fee_raw,
+            direction_known=trade.direction_known,
         )
         for trade in coin.trades
     )
@@ -152,13 +224,19 @@ def coin_to_path(coin: TrackerCoin) -> CoinPath:
         trades=trades,
         extra_observed_creator_fee_raw=coin.pumpswap_creator_fee_raw,
         graduation_ts=coin.graduation_ts,
+        pumpswap_fee_rows=tuple(
+            FeeRow(row.ts, row.user, row.amount_raw) for row in coin.pumpswap_fee_rows
+        ),
+        pumpswap_fees_known=coin.pumpswap_fees_known,
     )
 
 
-def _rank(row: SweepRow) -> tuple[int, Decimal, SweepParams]:
+def _rank(row: SweepRow) -> tuple[int, Decimal, str, SweepParams]:
+    realized = row.train_mean_realized_lamports or 0
     return (
-        -row.train_mean_closeout_lamports,
+        -realized,
         _distance(row.params),
+        row.dev_buy_sol,
         row.params,
     )
 

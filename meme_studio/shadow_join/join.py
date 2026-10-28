@@ -16,9 +16,15 @@ import pyarrow.parquet as pq
 from meme_studio.ladder import build_plan
 from meme_studio.ladder.engine import replay
 from meme_studio.ladder.money import lamports_to_sol_str, mean_lamports
+from meme_studio.ladder.plan import DISCLOSURE, FEE_CONFLICT
 from meme_studio.shadow_join.cohorts import TaggedCoin, tag_cohorts
 from meme_studio.shadow_join.schema import TrackerFile, is_sol_quote
-from meme_studio.shadow_join.sweep import SweepReport, coin_to_path, sweep_thresholds
+from meme_studio.shadow_join.sweep import (
+    SweepReport,
+    coin_to_path,
+    sweep_membership,
+    sweep_thresholds,
+)
 
 _DEV_BUYS = ("0.07", "0.1", "0.25")
 _COHORTS = ("population", "N", "P", "P_x", "P_minus_N", "C")
@@ -47,13 +53,20 @@ class CoinPnlRow:
     story_ids: str
     is_leader: bool
     plan_sha256: str
-    realized_pnl_lamports: int
-    closeout_pnl_lamports: int
+    realized_pnl_lamports: int | None
+    realized_pnl_measured_30bps_lamports: int | None
+    realized_pnl_research_95bps_lamports: int | None
+    closeout_pnl_lamports: int | None
+    closeout_is_mark_not_plan: bool
     held_raw: int
     reached_recover: bool
     graduated_on_our_curve: bool
     steps_fired: str
-    split: str
+    population_split: str
+    sweep_split: str
+    pumpswap_creator_fee_status: str
+    fee_conflict: str
+    disclosure: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,15 +102,20 @@ def build_join_report(tracker: TrackerFile) -> JoinReport:
     population = [item for item in tagged if "population" in item.cohorts]
     ordered = sorted(population, key=lambda item: (item.coin.create_ts, item.mint))
     n_train = len(ordered) // 2
-    split_of = {
+    population_split = {
         item.mint: "train" if index < n_train else "test"
         for index, item in enumerate(ordered)
     }
+    sweep_split = sweep_membership(
+        tuple(item.coin for item in population),
+        tracker.concepts,
+    )
     rows: list[CoinPnlRow] = []
     for item in ordered:
         for dev_buy in _DEV_BUYS:
             plan = build_plan(dev_buy, sol_usd=tracker.sol_usd)
             result = replay(coin_to_path(item.coin), plan)
+            scenarios = result.scenario_realized_lamports
             rows.append(
                 CoinPnlRow(
                     mint=item.mint,
@@ -107,12 +125,24 @@ def build_join_report(tracker: TrackerFile) -> JoinReport:
                     is_leader=item.is_leader,
                     plan_sha256=plan.sha256,
                     realized_pnl_lamports=result.realized_pnl_lamports,
+                    realized_pnl_measured_30bps_lamports=scenarios.get(
+                        "measured_30bps_assumption"
+                    ),
+                    realized_pnl_research_95bps_lamports=scenarios.get(
+                        "research_95bps_assumption"
+                    ),
                     closeout_pnl_lamports=result.closeout_pnl_lamports,
+                    closeout_is_mark_not_plan="closeout_is_mark_not_plan"
+                    in result.flags,
                     held_raw=result.held_raw,
                     reached_recover=result.reached_recover,
                     graduated_on_our_curve=result.graduated_on_our_curve,
                     steps_fired=",".join(sell.step for sell in result.sells),
-                    split=split_of[item.mint],
+                    population_split=population_split[item.mint],
+                    sweep_split=sweep_split.get(item.mint, "not_applicable"),
+                    pumpswap_creator_fee_status=result.pumpswap_creator_fee_status,
+                    fee_conflict=result.fee_conflict,
+                    disclosure=DISCLOSURE,
                 )
             )
     cohorts = _cohort_table(population, rows)
@@ -165,7 +195,9 @@ def _cohort_table(
             values = [
                 row.realized_pnl_lamports
                 for row in rows
-                if row.dev_buy_sol == dev_buy and row.mint in members
+                if row.dev_buy_sol == dev_buy
+                and row.mint in members
+                and row.realized_pnl_lamports is not None
             ]
             if not values:
                 continue
@@ -174,8 +206,12 @@ def _cohort_table(
                     cohort=cohort,
                     dev_buy_sol=dev_buy,
                     n=len(values),
-                    mean_realized_pnl_lamports=mean_lamports(values),
-                    bootstrap_mean_pnl_lamports_ci95=_bootstrap(values),
+                    mean_realized_pnl_lamports=mean_lamports(
+                        [int(value) for value in values]
+                    ),
+                    bootstrap_mean_pnl_lamports_ci95=_bootstrap(
+                        [int(value) for value in values]
+                    ),
                 )
             )
     return tuple(found)
@@ -205,18 +241,31 @@ def _row_dict(row: CoinPnlRow) -> dict[str, object]:
         "is_leader": row.is_leader,
         "plan_sha256": row.plan_sha256,
         "realized_pnl_lamports": row.realized_pnl_lamports,
+        "realized_pnl_measured_30bps_lamports": (
+            row.realized_pnl_measured_30bps_lamports
+        ),
+        "realized_pnl_research_95bps_lamports": (
+            row.realized_pnl_research_95bps_lamports
+        ),
         "closeout_pnl_lamports": row.closeout_pnl_lamports,
+        "closeout_is_mark_not_plan": row.closeout_is_mark_not_plan,
         "held_raw": row.held_raw,
         "reached_recover": row.reached_recover,
         "graduated_on_our_curve": row.graduated_on_our_curve,
         "steps_fired": row.steps_fired,
-        "split": row.split,
+        "population_split": row.population_split,
+        "sweep_split": row.sweep_split,
+        "pumpswap_creator_fee_status": row.pumpswap_creator_fee_status,
+        "fee_conflict": row.fee_conflict,
+        "disclosure": row.disclosure,
     }
 
 
 def _summary(report: JoinReport) -> dict[str, object]:
     return {
         "paper": True,
+        "disclosure": DISCLOSURE,
+        "fee_conflict": FEE_CONFLICT,
         "sol_usd": report.sol_usd,
         "excluded_non_sol": report.excluded_non_sol,
         "excluded_quote_unknown": report.excluded_quote_unknown,
@@ -238,11 +287,24 @@ def _summary(report: JoinReport) -> dict[str, object]:
             "published_plan_sha256": report.sweep.published_plan_sha256,
             "n_train": report.sweep.n_train,
             "n_test": report.sweep.n_test,
-            "selected_train_mean_closeout_lamports": (
-                report.sweep.selected_train_mean_closeout_lamports
+            "selected_dev_buy_sol": report.sweep.selected_dev_buy_sol,
+            "selected_plan_sha256": report.sweep.selected_plan_sha256,
+            "selected_thresholds": None
+            if report.sweep.selected_params is None
+            else {
+                "recover_multiple": report.sweep.selected_params.recover_multiple,
+                "remaining_fraction": report.sweep.selected_params.remaining_fraction,
+                "trail_drawdown": report.sweep.selected_params.trail_drawdown,
+            },
+            "selected_train_mean_realized_lamports": (
+                report.sweep.selected_train_mean_realized_lamports
             ),
-            "selected_test_mean_closeout_lamports": (
-                report.sweep.selected_test_mean_closeout_lamports
+            "selected_test_mean_realized_lamports": (
+                report.sweep.selected_test_mean_realized_lamports
+            ),
+            "unavailable_reason": report.sweep.unavailable_reason,
+            "closeout_note": (
+                "closeout marks are not recorded fills and are not used to rank"
             ),
         },
     }

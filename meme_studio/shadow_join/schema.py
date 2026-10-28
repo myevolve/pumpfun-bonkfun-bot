@@ -36,7 +36,17 @@ class TrackerTrade:
     user: str
     is_buy: bool
     sol_amount_raw: int
-    creator_fee_raw: int = 0
+    creator_fee_raw: int | None = 0
+    direction_known: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class CreatorFeeRow:
+    """One PumpSwap creator-fee row. None fields were not in the tracker file."""
+
+    ts: int | None
+    user: str | None
+    amount_raw: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,7 +55,7 @@ class TrackerCoin:
 
     mint: str
     create_ts: int
-    creator: str
+    creator: str | None
     name: str
     symbol: str
     uri: str
@@ -58,7 +68,9 @@ class TrackerCoin:
     quote_mint: str | None
     graduation_ts: int | None
     trades: tuple[TrackerTrade, ...]
-    pumpswap_creator_fee_raw: int = 0
+    pumpswap_creator_fee_raw: int | None = 0
+    pumpswap_fee_rows: tuple[CreatorFeeRow, ...] = ()
+    pumpswap_fees_known: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,16 +135,18 @@ def _coin(item: object) -> TrackerCoin:
     links = item.get("links") or {}
     if not isinstance(links, dict):
         links = {}
-    trades = tuple(_trade(row) for row in item.get("trades", []))
-    pumpswap_fee = 0
-    for row in item.get("pumpswap_coin_creator_fee_rows", []):
-        pumpswap_fee += _creator_fee(row)
+    trades = tuple(
+        _trade(row) for row in item.get("trades", []) if isinstance(row, dict)
+    )
+    fee_rows, fees_known = _pumpswap_fees(item)
     dev_buy = item.get("dev_buy_sol")
     description = item.get("description")
+    creator = item.get("creator")
+    creator_text = creator if isinstance(creator, str) and creator.strip() else None
     return TrackerCoin(
         mint=str(item["mint"]),
         create_ts=int(item["create_ts"]),
-        creator=str(item["creator"]),
+        creator=creator_text,
         name=str(item.get("name") or ""),
         symbol=str(item.get("symbol") or ""),
         uri=str(item.get("uri") or ""),
@@ -145,7 +159,9 @@ def _coin(item: object) -> TrackerCoin:
         quote_mint=None if item.get("quote_mint") is None else str(item["quote_mint"]),
         graduation_ts=_optional_int(item.get("graduation_ts")),
         trades=trades,
-        pumpswap_creator_fee_raw=pumpswap_fee,
+        pumpswap_creator_fee_raw=0 if fees_known else None,
+        pumpswap_fee_rows=fee_rows,
+        pumpswap_fees_known=fees_known,
     )
 
 
@@ -153,26 +169,62 @@ def _trade(item: object) -> TrackerTrade:
     if not isinstance(item, dict):
         raise TypeError("trade must be an object")
     if "sol_amount_raw" in item:
-        sol_raw = int(item["sol_amount_raw"])
+        sol_raw = _optional_lamports(item.get("sol_amount_raw"))
     else:
-        sol_raw = sol_to_lamports(str(item["sol_amount"]))
+        sol_raw = _optional_lamports(item.get("sol_amount"))
+    direction = item.get("is_buy")
+    user = item.get("user")
+    direction_known = isinstance(direction, bool) and sol_raw is not None
     return TrackerTrade(
-        ts=int(item["ts"]),
-        user=str(item["user"]),
-        is_buy=bool(item["is_buy"]),
-        sol_amount_raw=sol_raw,
-        creator_fee_raw=_creator_fee(item),
+        ts=int(item["ts"]) if isinstance(item.get("ts"), int) else 0,
+        user=user if isinstance(user, str) else "",
+        is_buy=direction if isinstance(direction, bool) else False,
+        sol_amount_raw=0 if sol_raw is None else sol_raw,
+        creator_fee_raw=_optional_fee(item),
+        direction_known=direction_known,
     )
 
 
-def _creator_fee(item: object) -> int:
+def _pumpswap_fees(item: dict[str, object]) -> tuple[tuple[CreatorFeeRow, ...], bool]:
+    if "pumpswap_coin_creator_fee_rows" not in item:
+        return (), False
+    raw_rows = item["pumpswap_coin_creator_fee_rows"]
+    if not isinstance(raw_rows, list):
+        return (), False
+    return tuple(_fee_row(row) for row in raw_rows), True
+
+
+def _fee_row(item: object) -> CreatorFeeRow:
     if not isinstance(item, dict):
-        return 0
+        return CreatorFeeRow(ts=None, user=None, amount_raw=None)
+    user = item.get("user")
+    ts = item.get("ts")
+    return CreatorFeeRow(
+        ts=ts if isinstance(ts, int) else None,
+        user=user if isinstance(user, str) and user else None,
+        amount_raw=_optional_fee(item),
+    )
+
+
+def _optional_fee(item: dict[str, object]) -> int | None:
     if "creator_fee_raw" in item:
-        return int(item["creator_fee_raw"])
-    if item.get("creator_fee") is None:
-        return 0
-    return sol_to_lamports(str(item["creator_fee"]))
+        return _optional_lamports(item.get("creator_fee_raw"))
+    if "creator_fee" not in item:
+        return None
+    return _optional_lamports(item.get("creator_fee"))
+
+
+def _optional_lamports(value: object) -> int | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return sol_to_lamports(value)
+        except ValueError:
+            return None
+    return None
 
 
 def _link(links: dict[str, object], *keys: str) -> str | None:

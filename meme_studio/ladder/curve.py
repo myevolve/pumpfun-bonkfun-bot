@@ -15,6 +15,7 @@ from solders.pubkey import Pubkey
 
 from core.pubkeys import WSOL_MINT
 from meme_studio.ladder.money import LAMPORTS_PER_SOL
+from meme_studio.ladder.plan import validate_fee_assumptions
 from platforms.pumpfun.fee_schedule import (
     PumpFeeConfig,
     PumpFees,
@@ -93,9 +94,11 @@ class PaperCurve:
             fees: Curve and PumpSwap fee assumptions. Curve LP must stay 0,
                 matching the repo quote engine.
         """
+        validate_fee_assumptions(fees)
         if fees.curve_lp_bps != 0:
             raise ValueError("curve LP fee must be 0")
         self.fees = fees
+        self._swap_creator_unresolved = fees.pumpswap_creator_bps is None
         self.virtual_token = VIRTUAL_TOKEN
         self.virtual_quote = VIRTUAL_QUOTE
         self.real_token = REAL_TOKEN
@@ -110,10 +113,13 @@ class PaperCurve:
             fees.curve_protocol_bps,
             fees.curve_creator_bps,
         )
+        swap_creator = (
+            0 if fees.pumpswap_creator_bps is None else fees.pumpswap_creator_bps
+        )
         self._swap_fees = _snapshot(
             fees.pumpswap_lp_bps,
             fees.pumpswap_protocol_bps,
-            fees.pumpswap_creator_bps,
+            swap_creator,
         )
 
     def dev_buy(self, spendable_raw: int) -> DevFill:
@@ -140,6 +146,8 @@ class PaperCurve:
         if tokens_raw <= 0:
             return None
         if self.venue == "pumpswap":
+            if self._swap_creator_unresolved:
+                raise ValueError("pumpswap creator fee is UNKNOWN")
             return self._preview_pool_sell(tokens_raw)
         try:
             quote = quote_sell_exact_in(
@@ -295,12 +303,50 @@ class PaperCurve:
             self.pool_base -= tokens
             self.pool_quote += net_raw
             return
-        capped = min(net_raw, self.pool_quote, max(effective - 1, 0))
-        if capped <= 0 or capped >= effective:
+        tokens = self._tokens_for_quote_decrease(net_raw)
+        left = self._quote_decrease_for_tokens(tokens)
+        if tokens <= 0 or left is None:
             return
-        tokens = capped * self.pool_base // (effective - capped)
         self.pool_base += tokens
-        self.pool_quote -= capped
+        self.pool_quote -= left
+
+    def _quote_decrease_for_tokens(self, tokens_raw: int) -> int | None:
+        effective = self.pool_quote + self.pool_virtual_quote
+        if tokens_raw <= 0 or self.pool_base <= 0 or effective <= 0:
+            return None
+        gross = effective * tokens_raw // (self.pool_base + tokens_raw)
+        lp_fee = _ceil_fee(gross, self.fees.pumpswap_lp_bps)
+        decrease = gross - lp_fee
+        if decrease <= 0 or self.pool_quote < decrease:
+            return None
+        return decrease
+
+    def _tokens_for_quote_decrease(self, decrease: int) -> int:
+        """Invert a pool quote drop back to tokens.
+
+        An exact own-sell decrease maps back to that sell's token size.
+        If the observed drop falls between two sizes, the smaller size is
+        used so the pool does not lose more quote than was observed.
+        """
+        if decrease <= 0 or self.pool_base <= 1:
+            return 0
+        lo = 0
+        hi = self.pool_base - 1
+        best = 0
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            got = 0 if mid == 0 else self._quote_decrease_for_tokens(mid)
+            if got is None:
+                hi = mid - 1
+                continue
+            if got == decrease:
+                return mid
+            if got < decrease:
+                best = mid
+                lo = mid + 1
+            else:
+                hi = mid - 1
+        return best
 
     def _preview_pool_sell(self, tokens_raw: int) -> SellQuote | None:
         effective = self.pool_quote + self.pool_virtual_quote

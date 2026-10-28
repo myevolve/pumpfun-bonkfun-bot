@@ -68,7 +68,7 @@
         }
       ],
       "pumpswap_coin_creator_fee_rows": [
-        {"ts": 1700002000, "creator_fee": "0.001"}
+        {"ts": 1700002000, "user": "BuyerB", "creator_fee": "0.001"}
       ]
     },
     {

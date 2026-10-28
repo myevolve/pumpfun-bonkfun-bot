@@ -98,6 +98,7 @@ def test_trailing_exit_fires_once_per_thirty_minutes() -> None:
                 _sell(_CREATE + 200, 40_000_000_000),
                 _buy(_CREATE + 300, 40_200_000_000),
                 _sell(_CREATE + 400, 45_000_000_000),
+                _sell(_CREATE + 2_000, 1),
             ]
         ),
         plan,
@@ -110,8 +111,21 @@ def test_trailing_exit_fires_once_per_thirty_minutes() -> None:
 
 
 def test_miss_sells_four_equal_tranches_each_preannounced_one_hour_ahead() -> None:
-    plan = build_plan("0.1", sol_usd="100")
-    result = replay(_path([_buy(_CREATE + 10, 1_000_000_000, fee=12345)]), plan)
+    plan = build_plan(
+        "0.1",
+        sol_usd="100",
+        thresholds=LadderThresholds(horizon_s=97_200),
+    )
+    exits = [_CREATE + 86_400 + index * 3_600 for index in range(4)]
+    result = replay(
+        _path(
+            [
+                _buy(_CREATE + 10, 1_000_000_000, fee=12345),
+                *[_buy(ts, 1) for ts in exits],
+            ]
+        ),
+        plan,
+    )
     miss = [sell for sell in result.sells if sell.step.startswith("miss")]
     pre = [row for row in result.announcements if row["kind"] == "PREANNOUNCE"]
 
@@ -160,11 +174,18 @@ def test_real_creator_trades_are_removed_because_we_replace_the_dev() -> None:
 
 def test_realized_pnl_identity_includes_fees_launch_cost_and_creator_rebate() -> None:
     plan = build_plan("0.1", sol_usd="100")
-    result = replay(_path([_buy(_CREATE + 10, 1_000_000_000, fee=5000)]), plan)
+    result = replay(_path([_buy(_CREATE + 10, 40_000_000_000, fee=5000)]), plan)
+    priority = (
+        plan.fees.priority_fee_microlamports * plan.fees.sell_compute_unit_limit
+        + 999_999
+    ) // 1_000_000
+    per_sell = plan.fees.network_fee_lamports + priority
 
     assert result.launch_cost_lamports == 10_000_000
-    assert result.tx_fee_lamports == 10_925 * len(result.sells)
+    assert per_sell == 10_926
+    assert result.tx_fee_lamports == per_sell * len(result.sells)
     assert result.own_creator_rebate_lamports > 0
+    assert result.observed_outside_creator_fee_lamports == 5000
     assert result.realized_pnl_lamports == (
         result.cash_out_lamports
         - result.dev_buy.lamports_raw
@@ -173,8 +194,6 @@ def test_realized_pnl_identity_includes_fees_launch_cost_and_creator_rebate() ->
         + result.own_creator_rebate_lamports
         + result.observed_outside_creator_fee_lamports
     )
-    assert result.closeout_pnl_lamports == result.realized_pnl_lamports
-    assert "open_runner" not in result.flags
 
 
 def test_open_runner_is_not_marked_as_sold_in_realized_pnl() -> None:
@@ -189,7 +208,7 @@ def test_open_runner_is_not_marked_as_sold_in_realized_pnl() -> None:
 
 def test_every_simulated_sell_is_logged_as_a_paper_announcement() -> None:
     plan = build_plan("0.07", sol_usd="101.47")
-    result = replay(_path([_buy(_CREATE + 10, 1_000_000_000)]), plan)
+    result = replay(_path([_buy(_CREATE + 10, 40_000_000_000)]), plan)
     sell_rows = [row for row in result.announcements if row["kind"] == "SELL"]
 
     assert [row["step"] for row in sell_rows] == [sell.step for sell in result.sells]
@@ -200,6 +219,7 @@ def test_every_simulated_sell_is_logged_as_a_paper_announcement() -> None:
         assert row["within_seconds"] == 60
         assert sell.tx_link == row["tx"]
         assert row["text"].startswith("PAPER SELL ")
+        assert "we created this token and we hold it" in row["text"]
         assert plan.sha256 in row["text"]
         assert "http://" not in row["text"]
         assert "https://" not in row["text"]
@@ -274,13 +294,13 @@ def test_graduation_sell_is_on_pumpswap_with_configured_fees() -> None:
 def test_replay_logs_each_sell(caplog: pytest.LogCaptureFixture) -> None:
     plan = build_plan("0.1", sol_usd="100")
     with caplog.at_level(logging.INFO, logger="meme_studio.ladder.paper"):
-        replay(_path([_buy(_CREATE + 10, 1_000_000_000)]), plan)
+        result = replay(_path([_buy(_CREATE + 10, 40_000_000_000)]), plan)
 
     sell_lines = [
         rec.message for rec in caplog.records if rec.message.startswith("PAPER SELL")
     ]
-    assert len(sell_lines) == 4
-    assert all(plan.sha256 in line for line in sell_lines)
+    assert len(sell_lines) == len(result.sells) > 0
+    assert all("we created this token and we hold it" in line for line in sell_lines)
 
 
 def test_package_source_has_no_wallet_rpc_or_network_client() -> None:

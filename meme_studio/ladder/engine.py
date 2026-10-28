@@ -4,12 +4,19 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from heapq import heappop, heappush
 from typing import TYPE_CHECKING
 
 from meme_studio.ladder.curve import PaperCurve, SellQuote
-from meme_studio.ladder.money import bps_ratio, lamports_to_sol_str, usd_to_lamports
+from meme_studio.ladder.money import exact_ratio, lamports_to_sol_str, usd_to_lamports
+from meme_studio.ladder.plan import (
+    DISCLOSURE,
+    FEE_CONFLICT,
+    MEASURED_PUMPSWAP_CREATOR_BPS,
+    RESEARCH_PUMPSWAP_CREATOR_BPS,
+    FeeAssumptions,
+)
 
 if TYPE_CHECKING:
     from meme_studio.ladder.plan import SellPlan
@@ -25,7 +32,17 @@ class PathTrade:
     user: str
     is_buy: bool
     sol_amount_raw: int
-    creator_fee_raw: int = 0
+    creator_fee_raw: int | None = 0
+    direction_known: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class FeeRow:
+    """One creator-fee observation. None means the field was not recorded."""
+
+    ts: int | None
+    user: str | None
+    amount_raw: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,10 +51,12 @@ class CoinPath:
 
     mint: str
     create_ts: int
-    creator: str
+    creator: str | None
     trades: tuple[PathTrade, ...]
-    extra_observed_creator_fee_raw: int = 0
+    extra_observed_creator_fee_raw: int | None = 0
     graduation_ts: int | None = None
+    pumpswap_fee_rows: tuple[FeeRow, ...] = ()
+    pumpswap_fees_known: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,13 +96,16 @@ class ReplayResult:
     tx_fee_lamports: int
     launch_cost_lamports: int
     own_creator_rebate_lamports: int
-    observed_outside_creator_fee_lamports: int
+    observed_outside_creator_fee_lamports: int | None
     realized_pnl_lamports: int
-    closeout_pnl_lamports: int
+    closeout_pnl_lamports: int | None
     held_raw: int
     reached_recover: bool
     graduated_on_our_curve: bool
     flags: list[str]
+    scenario_realized_lamports: dict[str, int | None] = field(default_factory=dict)
+    pumpswap_creator_fee_status: str = "explicit_assumption"
+    fee_conflict: str = FEE_CONFLICT
 
 
 def replay(path: CoinPath, plan: SellPlan) -> ReplayResult:
@@ -95,16 +117,74 @@ def replay(path: CoinPath, plan: SellPlan) -> ReplayResult:
 
     Returns:
         Realized cash P&L and the announcement log. No transaction is built.
+        When the post-graduation creator fee is unresolved, both assumptions
+        are run and the headline P&L is the worse one.
     """
     if plan.to_dict()["mode"] != "paper":
         raise ValueError("ladder replay is paper only")
-    return _Session(path, plan).run()
+    if plan.fees.pumpswap_creator_bps is None:
+        measured = _Session(
+            path,
+            plan,
+            replace(plan.fees, pumpswap_creator_bps=MEASURED_PUMPSWAP_CREATOR_BPS),
+            emit_log=False,
+        ).run()
+        research = _Session(
+            path,
+            plan,
+            replace(plan.fees, pumpswap_creator_bps=RESEARCH_PUMPSWAP_CREATOR_BPS),
+            emit_log=False,
+        ).run()
+        return _headline(plan, measured, research)
+    result = _Session(path, plan, plan.fees).run()
+    result.scenario_realized_lamports = {
+        "explicit_assumption": result.realized_pnl_lamports
+    }
+    result.pumpswap_creator_fee_status = "explicit_assumption"
+    result.fee_conflict = FEE_CONFLICT
+    return result
+
+
+def _headline(
+    plan: SellPlan,
+    measured: ReplayResult,
+    research: ReplayResult,
+) -> ReplayResult:
+    scenarios = {
+        "measured_30bps_assumption": measured.realized_pnl_lamports,
+        "research_95bps_assumption": research.realized_pnl_lamports,
+    }
+    values = [value for value in scenarios.values() if value is not None]
+    headline = min(values) if len(values) == len(scenarios) else None
+    chosen = measured
+    if research.realized_pnl_lamports is not None and (
+        measured.realized_pnl_lamports is None
+        or research.realized_pnl_lamports < measured.realized_pnl_lamports
+    ):
+        chosen = research
+    flags = set(measured.flags) | set(research.flags)
+    flags.add("pumpswap_creator_fee_unknown")
+    combined = replace(
+        chosen,
+        plan_sha256=plan.sha256,
+        realized_pnl_lamports=headline,
+        scenario_realized_lamports=scenarios,
+        pumpswap_creator_fee_status="UNKNOWN",
+        fee_conflict=FEE_CONFLICT,
+        flags=sorted(flags),
+    )
+    for row in combined.announcements:
+        text = row.get("text")
+        if isinstance(text, str):
+            _LOG.info(text)
+    return combined
 
 
 @dataclass(slots=True)
 class _Session:
     path: CoinPath
     plan: SellPlan
+    curve_fees: FeeAssumptions
     curve: PaperCurve = field(init=False)
     held: int = 0
     tokens_bought: int = 0
@@ -128,12 +208,16 @@ class _Session:
     reached_recover: bool = False
     replaced_dev: bool = False
     graduated: bool = False
+    fee_unknown: bool = False
+    blocked: bool = False
+    emit_log: bool = True
+    observed_times: set[int] = field(default_factory=set)
     _heap: list[int] = field(default_factory=list)
     _seen: set[int] = field(default_factory=set)
     _trades: dict[int, list[PathTrade]] = field(default_factory=dict)
 
     def run(self) -> ReplayResult:
-        self.curve = PaperCurve(self.plan.fees)
+        self.curve = PaperCurve(self.curve_fees)
         self.flags.add("outside_flows_fixed_in_sol")
         self._group_trades()
         self._schedule(self.path.create_ts)
@@ -185,8 +269,20 @@ class _Session:
 
     def _apply_trades(self, ts: int) -> None:
         horizon = self.path.create_ts + self.plan.thresholds.horizon_s
+        if self.path.creator is None:
+            self.flags.add("creator_identity_unknown")
+            self.blocked = True
+            return
         for trade in self._trades.get(ts, []):
+            if trade.ts < self.path.create_ts:
+                self.flags.add("trade_before_create")
+                continue
             if trade.ts > horizon:
+                self.flags.add("trade_after_horizon")
+                continue
+            if not trade.direction_known:
+                self.flags.add("invalid_trade_direction")
+                self.blocked = True
                 continue
             if trade.user == self.path.creator:
                 self.replaced_dev = True
@@ -202,7 +298,12 @@ class _Session:
                 is_buy=trade.is_buy,
                 net_raw=trade.sol_amount_raw,
             )
-            self.observed_fee += trade.creator_fee_raw
+            self.observed_times.add(ts)
+            if trade.creator_fee_raw is None:
+                self.fee_unknown = True
+                self.flags.add("creator_fee_unknown")
+            else:
+                self.observed_fee += trade.creator_fee_raw
 
     def _fire_due(self, ts: int) -> None:
         steps = (
@@ -232,7 +333,7 @@ class _Session:
     def _multiple_reached(self, multiple: str) -> bool:
         if self.tokens_bought <= 0:
             return False
-        num, den = bps_ratio(multiple)
+        num, den = exact_ratio(multiple)
         quote_raw, token_raw = self.curve.price_pair()
         if token_raw <= 0:
             return False
@@ -240,7 +341,23 @@ class _Session:
             quote_raw * self.tokens_bought * den >= num * self.dev_lamports * token_raw
         )
 
+    def _can_fill(self, ts: int, *, censor: bool) -> bool:
+        cutoff = self.path.create_ts + self.plan.thresholds.horizon_s
+        if ts < self.path.create_ts or ts > cutoff:
+            if censor:
+                self.flags.add("exit_after_data_cutoff")
+                self.flags.add("residual_value_unknown")
+            return False
+        if ts not in self.observed_times:
+            if censor:
+                self.flags.add("unobserved_exit_censored")
+                self.flags.add("residual_value_unknown")
+            return False
+        return True
+
     def _sell_recover(self, ts: int) -> bool:
+        if not self._can_fill(ts, censor=False):
+            return False
         target = self.dev_lamports + self._launch_cost() + self._tx_fee()
         qty = self._qty_for_target(target)
         if qty <= 0:
@@ -254,8 +371,14 @@ class _Session:
         return True
 
     def _sell_fraction(self, ts: int, step: str) -> bool:
-        num, den = bps_ratio(self.plan.thresholds.remaining_fraction)
+        if not self._can_fill(ts, censor=step.startswith("miss")):
+            return False
+        num, den = exact_ratio(self.plan.thresholds.remaining_fraction)
         desired = self.held * num // den
+        if desired >= self.held:
+            desired = self.held - 1
+        if desired <= 0:
+            return False
         qty = self._max_under_slippage(desired)
         if qty <= 0:
             self.flags.add("slippage_blocked")
@@ -310,7 +433,7 @@ class _Session:
         spot = self.curve.spot_gross(qty)
         if spot <= 0:
             return False
-        num, den = bps_ratio(self.plan.thresholds.slippage_cap)
+        num, den = exact_ratio(self.plan.thresholds.slippage_cap)
         if num == 0:
             # Any positive size moves the constant product. Integer spot can
             # hide that, so a zero cap rejects every sell.
@@ -334,7 +457,7 @@ class _Session:
             self.trail_armed = True
             self.trail_pending = False
             return
-        draw_num, draw_den = bps_ratio(self.plan.thresholds.trail_drawdown)
+        draw_num, draw_den = exact_ratio(self.plan.thresholds.trail_drawdown)
         # Price at or below (1 - drawdown) of the anchor.
         kept_num = draw_den - draw_num
         if quote_raw * anchor_token * draw_den <= anchor_quote * token_raw * kept_num:
@@ -410,6 +533,8 @@ class _Session:
 
     def _execute_miss(self, ts: int, index: int) -> None:
         self.miss_done.add(index)
+        if not self._can_fill(ts, censor=True):
+            return
         parts = self.miss_parts or []
         desired = parts[index] if index < len(parts) else 0
         qty = min(desired, self.held)
@@ -456,7 +581,8 @@ class _Session:
         text = (
             f"PAPER {note.kind} step={note.step} mint={self.path.mint} ts={note.ts} "
             f"tokens_raw={note.tokens_raw} sol_net={sol_text} venue={note.venue} "
-            f"plan_sha256={self.plan.sha256} tx={note.link}"
+            f"plan_sha256={self.plan.sha256} tx={note.link} "
+            f"{DISCLOSURE} {FEE_CONFLICT}"
         )
         row: dict[str, object] = {
             "kind": note.kind,
@@ -469,14 +595,44 @@ class _Session:
         if note.kind == "SELL":
             row["within_seconds"] = 60
         self.announcements.append(row)
-        _LOG.info(text)
+        if self.emit_log:
+            _LOG.info(text)
 
     def _tx_fee(self) -> int:
         fees = self.plan.fees
         priority = (
-            fees.sell_compute_unit_limit * fees.priority_fee_microlamports // 1_000_000
-        )
+            fees.priority_fee_microlamports * fees.sell_compute_unit_limit + 999_999
+        ) // 1_000_000
         return fees.network_fee_lamports + priority
+
+    def _outside_creator_fee(self) -> int | None:
+        if self.fee_unknown or self.blocked or self.path.creator is None:
+            self.flags.add("creator_fee_unknown")
+            return None
+        if not self.path.pumpswap_fees_known:
+            self.flags.add("creator_fee_unknown")
+            return None
+        extra = self._pumpswap_creator_fee()
+        if extra is None:
+            return None
+        return self.observed_fee + extra
+
+    def _pumpswap_creator_fee(self) -> int | None:
+        if self.path.pumpswap_fee_rows:
+            total = 0
+            cutoff = self.path.create_ts + self.plan.thresholds.horizon_s
+            for row in self.path.pumpswap_fee_rows:
+                if row.ts is None or row.user is None or row.amount_raw is None:
+                    self.flags.add("creator_fee_unknown")
+                    return None
+                if row.ts < self.path.create_ts or row.ts > cutoff:
+                    self.flags.add("fee_outside_window")
+                    continue
+                if row.user == self.path.creator:
+                    continue
+                total += row.amount_raw
+            return total
+        return self.path.extra_observed_creator_fee_raw
 
     def _launch_cost(self) -> int:
         return usd_to_lamports(
@@ -487,25 +643,33 @@ class _Session:
     def _finish(self) -> ReplayResult:
         if self.replaced_dev:
             self.flags.add("replaced_real_dev")
-        observed = self.observed_fee + self.path.extra_observed_creator_fee_raw
+        observed = self._outside_creator_fee()
         cash = sum(sell.net_raw for sell in self.sells)
         tx_fees = sum(sell.tx_fee_lamports for sell in self.sells)
         rebate = self.dev_creator_fee + sum(sell.creator_fee_raw for sell in self.sells)
         launch = self._launch_cost()
-        realized = cash - self.dev_lamports - tx_fees - launch + rebate + observed
-        closeout = realized
-        if self.held > 0:
-            self.flags.add("closeout_is_mark_not_plan")
-            if self.reached_recover:
-                self.flags.add("open_runner")
-            preview = self.curve.preview_sell(self.held)
-            if preview is not None:
-                closeout = (
-                    realized
-                    + preview.net_raw
-                    + preview.creator_fee_raw
-                    - self._tx_fee()
-                )
+        censored = "residual_value_unknown" in self.flags or self.blocked
+        if observed is None or self.blocked or self.fee_unknown:
+            realized = None
+        else:
+            realized = cash - self.dev_lamports - tx_fees - launch + rebate + observed
+        closeout: int | None
+        if censored or realized is None:
+            closeout = None
+        else:
+            closeout = realized
+            if self.held > 0:
+                self.flags.add("closeout_is_mark_not_plan")
+                if self.reached_recover:
+                    self.flags.add("open_runner")
+                preview = self.curve.preview_sell(self.held)
+                if preview is not None:
+                    closeout = (
+                        realized
+                        + preview.net_raw
+                        + preview.creator_fee_raw
+                        - self._tx_fee()
+                    )
         return ReplayResult(
             plan_sha256=self.plan.sha256,
             dev_buy=DevBuyRecord(self.tokens_bought, self.dev_lamports),

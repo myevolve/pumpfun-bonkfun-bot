@@ -98,13 +98,17 @@ def matches_any_concept(
     return any(_matches_concept(coin, concept) for concept in concepts)
 
 
-def outside_buy_raw(coin: TrackerCoin) -> int:
-    """Outside buy SOL in lamports. The real creator's buys are not volume."""
-    return sum(
-        trade.sol_amount_raw
-        for trade in coin.trades
-        if trade.is_buy and trade.user != coin.creator
-    )
+def outside_buy_raw(coin: TrackerCoin) -> int | None:
+    """Outside buy SOL in lamports. Unknown creator identity censors the sum."""
+    if coin.creator is None:
+        return None
+    total = 0
+    for trade in coin.trades:
+        if not trade.direction_known:
+            return None
+        if trade.is_buy and trade.user != coin.creator:
+            total += trade.sol_amount_raw
+    return total
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,14 +127,18 @@ def _stories_for(
     for concept in concepts:
         matched = [coin for coin in population if _matches_concept(coin, concept)]
         volumes = {coin.mint: outside_buy_raw(coin) for coin in matched}
-        total = sum(volumes.values())
         if not matched:
             stories[concept.story_id] = _Story((), None, None)
             continue
-        leader = min(matched, key=lambda coin: (-volumes[coin.mint], coin.mint))
+        if any(volume is None for volume in volumes.values()):
+            stories[concept.story_id] = _Story(tuple(sorted(volumes)), None, None)
+            continue
+        known = {mint: volume for mint, volume in volumes.items() if volume is not None}
+        total = sum(known.values())
+        leader = min(matched, key=lambda coin: (-int(known[coin.mint]), coin.mint))
         share = None
         if total > 0:
-            share = dec_str(Decimal(volumes[leader.mint]) / Decimal(total))
+            share = dec_str(Decimal(known[leader.mint]) / Decimal(total))
         stories[concept.story_id] = _Story(
             tuple(sorted(volumes)),
             leader.mint,

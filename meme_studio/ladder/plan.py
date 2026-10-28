@@ -9,12 +9,23 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from meme_studio.ladder.money import (
-    bps_ratio,
     dec_str,
+    exact_ratio,
     lamports_to_sol_str,
     sol_to_lamports,
 )
 
+DISCLOSURE = (
+    "PAPER DISCLOSURE: we created this token and we hold it. "
+    "This draft is not a live sale."
+)
+FEE_CONFLICT = (
+    "UNKNOWN post-graduation creator fee: research 0.95% conflicts with "
+    "measured 30 bps; both are assumptions; headline P&L is the worse case"
+)
+_MAX_FEE_BPS = 10_000
+MEASURED_PUMPSWAP_CREATOR_BPS = 30
+RESEARCH_PUMPSWAP_CREATOR_BPS = 95
 _UNKNOWNS = (
     "priority_fee_microlamports_copied_from_mint_and_buy_v2_example",
     "pool_seeded_at_continuous_price_migration_fee_unknown",
@@ -33,7 +44,7 @@ class FeeAssumptions:
     curve_lp_bps: int = 0
     pumpswap_lp_bps: int = 0
     pumpswap_protocol_bps: int = 95
-    pumpswap_creator_bps: int = 30
+    pumpswap_creator_bps: int | None = None
     network_fee_lamports: int = 5_000
     priority_fee_microlamports: int = 37_037
     sell_compute_unit_limit: int = 160_000
@@ -73,10 +84,12 @@ class SellPlan:
         thresholds = self.thresholds
         fees = self.fees
         priority = (
-            fees.sell_compute_unit_limit * fees.priority_fee_microlamports // 1_000_000
-        )
+            fees.sell_compute_unit_limit * fees.priority_fee_microlamports + 999_999
+        ) // 1_000_000
         fraction = dec_str(thresholds.remaining_fraction)
         return {
+            "disclosure": DISCLOSURE,
+            "fee_conflict": FEE_CONFLICT,
             "dev_buy_sol": lamports_to_sol_str(self.dev_buy_lamports),
             "fees": {
                 "curve_creator_bps": fees.curve_creator_bps,
@@ -90,14 +103,23 @@ class SellPlan:
                 "priority_fee_lamports": priority,
                 "priority_fee_microlamports": fees.priority_fee_microlamports,
                 "priority_fee_status": "ASSUMPTION",
-                "pumpswap_creator_bps": fees.pumpswap_creator_bps,
-                "pumpswap_fee_status": (
-                    "measured_2026-10-07_fee_config_lp0_protocol95_creator30"
+                "pumpswap_creator_bps_explicit": fees.pumpswap_creator_bps,
+                "pumpswap_creator_bps_measured_assumption": (
+                    MEASURED_PUMPSWAP_CREATOR_BPS
+                ),
+                "pumpswap_creator_bps_research_assumption": (
+                    RESEARCH_PUMPSWAP_CREATOR_BPS
+                ),
+                "pumpswap_creator_fee_status": (
+                    "UNKNOWN"
+                    if fees.pumpswap_creator_bps is None
+                    else "explicit_assumption"
                 ),
                 "pumpswap_lp_bps": fees.pumpswap_lp_bps,
                 "pumpswap_protocol_bps": fees.pumpswap_protocol_bps,
                 "sell_compute_unit_limit": fees.sell_compute_unit_limit,
             },
+            "horizon_s": thresholds.horizon_s,
             "launch_cost_usd": dec_str(thresholds.launch_cost_usd),
             "miss": {
                 "action": "sell_equal_parts_of_remainder",
@@ -193,6 +215,7 @@ def build_plan(
     chosen = thresholds or LadderThresholds()
     chosen_fees = fees or FeeAssumptions()
     _validate(chosen)
+    validate_fee_assumptions(chosen_fees)
     lamports = sol_to_lamports(dev_buy_sol)
     if lamports <= 0 or lamports > sol_to_lamports("1"):
         raise ValueError("dev buy must be between 0 and 1 SOL")
@@ -217,8 +240,8 @@ def _validate(thresholds: LadderThresholds) -> None:
         raise ValueError("ladder multiples must increase")
     if len(set(multiples)) != len(multiples):
         raise ValueError("ladder multiples must increase")
-    fraction = Decimal(thresholds.remaining_fraction)
-    if fraction <= 0 or fraction >= 1:
+    fraction_num, fraction_den = exact_ratio(thresholds.remaining_fraction)
+    if fraction_num <= 0 or fraction_den <= 0 or fraction_num >= fraction_den:
         raise ValueError(
             "remaining fraction must be a share of the bag, strictly below 1"
         )
@@ -230,4 +253,40 @@ def _validate(thresholds: LadderThresholds) -> None:
         raise ValueError("slippage cap must be between 0 and 1")
     if thresholds.miss_tranches < 1:
         raise ValueError("miss tranches must be positive")
-    bps_ratio(thresholds.remaining_fraction)
+    draw_num, draw_den = exact_ratio(thresholds.trail_drawdown)
+    if draw_num <= 0 or draw_num >= draw_den:
+        raise ValueError("trail drawdown must be between 0 and 1")
+
+
+def validate_fee_assumptions(fees: FeeAssumptions) -> None:
+    rates: tuple[tuple[str, int | None], ...] = (
+        ("curve_protocol_bps", fees.curve_protocol_bps),
+        ("curve_creator_bps", fees.curve_creator_bps),
+        ("curve_lp_bps", fees.curve_lp_bps),
+        ("pumpswap_lp_bps", fees.pumpswap_lp_bps),
+        ("pumpswap_protocol_bps", fees.pumpswap_protocol_bps),
+        ("pumpswap_creator_bps", fees.pumpswap_creator_bps),
+        ("network_fee_lamports", fees.network_fee_lamports),
+        ("priority_fee_microlamports", fees.priority_fee_microlamports),
+        ("sell_compute_unit_limit", fees.sell_compute_unit_limit),
+    )
+    for name, value in rates:
+        if value is None:
+            if name != "pumpswap_creator_bps":
+                raise ValueError(f"{name} is required")
+            continue
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"{name} must be a nonnegative integer")
+        if name.endswith("_bps") and value > _MAX_FEE_BPS:
+            raise ValueError(f"{name} exceeds {_MAX_FEE_BPS}")
+    if fees.curve_lp_bps != 0:
+        raise ValueError("curve LP fee must be 0")
+    if fees.sell_compute_unit_limit <= 0:
+        raise ValueError("sell compute unit limit must be positive")
+    if fees.curve_protocol_bps + fees.curve_creator_bps > _MAX_FEE_BPS:
+        raise ValueError("curve fees exceed 10000 bps")
+    if fees.pumpswap_creator_bps is not None and (
+        fees.pumpswap_lp_bps + fees.pumpswap_protocol_bps + fees.pumpswap_creator_bps
+        > _MAX_FEE_BPS
+    ):
+        raise ValueError("pumpswap fees exceed 10000 bps")

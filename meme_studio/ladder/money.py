@@ -11,7 +11,6 @@ from decimal import ROUND_HALF_UP, Decimal
 
 LAMPORTS_PER_SOL = 1_000_000_000
 _LAMPORTS = Decimal(LAMPORTS_PER_SOL)
-_BPS = Decimal(10_000)
 
 
 def dec_str(value: str | Decimal) -> str:
@@ -57,14 +56,35 @@ def lamports_to_usd_str(lamports: int, sol_usd: str | Decimal) -> str:
     return format(rounded, "f")
 
 
+def exact_ratio(value: str | Decimal) -> tuple[int, int]:
+    """Return the exact rational represented by a decimal string.
+
+    0.99999 stays 99999/100000. It is not rounded to the nearest basis point,
+    which would turn it into 1 and liquidate a remainder the plan forbids.
+    """
+    dec = Decimal(value)
+    sign, digits, exponent = dec.as_tuple()
+    if not digits:
+        return 0, 1
+    number = 0
+    for digit in digits:
+        number = number * 10 + int(digit)
+    if not isinstance(exponent, int):
+        raise TypeError("fee ratio must be a finite decimal")
+    if exponent >= 0:
+        number *= 10**exponent
+        den = 1
+    else:
+        den = 10 ** (-exponent)
+    if sign:
+        number = -number
+    g = _gcd(abs(number), den)
+    return number // g, den // g
+
+
 def bps_ratio(value: str | Decimal) -> tuple[int, int]:
     """Return value as a reduced fraction with 1/10000 resolution."""
-    num = int((Decimal(value) * _BPS).to_integral_value(rounding=ROUND_HALF_UP))
-    den = 10_000
-    if num == 0:
-        return 0, 1
-    g = _gcd(num, den)
-    return num // g, den // g
+    return exact_ratio(value)
 
 
 def mean_lamports(values: list[int]) -> int:
