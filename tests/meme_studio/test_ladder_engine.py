@@ -229,6 +229,29 @@ def test_zero_slippage_cap_blocks_the_sell() -> None:
     assert "slippage_blocked" in result.flags
 
 
+def test_tracker_graduation_does_not_push_later_flow_through_our_open_curve() -> None:
+    plan = build_plan("0.1", sol_usd="100")
+    early = _buy(_CREATE + 10, 1_000_000_000)
+    stopped = replay(_path([early]), plan)
+    continued = replay(
+        CoinPath(
+            mint="mint-paper",
+            create_ts=_CREATE,
+            creator="CreatorPaper111",
+            trades=(early, _buy(_CREATE + 20, 5_000_000_000)),
+            graduation_ts=_CREATE + 15,
+        ),
+        plan,
+    )
+
+    assert [sell.tokens_raw for sell in continued.sells] == [
+        sell.tokens_raw for sell in stopped.sells
+    ]
+    assert continued.cash_out_lamports == stopped.cash_out_lamports
+    assert continued.graduated_on_our_curve is False
+    assert "real_coin_graduated_our_curve_did_not" in continued.flags
+
+
 def test_graduation_sell_is_on_pumpswap_with_configured_fees() -> None:
     plan = build_plan(
         "0.1",

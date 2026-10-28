@@ -37,6 +37,7 @@ class CoinPath:
     creator: str
     trades: tuple[PathTrade, ...]
     extra_observed_creator_fee_raw: int = 0
+    graduation_ts: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,6 +190,13 @@ class _Session:
                 continue
             if trade.user == self.path.creator:
                 self.replaced_dev = True
+                continue
+            graduated_on_record = (
+                self.path.graduation_ts is not None
+                and trade.ts > self.path.graduation_ts
+            )
+            if graduated_on_record and self.curve.venue == "curve":
+                self.flags.add("real_coin_graduated_our_curve_did_not")
                 continue
             self.curve.apply_outside_net(
                 is_buy=trade.is_buy,

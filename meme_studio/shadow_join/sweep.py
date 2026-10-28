@@ -151,6 +151,7 @@ def coin_to_path(coin: TrackerCoin) -> CoinPath:
         creator=coin.creator,
         trades=trades,
         extra_observed_creator_fee_raw=coin.pumpswap_creator_fee_raw,
+        graduation_ts=coin.graduation_ts,
     )
 
 
