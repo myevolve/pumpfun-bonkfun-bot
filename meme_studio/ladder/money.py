@@ -7,7 +7,7 @@ published plan and a replay agree on the same integer.
 
 from __future__ import annotations
 
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 LAMPORTS_PER_SOL = 1_000_000_000
 _LAMPORTS = Decimal(LAMPORTS_PER_SOL)
@@ -23,8 +23,30 @@ def dec_str(value: str | Decimal) -> str:
 
 def sol_to_lamports(sol: str | Decimal) -> int:
     """Convert a SOL decimal string to lamports."""
-    amount = (Decimal(sol) * _LAMPORTS).to_integral_value(rounding=ROUND_HALF_UP)
-    return int(amount)
+    parsed = parse_sol_lamports(sol)
+    if parsed is None:
+        raise ValueError("SOL amount is UNKNOWN")
+    return parsed
+
+
+def parse_sol_lamports(sol: str | Decimal) -> int | None:
+    """Convert SOL text to lamports, or None when the text is not a finite amount."""
+    try:
+        dec = sol if isinstance(sol, Decimal) else Decimal(sol)
+    except (InvalidOperation, ValueError):
+        return None
+    if not dec.is_finite() or dec < 0:
+        return None
+    try:
+        amount = (dec * _LAMPORTS).to_integral_value(rounding=ROUND_HALF_UP)
+    except (InvalidOperation, OverflowError, ValueError):
+        return None
+    if not amount.is_finite() or amount < 0:
+        return None
+    try:
+        return int(amount)
+    except (OverflowError, ValueError):
+        return None
 
 
 def lamports_to_sol_str(lamports: int) -> str:

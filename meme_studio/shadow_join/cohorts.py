@@ -100,12 +100,18 @@ def matches_any_concept(
 
 def outside_buy_raw(coin: TrackerCoin) -> int | None:
     """Outside buy SOL in lamports. Unknown creator identity censors the sum."""
-    if coin.creator is None:
+    if coin.creator is None or not coin.history_complete:
         return None
     total = 0
     for trade in coin.trades:
-        if not trade.direction_known:
+        if (
+            not trade.direction_known
+            or not trade.attribution_known
+            or not trade.ts_known
+        ):
             return None
+        if trade.ts is None or trade.ts < coin.create_ts:
+            continue
         if trade.is_buy and trade.user != coin.creator:
             total += trade.sol_amount_raw
     return total

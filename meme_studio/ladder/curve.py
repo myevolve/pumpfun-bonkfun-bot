@@ -15,7 +15,12 @@ from solders.pubkey import Pubkey
 
 from core.pubkeys import WSOL_MINT
 from meme_studio.ladder.money import LAMPORTS_PER_SOL
-from meme_studio.ladder.plan import validate_fee_assumptions
+from meme_studio.ladder.plan import (
+    FEE_CONFLICT,
+    MEASURED_PUMPSWAP_CREATOR_BPS,
+    RESEARCH_PUMPSWAP_CREATOR_BPS,
+    validate_fee_assumptions,
+)
 from platforms.pumpfun.fee_schedule import (
     PumpFeeConfig,
     PumpFees,
@@ -50,6 +55,10 @@ class DevFill:
     gross_raw: int
 
 
+class UnappliableFlowError(ValueError):
+    """A recorded outside flow cannot be applied without inventing reserves."""
+
+
 @dataclass(frozen=True, slots=True)
 class SellQuote:
     """Fee-split proceeds for selling a token quantity. Does not move state."""
@@ -61,6 +70,11 @@ class SellQuote:
     creator_fee_raw: int
     lp_fee_raw: int
     venue: str
+    fee_status: str = "UNKNOWN"
+    fee_conflict: str = ""
+    assumption_name: str = ""
+    measured_creator_bps: int = 30
+    research_creator_bps: int = 95
 
 
 def _ceil_fee(amount: int, bps: int) -> int:
@@ -165,6 +179,11 @@ class PaperCurve:
             creator_fee_raw=quote.creator_fee_raw,
             lp_fee_raw=0,
             venue="curve",
+            fee_status="UNKNOWN",
+            fee_conflict=FEE_CONFLICT,
+            assumption_name="curve_125bps",
+            measured_creator_bps=MEASURED_PUMPSWAP_CREATOR_BPS,
+            research_creator_bps=RESEARCH_PUMPSWAP_CREATOR_BPS,
         )
 
     def apply_sell(self, tokens_raw: int) -> SellQuote:
@@ -304,9 +323,11 @@ class PaperCurve:
             self.pool_quote += net_raw
             return
         tokens = self._tokens_for_quote_decrease(net_raw)
+        if tokens is None:
+            raise UnappliableFlowError("outside sell is unappliable")
         left = self._quote_decrease_for_tokens(tokens)
-        if tokens <= 0 or left is None:
-            return
+        if left != net_raw:
+            raise UnappliableFlowError("outside sell is unappliable")
         self.pool_base += tokens
         self.pool_quote -= left
 
@@ -317,22 +338,30 @@ class PaperCurve:
         gross = effective * tokens_raw // (self.pool_base + tokens_raw)
         lp_fee = _ceil_fee(gross, self.fees.pumpswap_lp_bps)
         decrease = gross - lp_fee
-        if decrease <= 0 or self.pool_quote < decrease:
+        if decrease < 0 or self.pool_quote < decrease:
             return None
         return decrease
 
-    def _tokens_for_quote_decrease(self, decrease: int) -> int:
+    def _tokens_for_quote_decrease(self, decrease: int) -> int | None:
         """Invert a pool quote drop back to tokens.
 
         An exact own-sell decrease maps back to that sell's token size.
         If the observed drop falls between two sizes, the smaller size is
         used so the pool does not lose more quote than was observed.
         """
-        if decrease <= 0 or self.pool_base <= 1:
-            return 0
+        if decrease <= 0:
+            return None
+        hi = 1
+        for _ in range(80):
+            got = self._quote_decrease_for_tokens(hi)
+            if got is None:
+                return None
+            if got >= decrease:
+                break
+            hi *= 2
+        else:
+            return None
         lo = 0
-        hi = self.pool_base - 1
-        best = 0
         while lo <= hi:
             mid = (lo + hi) // 2
             got = 0 if mid == 0 else self._quote_decrease_for_tokens(mid)
@@ -342,11 +371,10 @@ class PaperCurve:
             if got == decrease:
                 return mid
             if got < decrease:
-                best = mid
                 lo = mid + 1
             else:
                 hi = mid - 1
-        return best
+        return None
 
     def _preview_pool_sell(self, tokens_raw: int) -> SellQuote | None:
         effective = self.pool_quote + self.pool_virtual_quote
@@ -374,6 +402,14 @@ class PaperCurve:
             return None
         if repo_net != net:
             raise ValueError("PumpSwap quote diverged from the repo fee math")
+        creator_bps = self.fees.pumpswap_creator_bps
+        assumption = (
+            "measured_30bps_assumption"
+            if creator_bps == MEASURED_PUMPSWAP_CREATOR_BPS
+            else "research_95bps_assumption"
+            if creator_bps == RESEARCH_PUMPSWAP_CREATOR_BPS
+            else f"explicit_{creator_bps}bps_assumption"
+        )
         return SellQuote(
             tokens_raw=tokens_raw,
             gross_raw=gross,
@@ -382,4 +418,9 @@ class PaperCurve:
             creator_fee_raw=creator_fee,
             lp_fee_raw=lp_fee,
             venue="pumpswap",
+            fee_status="UNKNOWN",
+            fee_conflict=FEE_CONFLICT,
+            assumption_name=assumption,
+            measured_creator_bps=MEASURED_PUMPSWAP_CREATOR_BPS,
+            research_creator_bps=RESEARCH_PUMPSWAP_CREATOR_BPS,
         )

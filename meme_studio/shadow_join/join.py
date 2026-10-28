@@ -16,7 +16,13 @@ import pyarrow.parquet as pq
 from meme_studio.ladder import build_plan
 from meme_studio.ladder.engine import replay
 from meme_studio.ladder.money import lamports_to_sol_str, mean_lamports
-from meme_studio.ladder.plan import DISCLOSURE, FEE_CONFLICT
+from meme_studio.ladder.plan import (
+    DISCLOSURE,
+    FEE_CONFLICT,
+    MIGRATION_FEE_UNKNOWN,
+    PRIORITY_FEE_ASSUMPTION,
+    VIRTUAL_QUOTE_UNKNOWN,
+)
 from meme_studio.shadow_join.cohorts import TaggedCoin, tag_cohorts
 from meme_studio.shadow_join.schema import TrackerFile, is_sol_quote
 from meme_studio.shadow_join.sweep import (
@@ -67,6 +73,11 @@ class CoinPnlRow:
     pumpswap_creator_fee_status: str
     fee_conflict: str
     disclosure: str
+    flags: str
+    priority_fee_assumption: str
+    migration_fee_unknown: str
+    virtual_quote_unknown: str
+    rejected_observations: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,7 +153,12 @@ def build_join_report(tracker: TrackerFile) -> JoinReport:
                     sweep_split=sweep_split.get(item.mint, "not_applicable"),
                     pumpswap_creator_fee_status=result.pumpswap_creator_fee_status,
                     fee_conflict=result.fee_conflict,
-                    disclosure=DISCLOSURE,
+                    disclosure=plan.disclosure_text(),
+                    flags=",".join(result.flags),
+                    priority_fee_assumption=result.priority_fee_assumption,
+                    migration_fee_unknown=result.migration_fee_unknown,
+                    virtual_quote_unknown=result.virtual_quote_unknown,
+                    rejected_observations=item.coin.rejected_observations,
                 )
             )
     cohorts = _cohort_table(population, rows)
@@ -258,6 +274,11 @@ def _row_dict(row: CoinPnlRow) -> dict[str, object]:
         "pumpswap_creator_fee_status": row.pumpswap_creator_fee_status,
         "fee_conflict": row.fee_conflict,
         "disclosure": row.disclosure,
+        "flags": row.flags,
+        "priority_fee_assumption": row.priority_fee_assumption,
+        "migration_fee_unknown": row.migration_fee_unknown,
+        "virtual_quote_unknown": row.virtual_quote_unknown,
+        "rejected_observations": row.rejected_observations,
     }
 
 
@@ -266,6 +287,20 @@ def _summary(report: JoinReport) -> dict[str, object]:
         "paper": True,
         "disclosure": DISCLOSURE,
         "fee_conflict": FEE_CONFLICT,
+        "priority_fee_assumption": PRIORITY_FEE_ASSUMPTION,
+        "migration_fee_unknown": MIGRATION_FEE_UNKNOWN,
+        "virtual_quote_unknown": VIRTUAL_QUOTE_UNKNOWN,
+        "rejected_observations": sum(
+            {row.mint: row.rejected_observations for row in report.rows}.values()
+        ),
+        "coin_flags": [
+            {
+                "mint": row.mint,
+                "dev_buy_sol": row.dev_buy_sol,
+                "flags": row.flags,
+            }
+            for row in report.rows
+        ],
         "sol_usd": report.sol_usd,
         "excluded_non_sol": report.excluded_non_sol,
         "excluded_quote_unknown": report.excluded_quote_unknown,

@@ -94,7 +94,11 @@ def test_join_replays_each_dev_buy_and_writes_parquet(tmp_path: Path) -> None:
     assert "UNKNOWN post-graduation creator fee" in summary
     assert "selected_plan_sha256" in summary
     assert "selected_dev_buy_sol" in summary
-    assert "we created this token and we hold it" in summary
+    assert "We have not created this token and we do not hold it" in summary
+    assert "priority_fee_microlamports=37037" in summary
+    assert "migration fee is UNKNOWN" in summary
+    assert "virtual quote seeding is UNKNOWN" in summary
+    assert "flags" in table.column_names
     assert table.column("pumpswap_creator_fee_status").to_pylist() == ["UNKNOWN"] * (
         len(population) * 3
     )

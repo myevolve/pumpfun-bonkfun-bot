@@ -8,13 +8,15 @@ from dataclasses import dataclass, field, replace
 from heapq import heappop, heappush
 from typing import TYPE_CHECKING
 
-from meme_studio.ladder.curve import PaperCurve, SellQuote
+from meme_studio.ladder.curve import PaperCurve, SellQuote, UnappliableFlowError
 from meme_studio.ladder.money import exact_ratio, lamports_to_sol_str, usd_to_lamports
 from meme_studio.ladder.plan import (
-    DISCLOSURE,
     FEE_CONFLICT,
     MEASURED_PUMPSWAP_CREATOR_BPS,
+    MIGRATION_FEE_UNKNOWN,
+    PRIORITY_FEE_ASSUMPTION,
     RESEARCH_PUMPSWAP_CREATOR_BPS,
+    VIRTUAL_QUOTE_UNKNOWN,
     FeeAssumptions,
 )
 
@@ -32,8 +34,9 @@ class PathTrade:
     user: str
     is_buy: bool
     sol_amount_raw: int
-    creator_fee_raw: int | None = 0
+    creator_fee_raw: int | None = None
     direction_known: bool = True
+    attribution_known: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,10 +56,12 @@ class CoinPath:
     create_ts: int
     creator: str | None
     trades: tuple[PathTrade, ...]
-    extra_observed_creator_fee_raw: int | None = 0
+    extra_observed_creator_fee_raw: int | None = None
     graduation_ts: int | None = None
     pumpswap_fee_rows: tuple[FeeRow, ...] = ()
     pumpswap_fees_known: bool = True
+    history_complete: bool = True
+    rejected_observations: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,8 +109,11 @@ class ReplayResult:
     graduated_on_our_curve: bool
     flags: list[str]
     scenario_realized_lamports: dict[str, int | None] = field(default_factory=dict)
-    pumpswap_creator_fee_status: str = "explicit_assumption"
+    pumpswap_creator_fee_status: str = "UNKNOWN"
     fee_conflict: str = FEE_CONFLICT
+    priority_fee_assumption: str = PRIORITY_FEE_ASSUMPTION
+    migration_fee_unknown: str = MIGRATION_FEE_UNKNOWN
+    virtual_quote_unknown: str = VIRTUAL_QUOTE_UNKNOWN
 
 
 def replay(path: CoinPath, plan: SellPlan) -> ReplayResult:
@@ -122,27 +130,19 @@ def replay(path: CoinPath, plan: SellPlan) -> ReplayResult:
     """
     if plan.to_dict()["mode"] != "paper":
         raise ValueError("ladder replay is paper only")
-    if plan.fees.pumpswap_creator_bps is None:
-        measured = _Session(
-            path,
-            plan,
-            replace(plan.fees, pumpswap_creator_bps=MEASURED_PUMPSWAP_CREATOR_BPS),
-            emit_log=False,
-        ).run()
-        research = _Session(
-            path,
-            plan,
-            replace(plan.fees, pumpswap_creator_bps=RESEARCH_PUMPSWAP_CREATOR_BPS),
-            emit_log=False,
-        ).run()
-        return _headline(plan, measured, research)
-    result = _Session(path, plan, plan.fees).run()
-    result.scenario_realized_lamports = {
-        "explicit_assumption": result.realized_pnl_lamports
-    }
-    result.pumpswap_creator_fee_status = "explicit_assumption"
-    result.fee_conflict = FEE_CONFLICT
-    return result
+    measured = _Session(
+        path,
+        plan,
+        replace(plan.fees, pumpswap_creator_bps=MEASURED_PUMPSWAP_CREATOR_BPS),
+        emit_log=False,
+    ).run()
+    research = _Session(
+        path,
+        plan,
+        replace(plan.fees, pumpswap_creator_bps=RESEARCH_PUMPSWAP_CREATOR_BPS),
+        emit_log=False,
+    ).run()
+    return _headline(plan, measured, research)
 
 
 def _headline(
@@ -219,6 +219,15 @@ class _Session:
     def run(self) -> ReplayResult:
         self.curve = PaperCurve(self.curve_fees)
         self.flags.add("outside_flows_fixed_in_sol")
+        if not self.path.history_complete:
+            self.flags.add("history_incomplete")
+            self.blocked = True
+        if any(not trade.direction_known for trade in self.path.trades):
+            self.flags.add("invalid_trade_direction")
+            self.blocked = True
+        if any(not trade.attribution_known for trade in self.path.trades):
+            self.flags.add("trader_identity_unknown")
+            self.blocked = True
         self._group_trades()
         self._schedule(self.path.create_ts)
         horizon = self.path.create_ts + self.plan.thresholds.horizon_s
@@ -255,6 +264,8 @@ class _Session:
         if before == "curve" and self.curve.venue == "pumpswap":
             self.graduated = True
             self.flags.add("post_graduation_path_replayed")
+        if self.blocked:
+            return
         if not self.miss_locked:
             self._fire_due(ts)
             self._update_trail(ts)
@@ -267,13 +278,17 @@ class _Session:
         self.dev_lamports = fill.gross_raw
         self.dev_creator_fee = fill.creator_fee_raw
 
-    def _apply_trades(self, ts: int) -> None:
+    def _apply_trades(self, ts: int) -> None:  # noqa: C901, PLR0911, PLR0912
         horizon = self.path.create_ts + self.plan.thresholds.horizon_s
+        if self.blocked:
+            return
         if self.path.creator is None:
             self.flags.add("creator_identity_unknown")
             self.blocked = True
             return
         for trade in self._trades.get(ts, []):
+            if self.blocked:
+                return
             if trade.ts < self.path.create_ts:
                 self.flags.add("trade_before_create")
                 continue
@@ -283,7 +298,15 @@ class _Session:
             if not trade.direction_known:
                 self.flags.add("invalid_trade_direction")
                 self.blocked = True
-                continue
+                return
+            if not trade.attribution_known or not trade.user:
+                self.flags.add("trader_identity_unknown")
+                self.blocked = True
+                return
+            if trade.creator_fee_raw is not None and trade.creator_fee_raw < 0:
+                self.flags.add("creator_fee_unknown")
+                self.fee_unknown = True
+                return
             if trade.user == self.path.creator:
                 self.replaced_dev = True
                 continue
@@ -294,10 +317,15 @@ class _Session:
             if graduated_on_record and self.curve.venue == "curve":
                 self.flags.add("real_coin_graduated_our_curve_did_not")
                 continue
-            self.curve.apply_outside_net(
-                is_buy=trade.is_buy,
-                net_raw=trade.sol_amount_raw,
-            )
+            try:
+                self.curve.apply_outside_net(
+                    is_buy=trade.is_buy,
+                    net_raw=trade.sol_amount_raw,
+                )
+            except UnappliableFlowError:
+                self.flags.add("outside_sell_unappliable")
+                self.blocked = True
+                return
             self.observed_times.add(ts)
             if trade.creator_fee_raw is None:
                 self.fee_unknown = True
@@ -582,7 +610,7 @@ class _Session:
             f"PAPER {note.kind} step={note.step} mint={self.path.mint} ts={note.ts} "
             f"tokens_raw={note.tokens_raw} sol_net={sol_text} venue={note.venue} "
             f"plan_sha256={self.plan.sha256} tx={note.link} "
-            f"{DISCLOSURE} {FEE_CONFLICT}"
+            f"{self.plan.disclosure_text()} {FEE_CONFLICT}"
         )
         row: dict[str, object] = {
             "kind": note.kind,
@@ -618,21 +646,31 @@ class _Session:
         return self.observed_fee + extra
 
     def _pumpswap_creator_fee(self) -> int | None:
-        if self.path.pumpswap_fee_rows:
-            total = 0
-            cutoff = self.path.create_ts + self.plan.thresholds.horizon_s
-            for row in self.path.pumpswap_fee_rows:
-                if row.ts is None or row.user is None or row.amount_raw is None:
-                    self.flags.add("creator_fee_unknown")
-                    return None
-                if row.ts < self.path.create_ts or row.ts > cutoff:
-                    self.flags.add("fee_outside_window")
-                    continue
-                if row.user == self.path.creator:
-                    continue
-                total += row.amount_raw
-            return total
-        return self.path.extra_observed_creator_fee_raw
+        if self.path.extra_observed_creator_fee_raw is not None:
+            self.flags.add("creator_fee_unknown")
+            return None
+        total = 0
+        cutoff = self.path.create_ts + self.plan.thresholds.horizon_s
+        for row in self.path.pumpswap_fee_rows:
+            if (
+                row.ts is None
+                or row.user is None
+                or row.amount_raw is None
+                or row.amount_raw < 0
+            ):
+                self.flags.add("creator_fee_unknown")
+                return None
+            eligible = (
+                self.path.graduation_ts is not None
+                and row.ts >= self.path.graduation_ts
+                and self.path.create_ts <= row.ts <= cutoff
+                and row.user != self.path.creator
+            )
+            if not eligible:
+                self.flags.add("fee_outside_window")
+                continue
+            total += row.amount_raw
+        return total
 
     def _launch_cost(self) -> int:
         return usd_to_lamports(

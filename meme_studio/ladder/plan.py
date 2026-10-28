@@ -15,9 +15,22 @@ from meme_studio.ladder.money import (
     sol_to_lamports,
 )
 
-DISCLOSURE = (
-    "PAPER DISCLOSURE: we created this token and we hold it. "
+SHADOW_DISCLOSURE = (
+    "PAPER DISCLOSURE: this is a hypothetical shadow replay. "
+    "We have not created this token and we do not hold it. "
     "This draft is not a live sale."
+)
+LAUNCH_DISCLOSURE = (
+    "DISCLOSURE: we created this token and we hold it. "
+    "This draft is not a live sale until a person posts it."
+)
+DISCLOSURE = SHADOW_DISCLOSURE
+PRIORITY_FEE_ASSUMPTION = (
+    "ASSUMPTION priority_fee_microlamports=37037 copied from mint_and_buy_v2"
+)
+MIGRATION_FEE_UNKNOWN = "pool migration fee is UNKNOWN"
+VIRTUAL_QUOTE_UNKNOWN = (
+    "post-graduation virtual quote seeding is UNKNOWN and defaults to 0"
 )
 FEE_CONFLICT = (
     "UNKNOWN post-graduation creator fee: research 0.95% conflicts with "
@@ -78,6 +91,11 @@ class SellPlan:
     sol_usd: str
     thresholds: LadderThresholds
     fees: FeeAssumptions
+    run_mode: str = "shadow"
+
+    def disclosure_text(self) -> str:
+        """Wording that matches whether this run has actually launched."""
+        return disclosure_for(self.run_mode)
 
     def to_dict(self) -> dict[str, object]:
         """Return the canonical plan body. The hash is not part of the body."""
@@ -88,7 +106,11 @@ class SellPlan:
         ) // 1_000_000
         fraction = dec_str(thresholds.remaining_fraction)
         return {
-            "disclosure": DISCLOSURE,
+            "disclosure": self.disclosure_text(),
+            "run_mode": self.run_mode,
+            "priority_fee_assumption": PRIORITY_FEE_ASSUMPTION,
+            "migration_fee_unknown": MIGRATION_FEE_UNKNOWN,
+            "virtual_quote_unknown": VIRTUAL_QUOTE_UNKNOWN,
             "fee_conflict": FEE_CONFLICT,
             "dev_buy_sol": lamports_to_sol_str(self.dev_buy_lamports),
             "fees": {
@@ -110,11 +132,7 @@ class SellPlan:
                 "pumpswap_creator_bps_research_assumption": (
                     RESEARCH_PUMPSWAP_CREATOR_BPS
                 ),
-                "pumpswap_creator_fee_status": (
-                    "UNKNOWN"
-                    if fees.pumpswap_creator_bps is None
-                    else "explicit_assumption"
-                ),
+                "pumpswap_creator_fee_status": "UNKNOWN",
                 "pumpswap_lp_bps": fees.pumpswap_lp_bps,
                 "pumpswap_protocol_bps": fees.pumpswap_protocol_bps,
                 "sell_compute_unit_limit": fees.sell_compute_unit_limit,
@@ -194,12 +212,22 @@ class SellPlan:
         return hashlib.sha256(self.canonical_json().encode("utf-8")).hexdigest()
 
 
+def disclosure_for(mode: str) -> str:
+    """Return the disclosure sentence for a shadow run or a launch draft."""
+    if mode in {"paper", "shadow", "unlaunched"}:
+        return SHADOW_DISCLOSURE
+    if mode == "launch_draft":
+        return LAUNCH_DISCLOSURE
+    raise ValueError("run mode is UNKNOWN")
+
+
 def build_plan(
     dev_buy_sol: str,
     *,
     sol_usd: str,
     thresholds: LadderThresholds | None = None,
     fees: FeeAssumptions | None = None,
+    run_mode: str = "shadow",
 ) -> SellPlan:
     """Build the plan that would be posted for one disclosed dev-buy size.
 
@@ -221,11 +249,13 @@ def build_plan(
         raise ValueError("dev buy must be between 0 and 1 SOL")
     if Decimal(sol_usd) <= 0:
         raise ValueError("sol_usd must be positive")
+    disclosure_for(run_mode)
     return SellPlan(
         dev_buy_lamports=lamports,
         sol_usd=dec_str(sol_usd),
         thresholds=chosen,
         fees=chosen_fees,
+        run_mode=run_mode,
     )
 
 

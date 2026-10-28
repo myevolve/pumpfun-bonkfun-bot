@@ -214,16 +214,20 @@ def coin_to_path(coin: TrackerCoin) -> CoinPath:
             sol_amount_raw=trade.sol_amount_raw,
             creator_fee_raw=trade.creator_fee_raw,
             direction_known=trade.direction_known,
+            attribution_known=trade.attribution_known,
         )
         for trade in coin.trades
+        if isinstance(trade.ts, int)
     )
     return CoinPath(
         mint=coin.mint,
         create_ts=coin.create_ts,
         creator=coin.creator,
         trades=trades,
-        extra_observed_creator_fee_raw=coin.pumpswap_creator_fee_raw,
+        extra_observed_creator_fee_raw=None,
         graduation_ts=coin.graduation_ts,
+        history_complete=coin.history_complete,
+        rejected_observations=coin.rejected_observations,
         pumpswap_fee_rows=tuple(
             FeeRow(row.ts, row.user, row.amount_raw) for row in coin.pumpswap_fee_rows
         ),

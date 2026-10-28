@@ -49,7 +49,10 @@ def test_plan_discloses_creation_and_an_unresolved_pumpswap_creator_fee() -> Non
     fees = body["fees"]
     assert isinstance(fees, dict)
     text = json.dumps(body)
-    assert "we created this token and we hold it" in str(body["disclosure"])
+    assert "We have not created this token and we do not hold it" in str(
+        body["disclosure"]
+    )
+    assert "we created this token and we hold it" not in str(body["disclosure"])
     assert FEE_CONFLICT in text
     assert fees["pumpswap_creator_fee_status"] == "UNKNOWN"
     assert fees["pumpswap_creator_bps_measured_assumption"] == 30
@@ -170,7 +173,9 @@ def test_announcements_disclose_that_we_created_and_hold_the_token() -> None:
     result = replay(_path([_buy(_CREATE + 10, 40_000_000_000, fee=1)]), plan)
     assert result.announcements
     for row in result.announcements:
-        assert "we created this token and we hold it" in str(row["text"])
+        assert "We have not created this token and we do not hold it" in str(
+            row["text"]
+        )
         assert FEE_CONFLICT in str(row["text"])
         assert row["plan_sha256"] == plan.sha256
 
@@ -216,6 +221,76 @@ def test_outside_pumpswap_sell_inverts_the_lp_adjusted_reserve_drop() -> None:
     assert again.gross_raw - again.lp_fee_raw == decrease
 
 
+def test_every_draft_kind_uses_shadow_disclosure_and_launch_drafts_do_not() -> None:
+    plan = build_plan("0.1", sol_usd="100")
+    result = replay(
+        _path([_buy(_CREATE + 82_800 + 100, 40_000_000_000, fee=0)]),
+        plan,
+    )
+    kinds = {str(row["kind"]) for row in result.announcements}
+    assert {"PREANNOUNCE", "CANCEL", "SELL"} <= kinds
+    for kind in ("PREANNOUNCE", "CANCEL", "SELL"):
+        matched = [row for row in result.announcements if row["kind"] == kind]
+        assert matched
+        for row in matched:
+            text = str(row["text"])
+            assert "We have not created this token and we do not hold it" in text
+            assert "we created this token and we hold it" not in text
+            assert plan.sha256 in text
+    launch = build_plan("0.1", sol_usd="100", run_mode="launch_draft")
+    assert "we created this token and we hold it" in launch.disclosure_text()
+    assert "We have not created this token" not in launch.disclosure_text()
+
+
+def test_explicit_creator_fee_still_headlines_the_worse_named_scenario() -> None:
+    plan = build_plan(
+        "0.1",
+        sol_usd="100",
+        fees=FeeAssumptions(pumpswap_creator_bps=95),
+    )
+    result = replay(_path([_buy(_CREATE + 10, 90_000_000_000, fee=0)]), plan)
+    assert "explicit_assumption" not in result.scenario_realized_lamports
+    assert set(result.scenario_realized_lamports) == {
+        "measured_30bps_assumption",
+        "research_95bps_assumption",
+    }
+    assert result.pumpswap_creator_fee_status == "UNKNOWN"
+    assert result.realized_pnl_lamports == min(
+        result.scenario_realized_lamports.values()
+    )
+    curve = PaperCurve(
+        FeeAssumptions(
+            pumpswap_lp_bps=5, pumpswap_protocol_bps=20, pumpswap_creator_bps=95
+        )
+    )
+    curve.dev_buy(100_000_000)
+    curve.apply_outside_net(is_buy=True, net_raw=90_000_000_000)
+    quote = curve.preview_sell(1_000_000)
+    assert quote is not None
+    assert quote.fee_status == "UNKNOWN"
+    assert quote.assumption_name == "research_95bps_assumption"
+    assert "UNKNOWN post-graduation creator fee" in quote.fee_conflict
+
+
+def test_outside_sell_larger_than_pool_base_is_applied() -> None:
+    fees = FeeAssumptions(
+        pumpswap_lp_bps=5, pumpswap_protocol_bps=20, pumpswap_creator_bps=50
+    )
+    origin = PaperCurve(fees)
+    origin.dev_buy(100_000_000)
+    origin.apply_outside_net(is_buy=True, net_raw=90_000_000_000)
+    tokens = origin.pool_base * 2
+    quote = origin.preview_sell(tokens)
+    assert quote is not None
+    decrease = quote.gross_raw - quote.lp_fee_raw
+    replayed = PaperCurve(fees)
+    replayed.dev_buy(100_000_000)
+    replayed.apply_outside_net(is_buy=True, net_raw=90_000_000_000)
+    before = replayed.pool_quote
+    replayed.apply_outside_net(is_buy=False, net_raw=decrease)
+    assert before - replayed.pool_quote == decrease
+
+
 def test_public_solana_rpc_is_rejected_without_reading_a_dotenv_file() -> None:
     public = "https://api.mainnet-beta.solana.com"
     with pytest.raises(ValueError, match="public"):
@@ -241,5 +316,28 @@ def test_public_solana_rpc_is_rejected_without_reading_a_dotenv_file() -> None:
             {
                 "GEYSER_ENDPOINT": "https://api.mainnet-beta.solana.com",
                 "GEYSER_API_TOKEN": "present",
+            }
+        )
+    for alias in (
+        "https://api.mainnet-beta.solana.com.",
+        "HTTPS://API.MAINNET-BETA.SOLANA.COM/rpc",
+        "https://example.solana.com",
+        "https://rpc.ankr.com/solana",
+        "https://not-paid.example.net/rpc",
+    ):
+        with pytest.raises(ValueError):
+            resolve_solana_endpoint({"SOLANA_NODE_RPC_ENDPOINT": alias})
+    paid = resolve_solana_endpoint(
+        {
+            "SOLANA_NODE_RPC_ENDPOINT": "https://paid.example.net/rpc",
+            "SOLANA_PAID_RPC_HOSTS": "paid.example.net",
+        }
+    )
+    assert paid.startswith("https://paid.example.net/")
+    with pytest.raises(ValueError, match="public"):
+        resolve_solana_endpoint(
+            {
+                "SOLANA_NODE_RPC_ENDPOINT": "https://api.mainnet-beta.solana.com",
+                "SOLANA_PAID_RPC_HOSTS": "api.mainnet-beta.solana.com",
             }
         )

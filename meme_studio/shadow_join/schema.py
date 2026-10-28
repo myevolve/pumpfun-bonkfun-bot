@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from pathlib import Path
 
-from meme_studio.ladder.money import sol_to_lamports
+from meme_studio.ladder.money import parse_sol_lamports
 
 _WSOL = "So11111111111111111111111111111111111111112"
 
@@ -32,12 +32,14 @@ class Concept:
 class TrackerTrade:
     """One trade. sol_amount_raw is the net quote-reserve delta in lamports."""
 
-    ts: int
+    ts: int | None
     user: str
     is_buy: bool
     sol_amount_raw: int
-    creator_fee_raw: int | None = 0
+    creator_fee_raw: int | None = None
     direction_known: bool = True
+    attribution_known: bool = True
+    ts_known: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,9 +70,11 @@ class TrackerCoin:
     quote_mint: str | None
     graduation_ts: int | None
     trades: tuple[TrackerTrade, ...]
-    pumpswap_creator_fee_raw: int | None = 0
+    pumpswap_creator_fee_raw: int | None = None
     pumpswap_fee_rows: tuple[CreatorFeeRow, ...] = ()
     pumpswap_fees_known: bool = True
+    history_complete: bool = True
+    rejected_observations: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,9 +139,7 @@ def _coin(item: object) -> TrackerCoin:
     links = item.get("links") or {}
     if not isinstance(links, dict):
         links = {}
-    trades = tuple(
-        _trade(row) for row in item.get("trades", []) if isinstance(row, dict)
-    )
+    trades, rejected, history_complete = _trades(item.get("trades", []))
     fee_rows, fees_known = _pumpswap_fees(item)
     dev_buy = item.get("dev_buy_sol")
     description = item.get("description")
@@ -159,29 +161,71 @@ def _coin(item: object) -> TrackerCoin:
         quote_mint=None if item.get("quote_mint") is None else str(item["quote_mint"]),
         graduation_ts=_optional_int(item.get("graduation_ts")),
         trades=trades,
-        pumpswap_creator_fee_raw=0 if fees_known else None,
+        pumpswap_creator_fee_raw=None,
         pumpswap_fee_rows=fee_rows,
         pumpswap_fees_known=fees_known,
+        history_complete=history_complete,
+        rejected_observations=rejected,
     )
 
 
-def _trade(item: object) -> TrackerTrade:
+def _trades(raw: object) -> tuple[tuple[TrackerTrade, ...], int, bool]:
+    if not isinstance(raw, list):
+        return (), 1, False
+    parsed: list[TrackerTrade] = []
+    rejected = 0
+    complete = True
+    for row in raw:
+        trade = _trade(row)
+        if trade is None:
+            rejected += 1
+            complete = False
+            continue
+        parsed.append(trade)
+        if (
+            not trade.ts_known
+            or not trade.direction_known
+            or not trade.attribution_known
+        ):
+            complete = False
+    return tuple(parsed), rejected, complete
+
+
+def _trade(item: object) -> TrackerTrade | None:
     if not isinstance(item, dict):
-        raise TypeError("trade must be an object")
+        return None
+    ts = item.get("ts")
+    ts_known = isinstance(ts, int) and not isinstance(ts, bool) and ts > 0
     if "sol_amount_raw" in item:
-        sol_raw = _optional_lamports(item.get("sol_amount_raw"))
+        sol_raw = _raw_lamports(item.get("sol_amount_raw"))
+    elif "sol_amount" in item:
+        sol_raw = _sol_field_lamports(item.get("sol_amount"))
     else:
-        sol_raw = _optional_lamports(item.get("sol_amount"))
+        sol_raw = None
     direction = item.get("is_buy")
     user = item.get("user")
+    attribution_known = isinstance(user, str) and bool(user.strip())
     direction_known = isinstance(direction, bool) and sol_raw is not None
+    if not ts_known:
+        return TrackerTrade(
+            ts=None,
+            user=user if attribution_known else "",
+            is_buy=direction if isinstance(direction, bool) else False,
+            sol_amount_raw=0,
+            creator_fee_raw=_optional_fee(item),
+            direction_known=False,
+            attribution_known=attribution_known,
+            ts_known=False,
+        )
     return TrackerTrade(
-        ts=int(item["ts"]) if isinstance(item.get("ts"), int) else 0,
+        ts=ts if isinstance(ts, int) else None,
         user=user if isinstance(user, str) else "",
         is_buy=direction if isinstance(direction, bool) else False,
         sol_amount_raw=0 if sol_raw is None else sol_raw,
         creator_fee_raw=_optional_fee(item),
         direction_known=direction_known,
+        attribution_known=attribution_known,
+        ts_known=True,
     )
 
 
@@ -208,23 +252,24 @@ def _fee_row(item: object) -> CreatorFeeRow:
 
 def _optional_fee(item: dict[str, object]) -> int | None:
     if "creator_fee_raw" in item:
-        return _optional_lamports(item.get("creator_fee_raw"))
+        return _raw_lamports(item.get("creator_fee_raw"))
     if "creator_fee" not in item:
         return None
-    return _optional_lamports(item.get("creator_fee"))
+    return _sol_field_lamports(item.get("creator_fee"))
 
 
-def _optional_lamports(value: object) -> int | None:
-    if isinstance(value, bool) or value is None:
+def _raw_lamports(value: object) -> int | None:
+    """`*_raw` fields are lamports. Only a nonnegative integer is accepted."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str):
-        try:
-            return sol_to_lamports(value)
-        except ValueError:
-            return None
-    return None
+    return value
+
+
+def _sol_field_lamports(value: object) -> int | None:
+    """SOL fields are decimal text. A bare integer is ambiguous and rejected."""
+    if not isinstance(value, str):
+        return None
+    return parse_sol_lamports(value)
 
 
 def _link(links: dict[str, object], *keys: str) -> str | None:

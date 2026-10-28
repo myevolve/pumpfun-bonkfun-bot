@@ -25,7 +25,7 @@ _CREATE = 1_700_000_000
 
 
 def _path(
-    trades: list[PathTrade], *, extra_fee: int = 0, mint: str = "mint-paper"
+    trades: list[PathTrade], *, extra_fee: int | None = None, mint: str = "mint-paper"
 ) -> CoinPath:
     return CoinPath(
         mint=mint,
@@ -33,6 +33,7 @@ def _path(
         creator="CreatorPaper111",
         trades=tuple(trades),
         extra_observed_creator_fee_raw=extra_fee,
+        pumpswap_fees_known=True,
     )
 
 
@@ -47,7 +48,9 @@ def _buy(ts: int, sol_raw: int, *, user: str = "BuyerA", fee: int = 0) -> PathTr
 
 
 def _sell(ts: int, sol_raw: int, *, user: str = "BuyerA") -> PathTrade:
-    return PathTrade(ts=ts, user=user, is_buy=False, sol_amount_raw=sol_raw)
+    return PathTrade(
+        ts=ts, user=user, is_buy=False, sol_amount_raw=sol_raw, creator_fee_raw=0
+    )
 
 
 def test_tranches_are_a_share_of_remaining_and_a_runner_survives() -> None:
@@ -139,6 +142,9 @@ def test_miss_sells_four_equal_tranches_each_preannounced_one_hour_ahead() -> No
     assert [sell.ts for sell in miss] == [
         _CREATE + 86_400 + i * 3_600 for i in range(4)
     ]
+    assert result.held_raw == 0
+    assert result.closeout_pnl_lamports == result.realized_pnl_lamports
+    assert "open_runner" not in result.flags
     assert len(pre) == 4
     for row, sell in zip(pre, miss, strict=True):
         assert row["ts"] == sell.ts - 3_600
@@ -219,7 +225,7 @@ def test_every_simulated_sell_is_logged_as_a_paper_announcement() -> None:
         assert row["within_seconds"] == 60
         assert sell.tx_link == row["tx"]
         assert row["text"].startswith("PAPER SELL ")
-        assert "we created this token and we hold it" in row["text"]
+        assert "We have not created this token and we do not hold it" in row["text"]
         assert plan.sha256 in row["text"]
         assert "http://" not in row["text"]
         assert "https://" not in row["text"]
@@ -300,7 +306,11 @@ def test_replay_logs_each_sell(caplog: pytest.LogCaptureFixture) -> None:
         rec.message for rec in caplog.records if rec.message.startswith("PAPER SELL")
     ]
     assert len(sell_lines) == len(result.sells) > 0
-    assert all("we created this token and we hold it" in line for line in sell_lines)
+    assert all(plan.sha256 in line for line in sell_lines)
+    assert all(
+        "We have not created this token and we do not hold it" in line
+        for line in sell_lines
+    )
 
 
 def test_package_source_has_no_wallet_rpc_or_network_client() -> None:
