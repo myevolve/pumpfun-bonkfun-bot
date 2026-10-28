@@ -1,0 +1,25 @@
+{
+  "schema": "qd1955.concept.v1",
+  "name": "Sock Drawer Drift",
+  "title": "Sock Drawer Drift",
+  "ticker": "SOCKDRIFT",
+  "character": {
+    "name": "Nimbus",
+    "kind": "round dust creature",
+    "detail": "mismatched button eyes and a single sock cape"
+  },
+  "joke": "The drawer filed a missing-sock report and the lint showed up.",
+  "description": "A round dust creature sprints an endless hallway of lonely furniture, gathering unmatched socks before the vacuum arrives. This daily parody game is about a silly household mystery and is made purely for entertainment.",
+  "template_id": "endless_runner",
+  "style": "neon_chaos",
+  "palette": {
+    "background": "#1B1F3B",
+    "primary": "#F2C14E",
+    "secondary": "#E07A5F",
+    "accent": "#81B29A",
+    "ink": "#F4F1DE"
+  },
+  "story_id": "2026-10-28-sock-drawer",
+  "date": "2026-10-28",
+  "contract_address": "CA_PLACEHOLDER_DO_NOT_USE"
+}
