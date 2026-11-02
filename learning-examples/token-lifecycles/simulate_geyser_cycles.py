@@ -162,7 +162,11 @@ def validate_scope(scope: object) -> dict:
         scope.get("input_cap_lamports") == atomic.BUY_LAMPORTS == 10_000_000,
         "scope_input_cap",
     )
-    require(scope.get("configured_fee_lamports") == capital.FEE == 75_000, "scope_fee")
+    require(
+        scope.get("configured_fee_lamports") in {capital.FEE, 75_000}
+        and capital.FEE in {65_000, 75_000},
+        "scope_fee",
+    )
     require(
         type(scope.get("signed_transactions_allowed")) is int
         and scope["signed_transactions_allowed"] == 0

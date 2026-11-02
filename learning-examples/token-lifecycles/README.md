@@ -16,6 +16,13 @@ submits a transaction.
 | `corpus_to_lifecycles.py` | Convert the Slinky21 PumpFun corpus (Jun-Jul 2026, 798k launches) into the same JSONL so the same scripts run on it. |
 | `evaluate_creation_paper.py` | Source-locked creation-arrival (C) versus two-processed-slot delay (D2) paper comparison; separates conditional quotes, unpriced inventory and capture censoring. |
 | `run_paper_trader.py` | Continuous credential-free discovery, canonical account-based paper entries/exits, durable virtual capital and forward-only online exit-horizon learning. Separate from live execution. |
+| `track_creator_fees.py` | Existing service-only creator-vault WSOL observer; schema-v2 full identities, raw units, explicit censors and identity-bound intervals. Not a revenue or payout tracker. |
+| `summarize_creator_fees.py` | Offline coverage and baseline validation for retained snapshots; legacy balances stay unverified, with no aggregate income claim. |
+| `build_evidence_bundle.py` | Checksummed audit snapshot using staged inputs and a WAL-aware SQLite backup; refuses output overwrite. Not a replay-complete dataset or execution proof. |
+| `verify_creator_fee_snapshots.py`, `verify_evidence_bundle.py` | Synthetic offline checks for censoring, shared vaults, baseline integrity, paired means, WAL provenance and immutable exports. |
+| `analyze_accept_clues.py` | Freeze planning-selected entries/features/outcomes once, then analyze only the checked artifact; fixed historical split, explicit missingness and nine descriptive comparisons. |
+| `keep_whaleride_paper.py`, `keep_whaleride_shadow.py` | Existing supervisors; future managed children use bounded redacting console capture and fail visibly if capture cannot continue. |
+| `verify_accept_clues.py`, `verify_keeper_console.py`, `verify_keeper_health.py` | Offline artifact, controlled-process logging and UTC/slot-progress regressions; never start a real collector. |
 | `verify_solana_actor_receipts.py` | Bounded Geyser actor cohorts and exact native receipt replay, with held-out closed-cycle/failed-fee components rather than invented portfolio PnL. |
 | `verify_evm_actor_receipts.py` | Frozen sparse receipt/trace sampling and replay; unresolved wrapper balance changes cannot become a combined native cashflow figure. |
 | `simulate_atomic_cycles.py` | Freeze a Raydium AMM v4/CPMM universe, quote same-bank reserves, and immediately simulate unsigned candidates before their frozen +2/+5-slot checks. Includes an offline `--self-check`; never signs or submits. |
@@ -48,6 +55,99 @@ when no transactions arrive. A head gap above one second marks tracked
 observations incomplete; a long wall-clock lifetime alone does not prove
 continuous coverage. Importing the recorder does not load dotenv, and root
 `.env`/`.env~`/`ENVDATA` paths are refused. Old tapes are not backfilled.
+
+## Creator-vault observations and audit exports
+
+```bash
+uv run --offline --no-sync python -B learning-examples/token-lifecycles/verify_creator_fee_snapshots.py
+uv run --offline --no-sync python -B learning-examples/token-lifecycles/verify_evidence_bundle.py
+uv run --offline --no-sync python -B learning-examples/token-lifecycles/summarize_creator_fees.py
+```
+
+The summarizer is passive: no credentials, RPC, signing or collector startup.
+Schema v2 retains full creator/PDA/ATA identities and integer WSOL amounts.
+Missing, unavailable and invalid accounts have null balances; an observed zero
+is different. Only the immediately previous valid observation with the same
+identity can establish a balance-change interval. Shared vaults are counted
+once for coverage, never summed as per-pool earnings.
+
+Old rows remain unchanged and are labeled `legacy_unverifiable`: some omit the
+mint, truncate creator identity, or encode missing accounts as zero. They
+cannot establish v2 baselines. Even v2 balance changes do not identify fees,
+collections, payout recipients or payback. Imported identities are recorded
+claims, not independent PDA/account attestation.
+
+Bundle exports require a new `--out` path. `lessons_snapshot_sha256` hashes
+the exact SQLite backup analyzed, including committed WAL records, not just
+the live database's main file. Tape/shadow hashes likewise cover staged
+inputs. Retain frozen source inputs separately for replay. Graduation decay
+uses mean within-entry ratios and exposes the priced-pair count per horizon.
+Priced mark elapsed time is an observation interval, not a realized hold.
+
+Paper `observation_skip` rows separately retain queue-full/stale exclusions
+and queue ages. They are not gate decisions or fills; older log-only
+exclusions are not backfilled. No TTL, concurrency, gate or risk policy is
+changed. Already-running processes need a controlled reload before new
+collector instrumentation takes effect; do not restart them mid-observation.
+
+## Frozen acceptance-study evidence
+
+Run from the repository root, with a new output filename:
+
+```bash
+mkdir -p .state/research
+uv run --offline --no-sync python -B learning-examples/token-lifecycles/analyze_accept_clues.py \
+  freeze --db .state/learning/lessons.sqlite3 --out .state/research/NEW-cohort.json
+uv run --offline --no-sync python -B learning-examples/token-lifecycles/analyze_accept_clues.py \
+  analyze .state/research/NEW-cohort.json
+```
+
+Freeze reads one read-only SQLite transaction, including committed WAL data.
+It keeps accepted entries with any planned mark regardless of outcome,
+repeated mints, missing features, and missing/pending/censored horizons.
+Accepted rows without plans are listed separately, not silently disappeared.
+The artifact fixes both membership and observed values: later journal appends
+or outcome resolution cannot change that artifact's analysis.
+
+The first 24 frozen entries form TRAIN; the remaining historical entries form
+a fixed descriptive holdout. This is not an untouched or preregistered forward
+test. Each of the nine feature/horizon comparisons reports its own available
+pair count; insufficient or constant data produce null correlations, not a
+survivor verdict. Gross price marks remain distinct from fills or net ROI.
+
+Imports validate completion metadata, horizon timing and checksum before
+analysis; they are capped at 16 MiB, 10,000 total members and 4,096 characters
+per text field. Producer and executing code hashes are both reported.
+Keep the matching source/environment for replay; checksums do not authenticate
+on-chain observations. The old expanding, complete-case analyzer is removed.
+
+## Keeper console safety for future runs
+
+```bash
+uv run --offline --no-sync python -B learning-examples/token-lifecycles/verify_keeper_console.py
+uv run --offline --no-sync python -B learning-examples/token-lifecycles/verify_keeper_health.py
+```
+
+Newly started managed children write `console.jsonl` under their keeper's
+existing state directory, with 10 MiB per file and three backups (40 MiB total).
+Reads and records are bounded; stdout/stderr have separate UTC-stamped records.
+Private owned files and no-follow opens protect the console/PID destinations.
+Capture failures wake the supervisor and stop/reap its owned child rather
+than continuing without evidence. Incomplete cleanup remains a visible,
+retryable failure.
+
+Sensitive assignments, URLs, malformed text and oversized input conservatively
+censor that stream through EOF, even across blank lines. This sacrifices some
+remaining diagnostics; the other stream and existing structured bot logs stay
+separate. It is not exhaustive detection of arbitrary unlabeled secrets, and
+does not reject tokens, account updates or research observations.
+
+UTC text is parsed independently of local timezone. The shadow frozen-slot
+deadline measures time since actual slot progress, not process uptime.
+Restart/backoff/staleness limits and trading policy are unchanged.
+**Existing collectors and historical `keeper.stdout.log` are not restarted,
+truncated or rotated by this code change.** Activate only at a controlled
+maintenance point; do not interrupt pending observations.
 
 ## Running online paper learning
 

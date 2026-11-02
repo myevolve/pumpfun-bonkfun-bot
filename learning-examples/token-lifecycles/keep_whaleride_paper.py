@@ -26,9 +26,10 @@ import json
 import signal
 import sqlite3
 import subprocess
-import sys
 import time
 from pathlib import Path
+
+from capture_child_console import CapturedChild, ConsoleCaptureError, start_child
 
 ROOT = Path(__file__).resolve().parents[2]
 PAPER_DIR = ROOT / ".state" / "whaleride-paper"
@@ -66,6 +67,7 @@ QUICK_DEATH_SECONDS = 90.0
 MIN_BACKOFF = 30.0
 MAX_BACKOFF = 600.0
 STALE_SECONDS = 900.0  # no lesson rows for fifteen minutes
+HEALTHY_RESET_SECONDS = 3600.0  # one hour of uninterrupted health resets restarts
 POLL_SECONDS = 60.0
 
 
@@ -95,28 +97,19 @@ def pid_alive(pid: int) -> bool:
     return "bot_runner" in out
 
 
-def spawn() -> tuple[int, subprocess.Popen]:
+def spawn() -> CapturedChild:
     log("spawn", {"config": CONFIG.name})
-    proc = subprocess.Popen(
+    return start_child(
         BOT_CMD,
-        cwd=str(ROOT),
-        stdout=sys.stdout,
-        stderr=sys.stderr,
-        start_new_session=True,
+        cwd=ROOT,
+        console_path=PAPER_DIR / "console.jsonl",
+        pid_path=PID_FILE,
     )
-    PID_FILE.parent.mkdir(parents=True, exist_ok=True)
-    PID_FILE.write_text(str(proc.pid))
-    return proc.pid, proc
 
 
-def stop(proc: subprocess.Popen | None, pid: int | None) -> None:
-    if proc is not None and proc.poll() is None:
-        proc.terminate()
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=5)
+def stop(child: CapturedChild | None, pid: int | None) -> None:
+    if child is not None:
+        child.stop()
         return
     if pid is not None and pid != __import__("os").getpid() and pid_alive(pid):
         __import__("os").kill(pid, signal.SIGTERM)
@@ -154,6 +147,18 @@ def seconds_since_row() -> float | None:
     return time.time() - stamp
 
 
+def health_reason(*, alive: bool, stale: float | None, uptime: float) -> str | None:
+    if not alive:
+        return "process_dead"
+    if uptime <= STALE_SECONDS:
+        return None
+    if stale is None:
+        return "journal_unreadable"
+    if stale > STALE_SECONDS:
+        return "no_lesson_rows"
+    return None
+
+
 def backoff_seconds(quick_deaths: int) -> float:
     return min(MAX_BACKOFF, MIN_BACKOFF * 2 ** max(0, quick_deaths - 1))
 
@@ -175,7 +180,8 @@ def _give_up(reason: str, restarts: int, detail: dict) -> int:
 
 
 def run() -> int:
-    proc: subprocess.Popen | None = None
+    GAVE_UP.unlink(missing_ok=True)
+    child: CapturedChild | None = None
     pid: int | None = None
     restarts = 0
     quick_deaths = 0
@@ -198,61 +204,70 @@ def run() -> int:
             stop(None, orphan)
     PID_FILE.unlink(missing_ok=True)
 
-    pid, proc = spawn()
-    started = time.monotonic()
-
-    while not stop_flag["raised"]:
-        time.sleep(POLL_SECONDS)
-        alive = (proc is not None and proc.poll() is None) or (
-            pid is not None and pid_alive(pid)
-        )
-        stale = seconds_since_row()
-        reason = None
-        if not alive:
-            reason = "process_dead"
-        elif stale is not None and stale > STALE_SECONDS:
-            reason = "no_lesson_rows"
-        elif stale is None and time.monotonic() - started > STALE_SECONDS:
-            reason = "journal_unreadable"
-        if reason is None:
-            continue
-        if (
-            reason == "process_dead"
-            and time.monotonic() - started < QUICK_DEATH_SECONDS
-        ):
-            quick_deaths += 1
-        else:
-            quick_deaths = 0
-        log(
-            "restart",
-            {
-                "reason": reason,
-                "restarts": restarts,
-                "quick_deaths": quick_deaths,
-                "stale_s": stale is not None and round(stale),
-            },
-        )
-        stop(proc, pid)
-        if quick_deaths >= MAX_QUICK:
-            return _give_up(
-                "quick_death_loop", restarts, {"quick_deaths": quick_deaths}
-            )
-        restarts += 1
-        if restarts > MAX_RESTARTS:
-            return _give_up("restart_budget_exhausted", restarts, {})
-        wait = backoff_seconds(quick_deaths)
-        log("backoff", {"seconds": wait})
-        slept = 0.0
-        while slept < wait and not stop_flag["raised"]:
-            time.sleep(min(1.0, wait - slept))
-            slept += 1.0
-        if stop_flag["raised"]:
-            break
-        pid, proc = spawn()
+    capture_failed = False
+    try:
+        child = spawn()
+        pid = child.process.pid
         started = time.monotonic()
 
-    stop(proc, pid)
-    PID_FILE.unlink(missing_ok=True)
+        while not stop_flag["raised"]:
+            child.wait_console(POLL_SECONDS)
+            alive = child.process.poll() is None
+            stale = seconds_since_row()
+            uptime = time.monotonic() - started
+            reason = health_reason(alive=alive, stale=stale, uptime=uptime)
+            if reason is None:
+                if restarts > 0 and uptime >= HEALTHY_RESET_SECONDS:
+                    log(
+                        "budget_reset",
+                        {"restarts": restarts, "uptime_s": round(uptime)},
+                    )
+                    restarts = 0
+                continue
+            if reason == "process_dead" and uptime < QUICK_DEATH_SECONDS:
+                quick_deaths += 1
+            else:
+                quick_deaths = 0
+            log(
+                "restart",
+                {
+                    "reason": reason,
+                    "restarts": restarts,
+                    "quick_deaths": quick_deaths,
+                    "stale_s": stale is not None and round(stale),
+                },
+            )
+            stop(child, pid)
+            child, pid = None, None
+            if quick_deaths >= MAX_QUICK:
+                return _give_up(
+                    "quick_death_loop", restarts, {"quick_deaths": quick_deaths}
+                )
+            restarts += 1
+            if restarts > MAX_RESTARTS:
+                return _give_up("restart_budget_exhausted", restarts, {})
+            wait = backoff_seconds(quick_deaths)
+            log("backoff", {"seconds": wait})
+            slept = 0.0
+            while slept < wait and not stop_flag["raised"]:
+                time.sleep(min(1.0, wait - slept))
+                slept += 1.0
+            if stop_flag["raised"]:
+                break
+            child = spawn()
+            pid = child.process.pid
+            started = time.monotonic()
+    except ConsoleCaptureError:
+        capture_failed = True
+    finally:
+        try:
+            stop(child, pid)
+        except ConsoleCaptureError:
+            capture_failed = True
+        finally:
+            PID_FILE.unlink(missing_ok=True)
+    if capture_failed:
+        return _give_up("console_capture_failed", restarts, {})
     log("keeper_stop", {})
     return 0
 
@@ -277,6 +292,33 @@ def self_check() -> None:
     _check(
         condition=STALE_SECONDS > MIN_BACKOFF,
         message="stale bound respects the quiet-stretch regime",
+    )
+    _check(
+        condition=HEALTHY_RESET_SECONDS > STALE_SECONDS,
+        message="budget reset waits well past the stale bound",
+    )
+    _check(
+        condition=health_reason(
+            alive=True, stale=STALE_SECONDS * 4, uptime=POLL_SECONDS
+        )
+        is None,
+        message="prior-session stale row ignored during startup grace window",
+    )
+    _check(
+        condition=health_reason(
+            alive=True, stale=STALE_SECONDS + 1, uptime=STALE_SECONDS + 1
+        )
+        == "no_lesson_rows",
+        message="stale row after startup grace window restarts",
+    )
+    _check(
+        condition=health_reason(alive=True, stale=None, uptime=POLL_SECONDS) is None,
+        message="unreadable journal ignored during startup grace window",
+    )
+    _check(
+        condition=health_reason(alive=True, stale=None, uptime=STALE_SECONDS + 1)
+        == "journal_unreadable",
+        message="unreadable journal after startup grace window restarts",
     )
     print("self_check ok")
 

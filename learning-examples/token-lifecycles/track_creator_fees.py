@@ -1,60 +1,47 @@
-# ruff: noqa: TRY003, PLR2004, C901, PTH123 - censoring paths are
+# ruff: noqa: TRY003, PLR2004, PTH123 - censoring paths are
 # the point; thresholds are layout constants; one linear census.
-"""Creator annuity tracker — READ-ONLY, no funds.
+"""Read-only creator-vault WSOL observations for the existing research cohort.
 
-Phase 0 of the creator pilot design
-(docs/superpowers/specs/2026-10-10-creator-pilot-design.md): measure the
-real creator fee accrual on graduated whale-swept pools, daily, to
-replace the survivorship-tainted 1,858 SOL/24h volume estimate with the
-measured decay curve.
+Rows retain pool/mint membership, including missing or invalid accounts, but
+the balance belongs to the full creator-vault identity, potentially shared by
+many pools. A balance change is NOT attributed fees, payouts, earnings, or a
+daily rate: collections and other transfers are not identified here.
 
-Cohort: migrated PumpSwap pools whose coin_creator is a known
-whale-census self-sweep wallet, plus any pool discovered in the live
-instrument's grad_marks (real>=60 SOL). Per pool per run:
-
-  creator_vault PDA = ["creator_vault", coin_creator] under PumpSwap
-  accrual = SOL in the vault now minus the previous snapshot's balance
-
-State: .state/learning/creator_fee_snapshots.jsonl — one row per
-(pool, run); the daily deltas between rows are the annuity curve.
-
-Nothing here moves funds or authorizes a transaction.
+Schema v2 appends to .state/learning/creator_fee_snapshots.jsonl without
+rewriting history. Legacy rows have truncated identities and possible synthetic
+zeros, so cannot establish a v2 baseline. Missing/unavailable/invalid accounts
+are explicitly censored with null amounts, never converted into zero.
 """
 
 import argparse
 import asyncio
 import json
 import sqlite3
-import statistics
-import struct
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+
+import summarize_creator_fees
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "src"))
 
+from solders.pubkey import Pubkey  # noqa: E402
 from spl.token.instructions import (  # noqa: E402
     get_associated_token_address,
 )
 
-from core.client import SolanaClient  # noqa: E402
+from core.client import RpcUnavailableError, SolanaClient  # noqa: E402
+from core.pubkeys import SystemAddresses  # noqa: E402
 from platforms.pumpfun.pumpswap import (  # noqa: E402
     WSOL_MINT,
     PumpSwapAddresses,
     _decode_pool_account,
+    _decode_token_account_amount,
 )
 
 STATE = REPO / ".state/learning/creator_fee_snapshots.jsonl"
-WHITELIST_PATH = REPO / ".state/learning/creator_fee_whitelist.json"
-WHALERS = (
-    json.loads(
-        (REPO / "learning-examples/token-lifecycles/whaleride_wallets.json").read_text()
-    )
-    if (REPO / "learning-examples/token-lifecycles/whaleride_wallets.json").exists()
-    else []
-)
 
 
 def rpc_from_env() -> str:
@@ -64,19 +51,27 @@ def rpc_from_env() -> str:
     raise SystemExit("no RPC endpoint in the service-only projection")
 
 
-def previous_balances() -> dict:
+def previous_balances() -> dict[str, dict]:
+    """Retain the immediately previous row, including censors, for each pool."""
     if not STATE.exists():
         return {}
     last = {}
-    for line in STATE.open():
-        row = json.loads(line)
-        last[row["pool"]] = row["vault_sol"]
+    with STATE.open() as source:
+        for number, line in enumerate(source, 1):
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                raise ValueError(
+                    f"Malformed snapshot history at line {number}"
+                ) from None
+            if not isinstance(row, dict) or not isinstance(row.get("pool"), str):
+                raise TypeError(f"Invalid snapshot history row at line {number}")
+            last[row["pool"]] = row
     return last
 
 
 def cohort_pools() -> list[dict]:
-    """Live PumpSwap pools whose coin_creator matches the whale census,
-    plus the instrument's accepted coins (fund >= 60)."""
+    """Keep the existing tape whale-band plus instrument grad_marks cohort."""
     mints: set[str] = set()
     for line in open(REPO / "learning-examples/token-lifecycles/lifecycles_24h.jsonl"):
         d = json.loads(line)
@@ -87,118 +82,220 @@ def cohort_pools() -> list[dict]:
         rsol = trades[-1][5] / 1e9
         if 60 <= rsol <= 1000:
             mints.add(d["mint"])
-    db = sqlite3.connect(str(REPO / ".state/learning/lessons.sqlite3"))
-    grad_mints = [
-        r[0]
-        for r in db.execute(
-            "SELECT l.mint FROM lessons l JOIN grad_marks g ON"
-            " g.entry_id=l.id WHERE g.open_price IS NOT NULL"
-            " GROUP BY l.mint ORDER BY MAX(l.id) DESC"
-        )
-    ]
-    db.close()
-    # The whale-band tape coins are 2026-09 vintage: their creator vaults
-    # have long since been swept by the creators (fee collection). The
-    # annuity question is about RECENT migrations - prioritize the
-    # instrument's own grad_marks (accepted coins, fund >= 60, Oct 7-11),
-    # then the newest tape coins.
+    db_path = REPO / ".state/learning/lessons.sqlite3"
+    db = sqlite3.connect(f"{db_path.as_uri()}?mode=ro", uri=True)
+    try:
+        grad_mints = [
+            r[0]
+            for r in db.execute(
+                "SELECT l.mint FROM lessons l JOIN grad_marks g ON"
+                " g.entry_id=l.id WHERE g.open_price IS NOT NULL"
+                " GROUP BY l.mint ORDER BY MAX(l.id) DESC"
+            )
+        ]
+    finally:
+        db.close()
+    # Preserve existing priority: instrument grad_marks, then the tape cohort.
+    # A historical zero cannot establish whether a creator collected anything.
     grad_set = set(grad_mints)
     recent = grad_mints + [m for m in sorted(mints, reverse=True) if m not in grad_set]
     return [{"mint": m} for m in recent]
 
 
+def observe_vault(
+    account: object, ata: Pubkey, vault: Pubkey
+) -> tuple[str, int | None]:
+    """Validate WSOL mint, token program, authority, size and initialization."""
+    if account is None:
+        return "vault_missing", None
+    try:
+        amount = _decode_token_account_amount(
+            account,
+            ata,
+            token_program=SystemAddresses.TOKEN_PROGRAM,
+            mint=WSOL_MINT,
+            authority=vault,
+        )
+    except ValueError:
+        return "vault_invalid", None
+    return "observed", amount
+
+
+def make_snapshot(  # noqa: PLR0913 - explicit immutable observation identity
+    mint: str,
+    pool: Pubkey,
+    ts: str,
+    observation_status: str,
+    *,
+    coin_creator: Pubkey | None = None,
+    amount: int | None = None,
+    previous: dict | None = None,
+) -> dict:
+    vault = (
+        PumpSwapAddresses.derive_creator_vault(coin_creator)
+        if coin_creator is not None
+        else None
+    )
+    ata = get_associated_token_address(vault, WSOL_MINT) if vault is not None else None
+    if observation_status != "observed":
+        amount = None
+    elif (
+        coin_creator is None
+        or type(amount) is not int
+        or not 0 <= amount <= 0xFFFF_FFFF_FFFF_FFFF
+    ):
+        raise ValueError(
+            "Observed creator-vault balance requires an identity and raw u64"
+        )
+    row = {
+        "schema_version": 2,
+        "ts": ts,
+        "pool": str(pool),
+        "mint": mint,
+        "observation_status": observation_status,
+        "balance_scope": "creator_vault",
+        "coin_creator": str(coin_creator) if coin_creator is not None else None,
+        "creator_vault": str(vault) if vault is not None else None,
+        "creator_vault_ata": str(ata) if ata is not None else None,
+        "vault_wsol_raw": amount,
+        "vault_wsol": amount / 1e9 if amount is not None else None,
+    }
+    return {**row, **summarize_creator_fees.pair_baseline(row, previous)}
+
+
+async def read_accounts(
+    client: SolanaClient, keys: list[Pubkey]
+) -> list[tuple[str, object]]:
+    """One client call per batch; only transport exhaustion is unavailable."""
+    results = []
+    for start in range(0, len(keys), 100):
+        chunk = keys[start : start + 100]
+        try:
+            accounts = await client.get_multiple_accounts(chunk, commitment="confirmed")
+        except RpcUnavailableError:
+            # Only exhausted transport reads are unavailable; permanent errors
+            # and implementation defects must fail the snapshot.
+            results.extend([("unavailable", None)] * len(chunk))
+            continue
+        if not isinstance(accounts, list) or len(accounts) != len(chunk):
+            raise ValueError("Malformed multi-account response")
+        results.extend(
+            ("missing" if account is None else "available", account)
+            for account in accounts
+        )
+    return results
+
+
+async def collect_snapshots(
+    client: SolanaClient, pools: list[dict], previous: dict[str, dict], ts: str
+) -> list[dict]:
+    derived = [
+        (
+            p["mint"],
+            Pubkey.from_string(p["mint"]),
+            PumpSwapAddresses.derive_canonical_pool(
+                Pubkey.from_string(p["mint"]), WSOL_MINT
+            ),
+        )
+        for p in pools
+    ]
+    accounts = await read_accounts(client, [pool for _, _, pool in derived])
+    entries = []
+    vaults = {}
+    for (mint_str, mint, pool), (read_status, account) in zip(
+        derived, accounts, strict=True
+    ):
+        creator = None
+        if read_status == "available":
+            try:
+                creator = _decode_pool_account(
+                    account, pool, mint, WSOL_MINT
+                ).coin_creator
+                status = "observed"
+            except ValueError:
+                status = "pool_invalid"
+        else:
+            status = f"pool_{read_status}"
+        if creator is not None:
+            vault = PumpSwapAddresses.derive_creator_vault(creator)
+            vaults[get_associated_token_address(vault, WSOL_MINT)] = vault
+        entries.append((mint_str, pool, creator, status))
+    # A creator can own many cohort pools: read its ATA only once.
+    vault_accounts = await read_accounts(client, list(vaults))
+    observations = {
+        ata: (
+            ("vault_unavailable", None)
+            if status == "unavailable"
+            else observe_vault(account, ata, vault)
+        )
+        for (ata, vault), (status, account) in zip(
+            vaults.items(), vault_accounts, strict=True
+        )
+    }
+    rows = []
+    for mint, pool, creator, pool_status in entries:
+        status = pool_status
+        amount = None
+        if creator is not None:
+            ata = get_associated_token_address(
+                PumpSwapAddresses.derive_creator_vault(creator), WSOL_MINT
+            )
+            status, amount = observations[ata]
+        rows.append(
+            make_snapshot(
+                mint,
+                pool,
+                ts,
+                status,
+                coin_creator=creator,
+                amount=amount,
+                previous=previous.get(str(pool)),
+            )
+        )
+    return rows
+
+
 async def main() -> None:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--rpc", default=None)
     parser.add_argument("--limit", type=int, default=100)
     args = parser.parse_args()
+    if args.limit < 1:
+        parser.error("--limit must be positive")
     rpc = args.rpc or rpc_from_env()
     pools = cohort_pools()[: args.limit]
+    previous = previous_balances()
     client = SolanaClient(rpc)
     try:
-        prev = previous_balances()
-        rows = []
-        # Derive all PDAs first, then batch-read (public endpoint limits).
-        derived = []
-        for p in pools:
-            mint = Pubkey.from_string(p["mint"])
-            pool = PumpSwapAddresses.derive_canonical_pool(mint, WSOL_MINT)
-            derived.append((p["mint"], mint, pool))
-        by_pool = {}
-        for i in range(0, len(derived), 100):
-            chunk = derived[i : i + 100]
-            accs = await client.get_multiple_accounts(
-                [d[2] for d in chunk], commitment="confirmed"
-            )
-            for (mint_str, mint, pool), acc in zip(chunk, accs, strict=False):
-                if acc is None or len(acc.data) < 261:
-                    continue  # pool never created: censor
-                try:
-                    decoded = _decode_pool_account(acc, pool, mint, WSOL_MINT)
-                except ValueError:
-                    continue
-                by_pool[pool] = (mint_str, decoded.coin_creator)
-        # Fees accrue as WSOL in the vault PDA's associated token account,
-        # not lamports in the PDA itself (verified on CAPYWIFGUN: PDA 0,
-        # ATA 0.0149 WSOL).
-        vault_keys = [
-            get_associated_token_address(
-                PumpSwapAddresses.derive_creator_vault(cc), WSOL_MINT
-            )
-            for _, cc in by_pool.values()
-        ]
-        vault_bal = {}
-        for i in range(0, len(vault_keys), 100):
-            chunk = vault_keys[i : i + 100]
-            accs = await client.get_multiple_accounts(chunk, commitment="confirmed")
-            for key, acc in zip(chunk, accs, strict=False):
-                vault_bal[key] = (
-                    struct.unpack_from("<Q", bytes(acc.data), 64)[0] / 1e9
-                    if acc is not None and acc.data
-                    else 0.0  # never funded: creator collected nothing
-                )
         now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-        for pool, (_mint_str, coin_creator) in by_pool.items():
-            ata = get_associated_token_address(
-                PumpSwapAddresses.derive_creator_vault(coin_creator), WSOL_MINT
-            )
-            bal = vault_bal[ata]
-            rows.append(
-                {
-                    "ts": now,
-                    "pool": str(pool),
-                    "mint": _mint_str,
-                    "vault_sol": round(bal, 6),
-                    "delta_sol": round(bal - prev[str(pool)], 6)
-                    if str(pool) in prev
-                    else None,
-                    "coin_creator": str(coin_creator)[:10],
-                }
-            )
+        rows = await collect_snapshots(client, pools, previous, now)
         STATE.parent.mkdir(parents=True, exist_ok=True)
-        with STATE.open("a") as fh:
-            for r in rows:
-                fh.write(json.dumps(r, sort_keys=True) + "\n")
-        deltas = [r["delta_sol"] for r in rows if r["delta_sol"] is not None]
-        print(f"snapshot: {len(rows)} pools ({len(deltas)} with a previous baseline)")
-        if deltas:
-            print(
-                f"daily creator-fee accrual: median "
-                f"{statistics.median(deltas):.4f} SOL, mean "
-                f"{statistics.mean(deltas):.4f} SOL, max "
-                f"{max(deltas):.4f} SOL"
-            )
-            print(
-                "payback on 85 SOL at this median: "
-                f"{85 / statistics.median(deltas):.0f} days"
-                if statistics.median(deltas) > 0
-                else "no accrual measured"
-            )
+        with STATE.open("a") as target:
+            for row in rows:
+                target.write(json.dumps(row, sort_keys=True) + "\n")
+        observed = [row for row in rows if row["observation_status"] == "observed"]
+        vaults = {row["creator_vault_ata"] for row in observed}
+        paired = {
+            row["creator_vault_ata"]
+            for row in observed
+            if row["baseline_status"] == "paired"
+        }
+        print(
+            f"snapshot: {len(rows)} cohort pools; {len(observed)} observed, "
+            f"{len(rows) - len(observed)} censored; {len(vaults)} unique creator "
+            f"vaults observed ({len(paired)} with an identity-matched baseline)"
+        )
+        print(
+            "Creator-vault balance changes only: shared across pools; "
+            "not attributed fees, payouts, earnings, or daily rates."
+        )
     finally:
         await client.close()
 
 
 if __name__ == "__main__":
-    from solders.pubkey import Pubkey
-
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except Exception as error:  # noqa: BLE001 - fatal CLI boundary redacts service details
+        # Fail visibly without a traceback that can echo service credentials.
+        raise SystemExit(f"snapshot failed: {type(error).__name__}") from None

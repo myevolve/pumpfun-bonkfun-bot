@@ -36,13 +36,20 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import shutil
 import sqlite3
 import statistics
+import sys
 import time
 from collections import defaultdict
+from contextlib import closing
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "src"))
+
+from learning.report import graduation_decay  # noqa: E402
 
 BUY_LAMPORTS = 10_000_000
 PUMP_FEE = 0.0125
@@ -161,10 +168,7 @@ def audit_shadow(shadow: Path) -> dict:
     pools: dict[str, list] = defaultdict(list)
     with shadow.open() as f:
         for line in f:
-            try:
-                row = json.loads(line)
-            except ValueError:
-                continue
+            row = json.loads(line)
             if row.get("k") == "c":
                 curves[row["m"]].append(row)
             elif row.get("k") == "p":
@@ -224,21 +228,21 @@ def audit_shadow(shadow: Path) -> dict:
 
 
 def audit_lessons(db: Path) -> dict:
-    """Read-only counters from the running bot's journal."""
+    """Read one consistent journal snapshot; marks are not executed holds."""
     if not db.exists():
         return {"status": "no_journal"}
 
-    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
+    conn = sqlite3.connect(f"{db.resolve().as_uri()}?mode=ro", uri=True, timeout=5)
     try:
+        conn.execute("BEGIN")
+        observed_at = time.time()
         total = conn.execute("SELECT COUNT(*) FROM lessons").fetchone()[0]
         recent = conn.execute(
             "SELECT COUNT(*) FROM lessons WHERE utc >= ?",
-            (time.strftime("%Y-%m-%dT%H", time.gmtime(time.time() - 3600)) + ":00",),
+            (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(observed_at - 3600)),),
         ).fetchone()[0]
         marks = conn.execute("SELECT COUNT(*) FROM paper_marks").fetchone()[0]
-        # Avg realized hold, from resolved marks only (exit_price present).
-        # Hold policy is condition-driven; this reports what exits actually
-        # took, it is not a hold target. Censored rows have no elapsed time.
+        # Elapsed observation time does not establish a hold or an executed exit.
         holds = {
             reason: {"avg_s": avg_s, "n": n}
             for reason, avg_s, n in conn.execute(
@@ -254,34 +258,22 @@ def audit_lessons(db: Path) -> dict:
         decisions = dict(
             conn.execute(
                 "SELECT decision, COUNT(*) FROM lessons"
-                " WHERE utc >= datetime('now', '-24 hours') GROUP BY decision"
+                " WHERE utc >= ? GROUP BY decision",
+                (
+                    time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(observed_at - 86400)
+                    ),
+                ),
             ).fetchall()
         )
-        # G-anchored decay: pool price at graduation vs G+5/30/120s samples,
-        # as mean ratios over rows where both columns resolve. The table is
-        # absent in journals not yet opened by the new schema.
-        grad = {
-            "n": 0,
-            "p5_over_open": None,
-            "p30_over_open": None,
-            "p120_over_open": None,
-        }
-        grad_n = 0
-        try:
-            grad_row = conn.execute(
-                "SELECT COUNT(*), AVG(open_price), AVG(p5), AVG(p30), AVG(p120)"
-                " FROM grad_marks WHERE open_price IS NOT NULL"
+        grad = graduation_decay(conn)
+        grad_n = (
+            conn.execute("SELECT COUNT(*) FROM grad_marks").fetchone()[0]
+            if conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='grad_marks'"
             ).fetchone()
-            grad_n = conn.execute("SELECT COUNT(*) FROM grad_marks").fetchone()[0]
-        except sqlite3.OperationalError:
-            grad_row = None
-        if grad_row and grad_row[0] and grad_row[1]:
-            grad["n"] = grad_row[0]
-            for i, key in enumerate(
-                ("p5_over_open", "p30_over_open", "p120_over_open"), 2
-            ):
-                if grad_row[i] is not None:
-                    grad[key] = round(grad_row[i] / grad_row[1], 4)
+            else 0
+        )
     finally:
         conn.close()
     return {
@@ -289,9 +281,9 @@ def audit_lessons(db: Path) -> dict:
         "lessons_last_hour": recent,
         "paper_marks_total": marks,
         "decisions_last_24h": decisions,
-        "avg_hold_s": avg_hold_s[0],
-        "resolved_marks": avg_hold_s[1],
-        "avg_hold_by_reason": holds,
+        "avg_observation_elapsed_s": avg_hold_s[0],
+        "observed_marks": avg_hold_s[1],
+        "observation_elapsed_by_reason": holds,
         "grad_marks_total": grad_n,
         "grad_decay": grad,
     }
@@ -310,37 +302,64 @@ def main() -> None:
     tape_path, shadow_path = ROOT / args.tape, ROOT / args.shadow
     lessons_path, out_path = ROOT / args.lessons, ROOT / args.out
 
-    bundle = {
-        "generated_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "not_attested": [
-            "fills or execution",
-            "chain finality or bank freshness",
-            "wallet balances or authorization",
-            "future coupling or regime persistence",
-        ],
-        "tape_audit": audit_tape(tape_path),
-        "shadow_coupling": audit_shadow(shadow_path),
-        "learning_journal": audit_lessons(lessons_path),
-        "provenance": {
-            "tape_sha256": sha256_of(tape_path),
-            "shadow_sha256": sha256_of(shadow_path),
-            "lessons_sha256": sha256_of(lessons_path),
-            "code": {
-                name: sha256_of(ROOT / "learning-examples" / "token-lifecycles" / name)
-                for name in (
-                    "build_evidence_bundle.py",
-                    "simulate_graduation_exit.py",
-                    "verify_completed_curve_phantom.py",
-                    "run_whaleride_shadow.py",
-                )
+    if out_path.exists():
+        raise FileExistsError(out_path)
+    with TemporaryDirectory(prefix="research-evidence-") as temporary:
+        staged = Path(temporary)
+        tape_snapshot = staged / "tape.jsonl"
+        shadow_snapshot = staged / "shadow.jsonl"
+        lessons_snapshot = staged / "lessons.sqlite3"
+        shutil.copyfile(tape_path, tape_snapshot)
+        shutil.copyfile(shadow_path, shadow_snapshot)
+        if lessons_path.exists():
+            with (
+                closing(
+                    sqlite3.connect(
+                        f"{lessons_path.resolve().as_uri()}?mode=ro",
+                        uri=True,
+                        timeout=5,
+                    )
+                ) as source,
+                closing(sqlite3.connect(lessons_snapshot)) as destination,
+            ):
+                source.backup(destination)
+        bundle = {
+            "generated_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "not_attested": [
+                "fills or execution",
+                "chain finality or bank freshness",
+                "wallet balances or authorization",
+                "future coupling or regime persistence",
+            ],
+            "tape_audit": audit_tape(tape_snapshot),
+            "shadow_coupling": audit_shadow(shadow_snapshot),
+            "learning_journal": audit_lessons(lessons_snapshot),
+            "provenance": {
+                "tape_sha256": sha256_of(tape_snapshot),
+                "shadow_sha256": sha256_of(shadow_snapshot),
+                "lessons_snapshot_sha256": sha256_of(lessons_snapshot),
+                "lessons_snapshot_method": "sqlite_backup_including_committed_wal",
+                "code": {
+                    name: sha256_of(
+                        ROOT / "learning-examples" / "token-lifecycles" / name
+                    )
+                    for name in (
+                        "build_evidence_bundle.py",
+                        "simulate_graduation_exit.py",
+                        "verify_completed_curve_phantom.py",
+                        "run_whaleride_shadow.py",
+                    )
+                }
+                | {
+                    "src/learning/report.py": sha256_of(ROOT / "src/learning/report.py")
+                },
             },
-        },
-    }
-    payload = json.dumps(bundle, indent=1, default=str)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(payload + "\n")
+        }
+    payload = json.dumps(bundle, indent=1, default=str, allow_nan=False)
     bundle["bundle_sha256"] = hashlib.sha256(payload.encode()).hexdigest()
-    out_path.write_text(json.dumps(bundle, indent=1, default=str) + "\n")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("x") as output:
+        output.write(json.dumps(bundle, indent=1, default=str, allow_nan=False) + "\n")
 
     # console summary
     print(f"evidence bundle -> {out_path}")
@@ -362,18 +381,19 @@ def main() -> None:
             f"journal: {journal['lessons_total']} lessons, "
             f"{journal['paper_marks_total']} paper marks"
         )
-        if journal.get("resolved_marks"):
+        if journal.get("observed_marks"):
             print(
-                f"avg realized hold: {journal['avg_hold_s']}s over "
-                f"{journal['resolved_marks']} resolved marks "
-                f"(condition-driven; by reason: {journal['avg_hold_by_reason']})"
+                f"avg observation elapsed: {journal['avg_observation_elapsed_s']}s over "
+                f"{journal['observed_marks']} priced marks "
+                f"(by reason: {journal['observation_elapsed_by_reason']})"
             )
         gdec = journal.get("grad_decay") or {}
         if gdec.get("n"):
             print(
-                f"grad-anchored decay (n={gdec['n']}): "
-                f"G+5s {gdec['p5_over_open']}, G+30s {gdec['p30_over_open']}, "
-                f"G+120s {gdec['p120_over_open']} (pool price / open price)"
+                f"grad-anchored gross marks (open n={gdec['n']}): "
+                f"G+5s {gdec['p5_over_open']} (paired n={gdec['p5_n']}), "
+                f"G+30s {gdec['p30_over_open']} (paired n={gdec['p30_n']}), "
+                f"G+120s {gdec['p120_over_open']} (paired n={gdec['p120_n']})"
             )
 
 

@@ -72,7 +72,10 @@ from websockets.exceptions import WebSocketException
 from core.pubkeys import WSOL_MINT
 from monitoring.subscription import subscribe_pumpportal
 from platforms.pumpfun.address_provider import PumpFunAddressProvider
-from platforms.pumpfun.curve_manager import PumpFunCurveManager
+from platforms.pumpfun.curve_manager import (
+    _BONDING_CURVE_DISCRIMINATOR,
+    PumpFunCurveManager,
+)
 from platforms.pumpfun.pumpswap import (
     PumpSwapAddresses,
     _decode_pool_account,
@@ -155,8 +158,13 @@ class Shadow:
         self.endpoint = endpoint
         self.addresses = PumpFunAddressProvider()
         self.decoder = SimpleNamespace(
-            _idl_parser=IDLParser(str(ROOT / "idl" / "pump_fun_idl.json"))
+            _idl_parser=IDLParser(str(ROOT / "idl" / "pump_fun_idl.json")),
+            _curve_discriminator_bytes=_BONDING_CURVE_DISCRIMINATOR,
+            _decode_curve_state_with_idl=lambda raw: (
+                PumpFunCurveManager._decode_curve_state_with_idl(self.decoder, raw)
+            ),
         )
+        self._curve_decoder = self.decoder
         self.request_id = 0
         self.last_slot = 0
         self.counts: Counter[str] = Counter()
@@ -277,10 +285,28 @@ class Shadow:
         if len(raw) < 83 or any(raw[i] not in (0, 1) for i in (48, 81, 82)):
             raise ValueError("noncanonical_curve_flags")
         try:
-            state = PumpFunCurveManager._decode_curve_state_with_idl(self.decoder, raw)
+            state = self._curve_decoder._decode_curve_state_with_idl(raw)
         except ValueError as exc:
             if "quote mint" in str(exc):
                 raise ValueError("non_sol_quote") from exc
+            if (
+                len(raw) >= 57
+                and raw[:8] == self._curve_decoder._curve_discriminator_bytes
+                and struct.unpack_from("<4Q", raw, 8) == (0, 0, 0, 0)
+                and (raw[48] == 1 or raw[56] == 1)
+            ):
+                return {
+                    "complete": True,
+                    "virtual_token_reserves": 0,
+                    "virtual_quote_reserves": 0,
+                    "virtual_sol_reserves": 0,
+                    "real_token_reserves": 0,
+                    "real_quote_reserves": 0,
+                    "real_sol_reserves": 0,
+                    "is_mayhem_mode": bool(
+                        raw[81] if raw[48] == 1 else (raw[89] if len(raw) > 89 else 0)
+                    ),
+                }
             raise
         if state["quote_mint"] != WSOL_MINT:
             raise ValueError("non_sol_quote")
@@ -734,7 +760,7 @@ def report(
         )
 
 
-def _print_row(x_sol: float, row: "XRow") -> None:
+def _print_row(x_sol: float, row: XRow) -> None:
     entries, whale, censored = row.entries, row.whale, row.censored
     grad_arm, cold_arm = row.grad_arm, row.cold_arm
     grad_after, crossers = row.grad_after, row.crossers

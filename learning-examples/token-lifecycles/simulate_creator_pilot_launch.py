@@ -10,10 +10,10 @@ production instruction builders and integer fee-schedule quote engine:
   2. Steps a fresh bonding curve (30 SOL virtual quote, 1.073B virtual tokens,
      793.1M real tokens) across 4 self-sweep tranches using `quote_buy_exact_out`
      and `build_buy_v2_instruction` until `real_token_reserves == 0` (`complete`).
-  3. Verifies exact graduation math: `real_quote_reserves == 85_000_359_072`
-     lamports (~85.0004 SOL), total gross spend (including 95 bps protocol +
-     30 bps creator fees) = ~86.063 SOL, with 0.255 SOL immediately rebates to
-     the creator's own `associated_creator_vault` ATA (net lockup ~85.808 SOL).
+  3. Reports conditional quote arithmetic under synthetic 95 bps protocol /
+     30 bps creator fee inputs. No on-chain fee attestation or native program
+     execution is performed. A modeled creator allocation is not a collected
+     rebate and must not reduce gross funding required.
   4. Holds at graduation (never builds a sell or LP withdrawal instruction).
 
 Usage:
@@ -58,7 +58,7 @@ TOKEN_TOTAL_SUPPLY = 1_000_000_000_000_000
 
 
 def _default_fee_snapshot() -> PumpFeeSnapshot:
-    """Construct the attested mainnet Pump.fun fee schedule (95 bps protocol + 30 bps creator)."""
+    """Construct synthetic fee inputs, not an attested mainnet schedule."""
     fees = PumpFees(lp_fee_bps=0, protocol_fee_bps=95, creator_fee_bps=30)
     tier = PumpFeeTier(market_cap_threshold_raw=0, fees=fees)
     cfg = PumpFeeConfig(
@@ -68,12 +68,15 @@ def _default_fee_snapshot() -> PumpFeeSnapshot:
         regular_tiers=(tier,),
         stable_tiers=(tier,),
         exotic_flat_fees=fees,
-        digest="simulated-mainnet-95-30",
+        digest="synthetic-unattested-fees-95-30",
     )
+    # The attested_at sentinel exercises quote mechanics only, not real attestation.
     return PumpFeeSnapshot(config=cfg, observed_at=1.0, attested_at=1.0)
 
 
-async def run_simulation(tranches: int = 4) -> dict[str, int | float | bool]:
+async def run_simulation(  # noqa: PLR0915 - one bounded synthetic mechanics scenario
+    tranches: int = 4,
+) -> dict[str, int | float | bool | None]:
     """Run the 4-tranche self-sweep simulation to exact curve completion."""
     parser = IDLParser(str(IDL_PATH))
     builder = PumpFunInstructionBuilder(parser)
@@ -185,7 +188,7 @@ async def run_simulation(tranches: int = 4) -> dict[str, int | float | bool]:
         total_creator_fee_lamports += quote.creator_fee_raw
 
         print(
-            f"  Tranche {idx}/{tranches}: tokens={tokens_out / 1e6:>10.2f}M | "
+            f"  Tranche {idx}/{tranches}: tokens={tokens_out / 1e6:>10.2f} | "
             f"net_sol={quote.net_quote_raw / 1e9:>6.3f} | "
             f"gross_sol={quote.gross_quote_raw / 1e9:>6.3f} | "
             f"curve_real_sol={int(curve_state['real_quote_reserves']) / 1e9:>6.3f}"
@@ -217,32 +220,32 @@ async def run_simulation(tranches: int = 4) -> dict[str, int | float | bool]:
     assert len(pumpswap_claim_ixs[1].accounts) == 8, (
         "Expected 8 PumpSwap claim accounts"
     )
-    net_lockup_lamports = total_gross_lamports - total_creator_fee_lamports
     return {
         "complete": True,
         "real_quote_sol": total_net_lamports / 1e9,
         "gross_spend_sol": total_gross_lamports / 1e9,
         "protocol_fee_sol": total_protocol_fee_lamports / 1e9,
-        "creator_rebate_sol": total_creator_fee_lamports / 1e9,
-        "net_lockup_sol": net_lockup_lamports / 1e9,
+        "modeled_creator_fee_sol": total_creator_fee_lamports / 1e9,
+        "creator_fees_collected_sol": None,
+        "synthetic_fee_inputs": True,
+        "native_execution_verified": False,
     }
 
 
 def main() -> int:
-    print(
-        "Phase 1 Creator Pilot Dry-Run Simulation (create_v2 -> 4x buy_v2 -> graduation):"
-    )
+    print("Synthetic creator-pilot quote/build check (zero RPC; not native execution):")
     result = asyncio.run(run_simulation(tranches=4))
     print(
         f"\nGraduation reached: complete={result['complete']} | "
         f"curve_real_sol={result['real_quote_sol']:.4f} SOL | "
-        f"gross_spend={result['gross_spend_sol']:.4f} SOL | "
-        f"creator_self_rebate={result['creator_rebate_sol']:.4f} SOL | "
-        f"net_lockup={result['net_lockup_sol']:.4f} SOL"
+        f"modeled_gross_funding={result['gross_spend_sol']:.4f} SOL | "
+        f"modeled_creator_allocation={result['modeled_creator_fee_sol']:.4f} SOL | "
+        "creator_fee_collection=UNVERIFIED (no funding credit)"
     )
     assert 85.0 <= float(result["real_quote_sol"]) <= 85.01
-    assert 85.7 <= float(result["net_lockup_sol"]) <= 85.9
-    print("PASS: Phase 1 launch + self-sweep dry-run verified offline.")
+    print(
+        "PASS: synthetic quote and instruction-build checks only; no live readiness or ROI attested."
+    )
     return 0
 
 

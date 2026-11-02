@@ -25,15 +25,19 @@ Usage:
 
 from __future__ import annotations
 
-# ruff: noqa: C901, PLR0915 - runner-script pattern
+# ruff: noqa: C901, PLR0912, PLR0915 - explicit supervisor lifecycle
 import argparse
+import calendar
 import json
+import math
 import os
 import signal
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+from capture_child_console import CapturedChild, ConsoleCaptureError, start_child
 
 ROOT = Path(__file__).resolve().parents[2]
 SHADOW_DIR = ROOT / ".state" / "whaleride-shadow"
@@ -54,6 +58,7 @@ MIN_BACKOFF = 30.0
 MAX_BACKOFF = 600.0
 STALE_SECONDS = 600.0  # no rows at all for ten minutes
 FROZEN_SECONDS = 900.0  # rows flowing but slot frozen for fifteen minutes
+HEALTHY_RESET_SECONDS = 3600.0  # one hour of uninterrupted health resets restarts
 POLL_SECONDS = 30.0
 
 
@@ -83,27 +88,19 @@ def pid_alive(pid: int) -> bool:
     return "run_whaleride_shadow" in out
 
 
-def spawn() -> tuple[int, subprocess.Popen]:
+def spawn() -> CapturedChild:
     log("spawn", {"cmd": COLLECTOR_CMD[-1]})
-    proc = subprocess.Popen(  # noqa: S603 - fixed argv, no untrusted input
+    return start_child(
         COLLECTOR_CMD,
-        cwd=str(ROOT),
-        stdout=sys.stdout,
-        stderr=sys.stderr,
-        start_new_session=True,
+        cwd=ROOT,
+        console_path=SHADOW_DIR / "console.jsonl",
+        pid_path=PID_FILE,
     )
-    PID_FILE.write_text(str(proc.pid))
-    return proc.pid, proc
 
 
-def stop(proc: subprocess.Popen | None, pid: int | None) -> None:
-    if proc is not None and proc.poll() is None:
-        proc.terminate()
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=5)
+def stop(child: CapturedChild | None, pid: int | None) -> None:
+    if child is not None:
+        child.stop()
         return
     if pid is not None and pid != os.getpid() and pid_alive(pid):
         os.kill(pid, signal.SIGTERM)
@@ -116,11 +113,12 @@ def stop(proc: subprocess.Popen | None, pid: int | None) -> None:
 
 def _parse_ts(value: object) -> float:
     """Row timestamps come in two shapes: epoch float (traces) and ISO (events)."""
-    if isinstance(value, int | float) and not isinstance(value, bool):
-        return float(value)
     try:
-        return float(time.mktime(time.strptime(str(value), "%Y-%m-%dT%H:%M:%SZ")))
-    except (TypeError, ValueError):
+        if isinstance(value, int | float) and not isinstance(value, bool):
+            stamp = float(value)
+            return stamp if math.isfinite(stamp) else 0.0
+        return float(calendar.timegm(time.strptime(str(value), "%Y-%m-%dT%H:%M:%SZ")))
+    except (TypeError, ValueError, OverflowError):
         return 0.0
 
 
@@ -159,11 +157,13 @@ def health_reason(
     *,
     alive: bool,
     state: tuple[float, int] | None,
-    previous: tuple[float, int] | None,
+    slot_progress: tuple[float, int] | None,
     now: float,
     started: float,
 ) -> str | None:
     """One restart decision per tick; None means healthy.
+
+    `slot_progress` retains (last slot-change wall time, slot), not the last poll.
 
     Everything runs in wall time: `started` must be time.time() at spawn,
     not monotonic — the 2026-10-06 instant-fire bug compared wall `now`
@@ -178,9 +178,9 @@ def health_reason(
     if now - last_ts > STALE_SECONDS:
         return "rows_stale"
     if (
-        previous is not None
-        and previous[1] == last_slot
-        and now - started > FROZEN_SECONDS
+        slot_progress is not None
+        and slot_progress[1] == last_slot
+        and now - max(started, slot_progress[0]) > FROZEN_SECONDS
     ):
         return "slot_frozen"
     return None
@@ -209,12 +209,12 @@ def _give_up(reason: str, restarts: int, detail: dict) -> int:
 def run() -> int:
     SHADOW_DIR.mkdir(parents=True, exist_ok=True)
     GAVE_UP.unlink(missing_ok=True)
-    proc: subprocess.Popen | None = None
+    child: CapturedChild | None = None
     pid: int | None = None
     restarts = 0
     quick_deaths = 0
     started = 0.0
-    previous_state: tuple[float, int] | None = None
+    slot_progress: tuple[float, int] | None = None
     log("keeper_start", {"shadow": str(SHADOW_PATH)})
     stop_signal = {"raised": False}
 
@@ -231,55 +231,77 @@ def run() -> int:
             log("adopt_kill", {"pid": orphan})
             stop(None, orphan)
     PID_FILE.unlink(missing_ok=True)
-    pid, proc = spawn()
-    started = time.time()  # wall clock: health_reason compares against row ts
-
-    while not stop_signal["raised"]:
-        time.sleep(POLL_SECONDS)
-        alive = (proc is not None and proc.poll() is None) or (
-            pid is not None and pid_alive(pid)
-        )
-        state = watch_state()
-        reason = health_reason(
-            alive=alive,
-            state=state,
-            previous=previous_state,
-            now=time.time(),
-            started=started,
-        )
-        previous_state = state
-        if reason is None:
-            continue
-        if reason == "process_dead" and time.time() - started < QUICK_DEATH_SECONDS:
-            quick_deaths += 1
-        else:
-            quick_deaths = 0
-        log(
-            "restart",
-            {"reason": reason, "restarts": restarts, "quick_deaths": quick_deaths},
-        )
-        stop(proc, pid)
-        if quick_deaths >= MAX_QUICK:
-            return _give_up(
-                "quick_death_loop", restarts, {"quick_deaths": quick_deaths}
-            )
-        restarts += 1
-        if restarts > MAX_RESTARTS:
-            return _give_up("restart_budget_exhausted", restarts, {})
-        wait = backoff_seconds(quick_deaths)
-        log("backoff", {"seconds": wait})
-        slept = 0.0
-        while slept < wait and not stop_signal["raised"]:
-            time.sleep(min(1.0, wait - slept))
-            slept += 1.0
-        if stop_signal["raised"]:
-            break
-        pid, proc = spawn()
+    capture_failed = False
+    try:
+        child = spawn()
+        pid = child.process.pid
         started = time.time()  # wall clock: health_reason compares against row ts
-        previous_state = None
 
-    stop(proc, pid)
-    PID_FILE.unlink(missing_ok=True)
+        while not stop_signal["raised"]:
+            child.wait_console(POLL_SECONDS)
+            alive = child.process.poll() is None
+            state = watch_state()
+            observed_at = time.time()
+            if state is not None and (
+                slot_progress is None or slot_progress[1] != state[1]
+            ):
+                slot_progress = (observed_at, state[1])
+            reason = health_reason(
+                alive=alive,
+                state=state,
+                slot_progress=slot_progress,
+                now=observed_at,
+                started=started,
+            )
+            if reason is None:
+                uptime = observed_at - started
+                if restarts > 0 and uptime >= HEALTHY_RESET_SECONDS:
+                    log(
+                        "budget_reset",
+                        {"restarts": restarts, "uptime_s": round(uptime)},
+                    )
+                    restarts = 0
+                continue
+            if reason == "process_dead" and time.time() - started < QUICK_DEATH_SECONDS:
+                quick_deaths += 1
+            else:
+                quick_deaths = 0
+            log(
+                "restart",
+                {"reason": reason, "restarts": restarts, "quick_deaths": quick_deaths},
+            )
+            stop(child, pid)
+            child, pid = None, None
+            if quick_deaths >= MAX_QUICK:
+                return _give_up(
+                    "quick_death_loop", restarts, {"quick_deaths": quick_deaths}
+                )
+            restarts += 1
+            if restarts > MAX_RESTARTS:
+                return _give_up("restart_budget_exhausted", restarts, {})
+            wait = backoff_seconds(quick_deaths)
+            log("backoff", {"seconds": wait})
+            slept = 0.0
+            while slept < wait and not stop_signal["raised"]:
+                time.sleep(min(1.0, wait - slept))
+                slept += 1.0
+            if stop_signal["raised"]:
+                break
+            child = spawn()
+            pid = child.process.pid
+            started = time.time()  # wall clock: health_reason compares against row ts
+            slot_progress = None
+    except ConsoleCaptureError:
+        capture_failed = True
+    finally:
+        try:
+            stop(child, pid)
+        except ConsoleCaptureError:
+            capture_failed = True
+        finally:
+            PID_FILE.unlink(missing_ok=True)
+    if capture_failed:
+        return _give_up("console_capture_failed", restarts, {})
     log("keeper_stop", {})
     return 0
 
@@ -305,21 +327,25 @@ def self_check() -> None:
     )
     _check(
         condition=health_reason(
-            alive=False, state=None, previous=None, now=0.0, started=0.0
+            alive=False, state=None, slot_progress=None, now=0.0, started=0.0
         )
         == "process_dead",
         message="dead detect",
     )
     _check(
         condition=health_reason(
-            alive=True, state=None, previous=None, now=30.0, started=0.0
+            alive=True, state=None, slot_progress=None, now=30.0, started=0.0
         )
         is None,
         message="quiet start is healthy",
     )
     _check(
         condition=health_reason(
-            alive=True, state=None, previous=None, now=STALE_SECONDS + 1, started=0.0
+            alive=True,
+            state=None,
+            slot_progress=None,
+            now=STALE_SECONDS + 1,
+            started=0.0,
         )
         == "no_rows_ever",
         message="silent start escalates",
@@ -328,23 +354,27 @@ def self_check() -> None:
         condition=health_reason(
             alive=True,
             state=(FROZEN_SECONDS, 7),
-            previous=(FROZEN_SECONDS - 30, 7),
+            slot_progress=(FROZEN_SECONDS - 30, 7),
             now=FROZEN_SECONDS + 1,
             started=0.0,
         )
-        == "slot_frozen",
-        message="frozen slot escalates",
+        is None,
+        message="one unchanged poll is not a sustained frozen slot",
     )
     _check(
         condition=health_reason(
             alive=True,
             state=(FROZEN_SECONDS, 7),
-            previous=(FROZEN_SECONDS - 30, 7),
+            slot_progress=(0.0, 7),
             now=FROZEN_SECONDS + 1,
-            started=FROZEN_SECONDS + 5,
+            started=0.0,
         )
-        is None,
-        message="frozen needs tenure",
+        == "slot_frozen",
+        message="sustained slot stall exceeds the unchanged 900-second bound",
+    )
+    _check(
+        condition=HEALTHY_RESET_SECONDS > FROZEN_SECONDS,
+        message="budget reset waits well past the frozen-slot bound",
     )
     print("self_check ok")
 

@@ -16,6 +16,7 @@ Offline; no network.
     uv run learning-examples/token-lifecycles/summarize_graduations.py lifecycles_24h.jsonl
 """
 
+# ruff: noqa: PLR0911, PLR0913, PLR2004, S101
 from __future__ import annotations
 
 import argparse
@@ -32,9 +33,30 @@ TX_FEES_LAMPORTS = 60_000
 SUPPLY = 1_000_000_000 * TOKEN_RAW
 
 
+def post_reserves(t: list) -> tuple[int, int]:
+    """Post-trade (base, effective_quote) from PumpSwap pre-trade event reserves."""
+    base = t[5] - t[4] if t[2] else t[5] + t[4]
+    quote = t[6] + (t[7] or 0) + (t[3] if t[2] else -t[3])
+    return base, quote
+
+
+def post_real_quote(t: list) -> int:
+    """Post-trade real quote reserves (lamports)."""
+    return t[6] + (t[3] if t[2] else -t[3])
+
+
+def open_price(t0: list) -> float:
+    """Opening SOL per whole token before the first pool trade."""
+    return (t0[6] + (t0[7] or 0)) / LAMPORTS / (t0[5] / TOKEN_RAW)
+
+
 def price(t: list) -> float:
-    """SOL per whole token from effective reserves (pool quote + virtual quote)."""
-    return (t[6] + t[7]) / LAMPORTS / (t[5] / TOKEN_RAW)
+    """SOL per whole token from post-trade effective reserves."""
+    return (
+        (t[6] + (t[7] or 0) + (t[3] if t[2] else -t[3]))
+        / LAMPORTS
+        / ((t[5] - t[4] if t[2] else t[5] + t[4]) / TOKEN_RAW)
+    )
 
 
 def q(values: list[float], p: float) -> float:
@@ -58,12 +80,12 @@ def simulate(
     if i is None or i == len(pt) - 1:
         return None
     st = pt[i]
-    base, quote = st[5], st[6] + st[7]
+    base, quote = post_reserves(st)
     tokens = base - (base * quote) / (quote + buy * (1 - PUMP_FEE))
     cost = buy + TX_FEES_LAMPORTS
 
     def value(t: list) -> float:
-        b, qq = t[5], t[6] + t[7]
+        b, qq = post_reserves(t)
         return (qq - (qq * b) / (b + tokens)) * (1 - PUMP_FEE)
 
     peak = value(st)
@@ -109,11 +131,297 @@ def supply_concentration(c: dict) -> float:
     return sum(v for _, v in hold.most_common(3)) / SUPPLY
 
 
+def is_organic_dispersed(coin: dict) -> bool:
+    """True if graduation was organic: >=20 dslot, >=15 non-creator buyers, <25% single-buyer share."""
+    grad_dslot = coin.get("graduated_dslot")
+    if grad_dslot is None or grad_dslot < 20:
+        return False
+    creator = coin.get("creator")
+    curve_buys = [t for t in coin.get("trades", []) if t[2]]
+    if not curve_buys:
+        return False
+    non_creator_buyers = {t[1] for t in curve_buys if t[1] and t[1] != creator}
+    if len(non_creator_buyers) < 15:
+        return False
+    buyer_sol: Counter[str] = Counter()
+    for t in curve_buys:
+        if t[1]:
+            buyer_sol[t[1]] += t[3]
+    total_buy_sol = sum(buyer_sol.values())
+    if total_buy_sol <= 0:
+        return False
+    return (max(buyer_sol.values()) / total_buy_sol) < 0.25
+
+
+def simulate_reclaim(  # noqa: C901, PLR0912
+    pt: list,
+    *,
+    pullback_min: float = 0.10,
+    pullback_max: float = 0.35,
+    reclaim_pct: float = 0.05,
+    min_quote_sol: float = 55.0,
+    trail_pct: float = 0.10,
+    target_pct: float = 0.15,
+    max_hold_slots: int = 300,
+    entry_lag: int = 1,
+    exit_lag: int = 1,
+    fee: float = 0.003,
+) -> tuple[float, int] | None:
+    """Strategy 1b-ii: +1 slot entry on +5% reclaim off -10%..-35% low while quote >= 55 SOL."""
+    if not pt:
+        return None
+    p0 = open_price(pt[0])
+    if p0 <= 0:
+        return None
+
+    low = p0
+    trigger_i: int | None = None
+    for i, t in enumerate(pt):
+        p = price(t)
+        low = min(low, p)
+        pullback = (p0 - low) / p0
+        if pullback > pullback_max:
+            return None
+        if (
+            pullback >= pullback_min
+            and p >= low * (1 + reclaim_pct)
+            and (post_real_quote(t) / LAMPORTS) >= min_quote_sol
+        ):
+            trigger_i = i
+            break
+
+    if trigger_i is None:
+        return None
+
+    target_entry_slot = pt[trigger_i][0] + entry_lag
+    entry_i = trigger_i
+    for j in range(trigger_i + 1, len(pt)):
+        if pt[j][0] <= target_entry_slot:
+            entry_i = j
+        else:
+            break
+
+    if entry_i >= len(pt) - 1:
+        return None
+
+    entry_trade = pt[entry_i]
+    entry_price = price(entry_trade)
+    if entry_price <= 0:
+        return None
+    entry_slot = entry_trade[0]
+
+    peak_price = entry_price
+    exit_i: int | None = None
+    for k in range(entry_i + 1, len(pt)):
+        t = pt[k]
+        p = price(t)
+        peak_price = max(peak_price, p)
+        if (
+            p <= peak_price * (1 - trail_pct)
+            or p >= entry_price * (1 + target_pct)
+            or t[0] - entry_slot >= max_hold_slots
+        ):
+            target_exit_slot = t[0] + exit_lag
+            exit_land = k
+            for j in range(k + 1, len(pt)):
+                if pt[j][0] <= target_exit_slot:
+                    exit_land = j
+                else:
+                    break
+            exit_i = exit_land
+            break
+
+    if exit_i is None:
+        exit_i = len(pt) - 1
+
+    exit_trade = pt[exit_i]
+    exit_price = price(exit_trade)
+    if exit_price <= 0:
+        return None
+    exit_slot = exit_trade[0]
+    hold_slots = max(0, exit_slot - entry_slot)
+    net_return = (exit_price / entry_price) * ((1.0 - fee) ** 2) - 1.0
+    return net_return, hold_slots
+
+
+def run_self_check() -> None:
+    """Offline synthetic check verifying reserves, pricing, dispersion, and reclaim simulation."""
+    t_buy = [
+        1,
+        "buyer",
+        1,
+        1_000_000_000,
+        10_000_000,
+        200_000_000,
+        30_000_000_000,
+        0,
+        1000,
+    ]
+    assert post_reserves(t_buy) == (190_000_000, 31_000_000_000)
+    t_sell = [
+        2,
+        "seller",
+        0,
+        500_000_000,
+        5_000_000,
+        190_000_000,
+        31_000_000_000,
+        0,
+        1001,
+    ]
+    assert post_reserves(t_sell) == (195_000_000, 30_500_000_000)
+
+    t0 = [
+        0,
+        "init",
+        1,
+        0,
+        0,
+        200_000_000 * int(TOKEN_RAW),
+        60 * int(LAMPORTS),
+        0,
+        1000,
+    ]
+    assert abs(open_price(t0) - (60.0 / 200_000_000)) < 1e-12
+
+    trades_ok = [
+        [i, f"buyer_{i}", 1, 1_000_000_000, 100_000, 0, 0, 0, 1000 + i]
+        for i in range(15)
+    ]
+    coin_ok = {"creator": "dev", "graduated_dslot": 25, "trades": trades_ok}
+    assert is_organic_dispersed(coin_ok) is True
+    assert is_organic_dispersed({**coin_ok, "graduated_dslot": 15}) is False
+    assert is_organic_dispersed({**coin_ok, "trades": trades_ok[:10]}) is False
+    trades_whale = [
+        *trades_ok,
+        [16, "whale", 1, 100_000_000_000, 1_000_000, 0, 0, 0, 1016],
+    ]
+    assert is_organic_dispersed({**coin_ok, "trades": trades_whale}) is False
+
+    pt = [
+        [
+            0,
+            "open",
+            1,
+            0,
+            0,
+            200_000_000 * int(TOKEN_RAW),
+            60 * int(LAMPORTS),
+            0,
+            1000,
+        ],
+        [
+            2,
+            "dump",
+            0,
+            4 * int(LAMPORTS),
+            25_000_000 * int(TOKEN_RAW),
+            200_000_000 * int(TOKEN_RAW),
+            60 * int(LAMPORTS),
+            0,
+            1002,
+        ],
+        [
+            5,
+            "bounce",
+            1,
+            int(1.5 * LAMPORTS),
+            5_000_000 * int(TOKEN_RAW),
+            225_000_000 * int(TOKEN_RAW),
+            56 * int(LAMPORTS),
+            0,
+            1005,
+        ],
+        [
+            6,
+            "fill",
+            1,
+            int(0.1 * LAMPORTS),
+            300_000 * int(TOKEN_RAW),
+            220_000_000 * int(TOKEN_RAW),
+            int(57.5 * LAMPORTS),
+            0,
+            1006,
+        ],
+        [
+            10,
+            "target",
+            1,
+            int(9.4 * LAMPORTS),
+            int(19.7 * 1e6 * TOKEN_RAW),
+            int(219.7 * 1e6 * TOKEN_RAW),
+            int(57.6 * LAMPORTS),
+            0,
+            1010,
+        ],
+        [
+            11,
+            "exit",
+            1,
+            int(0.1 * LAMPORTS),
+            int(0.2 * 1e6 * TOKEN_RAW),
+            int(200 * 1e6 * TOKEN_RAW),
+            int(67 * LAMPORTS),
+            0,
+            1011,
+        ],
+    ]
+    res = simulate_reclaim(pt)
+    assert res is not None and res[0] > 0 and res[1] == 5
+    pt_deep = [
+        [
+            0,
+            "open",
+            1,
+            0,
+            0,
+            200_000_000 * int(TOKEN_RAW),
+            60 * int(LAMPORTS),
+            0,
+            1000,
+        ],
+        [
+            2,
+            "rug",
+            0,
+            30 * int(LAMPORTS),
+            100_000_000 * int(TOKEN_RAW),
+            200_000_000 * int(TOKEN_RAW),
+            60 * int(LAMPORTS),
+            0,
+            1002,
+        ],
+    ]
+    assert simulate_reclaim(pt_deep) is None
+
+    print(
+        json.dumps(
+            {
+                "self_check": "ok",
+                "post_reserves": True,
+                "open_price": True,
+                "is_organic_dispersed": True,
+                "simulate_reclaim": True,
+            }
+        )
+    )
+    sys.exit(0)
+
+
 def main() -> None:  # noqa: C901, PLR0912, PLR0915
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("path", type=Path)
+    ap.add_argument("path", type=Path, nargs="?", default=None)
     ap.add_argument("--buy-sol", type=float, default=0.1)
+    ap.add_argument(
+        "--self-check",
+        action="store_true",
+        help="Run offline synthetic checks without reading data tape",
+    )
     args = ap.parse_args()
+    if args.self_check:
+        run_self_check()
+    if args.path is None:
+        ap.error("the following arguments are required: path")
     rows = [
         json.loads(line) for line in args.path.read_text().splitlines() if line.strip()
     ]
@@ -132,7 +440,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     paths = []
     for c in grads:
         pt = c["post_trades"]
-        g0, p0 = pt[0][0], price(pt[0])
+        g0, p0 = pt[0][0], open_price(pt[0])
         row = {}
         for m in marks:
             last = None
@@ -154,7 +462,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
             + "".join(f"{v:>8.2f}" for v in cells)
             + f"{q([p['peak'] for p in paths], pq):>8.2f}{q([p['end'] for p in paths], pq):>8.2f}"
         )
-    end_quote = [c["post_trades"][-1][6] / LAMPORTS for c in grads]
+    end_quote = [post_real_quote(c["post_trades"][-1]) / LAMPORTS for c in grads]
     start_quote = [c["post_trades"][0][6] / LAMPORTS for c in grads]
     print(
         f"\npool SOL at creation p50={q(start_quote, 0.5):.1f}; at tape end p50={q(end_quote, 0.5):.2f} "
@@ -250,6 +558,44 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
                 print(
                     f"  {key} [{lo},{hi}) n={len(pn):>3} mean={statistics.mean(pn):+6.1%} win={sum(1 for v in pn if v > 0) / len(pn):.0%}"
                 )
+
+    def _reclaim_returns(cohort: list[dict]) -> list[float]:
+        return [
+            r[0]
+            for c in cohort
+            if (r := simulate_reclaim(c["post_trades"])) is not None
+        ]
+
+    def _format_cell(pn: list[float]) -> str:
+        if not pn:
+            return f"{0:>6}{'-':>8}{'-':>6}"
+        mean = statistics.mean(pn)
+        win = sum(1 for v in pn if v > 0) / len(pn)
+        return f"{len(pn):>6}{mean:>+8.1%}{win:>6.0%}"
+
+    train_grads, lock_grads = grads[:half], grads[half:]
+    train_org = [c for c in train_grads if is_organic_dispersed(c)]
+    lock_org = [c for c in lock_grads if is_organic_dispersed(c)]
+    print(
+        "\nStrategy 1b-ii Reclaim (+5% off -10%..-35% low, pool_quote >= 55 SOL, trail 10%, tp 15%, hold 300sl):"
+    )
+    print(
+        f"{'cohort':38s}{'TRAIN n':>6}{'mean':>8}{'win':>6}{'LOCK n':>6}{'mean':>8}{'win':>6}"
+    )
+    for label, tr, lk in (
+        (
+            "All Graduations",
+            _reclaim_returns(train_grads),
+            _reclaim_returns(lock_grads),
+        ),
+        (
+            "Organic Dispersed Graduations",
+            _reclaim_returns(train_org),
+            _reclaim_returns(lock_org),
+        ),
+    ):
+        ok = bool(tr and statistics.mean(tr) > 0 and lk and statistics.mean(lk) > 0)
+        print(f"{'*' if ok else ' '}{label:37s}" + _format_cell(tr) + _format_cell(lk))
 
 
 if __name__ == "__main__":

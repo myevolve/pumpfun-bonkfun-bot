@@ -68,21 +68,27 @@ def _tokens_bought(v_sol: int, v_tok: int) -> int:
     return v_tok - (v_sol * v_tok) / (v_sol + spend_net)
 
 
+def _post_pool_reserves(p: list) -> tuple[int, int]:
+    """Post-trade (base, effective_quote) from PumpSwap pre-trade event reserves."""
+    base = p[5] - p[4] if p[2] else p[5] + p[4]
+    quote = p[6] + (p[7] or 0) + (p[3] if p[2] else -p[3])
+    return base, quote
+
+
 def _pool_state_at(
     posts: list, pool_dslot: int, exit_lag: int
 ) -> tuple[int, int] | None:
-    """(base, effective_quote) of the pre-trade pool state at dslot <= pool+lag."""
+    """(base, effective_quote) of the post-trade pool state at dslot <= pool+lag."""
     state = None
     for p in posts:
         if p[0] <= pool_dslot + exit_lag:
             state = p
         else:
             break
-    base = posts[0][5] if state is None else state[5]
-    quote = (
-        posts[0][6] + (posts[0][7] or 0)
+    base, quote = (
+        (posts[0][5], posts[0][6] + (posts[0][7] or 0))
         if state is None
-        else state[6] + (state[7] or 0)
+        else _post_pool_reserves(state)
     )
     if base <= 0 or quote <= 0:
         return None
@@ -143,17 +149,22 @@ def _simulate(
     idx = next((i for i, t in enumerate(trades) if t[5] >= x_sol * 1e9), None)
     if idx is None or idx == n - 1:
         return None  # no crossing, or crossing IS the completing trade
-    grad = pool_dslot is not None and posts
+    grad_ever = bool(pool_dslot is not None and posts)
     land_i = _land_index(trades, idx, cfg.entry_lag)
-    if grad and land_i == n - 1:
+    if grad_ever and land_i == n - 1:
         return None  # graduation beat our buy: reverting tx, no trade
     v_sol, v_tok = trades[land_i][6], trades[land_i][7]
     if v_tok <= 0 or v_sol <= 0:
         return None
     tokens = _tokens_bought(v_sol, v_tok)
-    if grad:
+    cross_dslot = trades[idx][0]
+    exit_dslot = cross_dslot + cfg.hold_slots
+    grad_in_window = grad_ever and (
+        pool_dslot <= exit_dslot or trades[-1][0] <= exit_dslot
+    )
+    if grad_in_window:
         return _graduated_exit(tokens, posts, pool_dslot, cfg.exit_lag)
-    return _curve_exit(trades, tokens, land_i, trades[idx][0], cfg.hold_slots)
+    return _curve_exit(trades, tokens, land_i, cross_dslot, cfg.hold_slots)
 
 
 def _pctl(values: list[float], q: float) -> float:
