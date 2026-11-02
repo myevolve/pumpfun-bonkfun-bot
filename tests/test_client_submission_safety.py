@@ -35,6 +35,9 @@ from core.execution_policy import ExecutionBlocked, ExecutionPolicy, TradeLimitE
 from core.pubkeys import USDC_MINT, WSOL_MINT
 from core.transaction_ledger import EvidencePersistenceError, TransactionLedger
 from core.transaction_state import TransactionOutcome, TransactionStatus
+from interfaces.core import Platform, TokenInfo
+from platforms.letsbonk.address_provider import LetsBonkAddressProvider
+from trading.platform_aware import PlatformAwareBuyer
 
 
 def _live_client(
@@ -331,9 +334,6 @@ async def test_preflight_rejection_releases_wire_instead_of_recording_unknown(
 ) -> None:
     """Live 2026-09-03 (Ceuta): a sell rejected at preflight (6003) was filed as
     UNKNOWN, so the position froze for an hour while the coin went to zero."""
-    from solders.rpc.errors import SendTransactionPreflightFailureMessage
-    from solders.rpc.responses import RpcSimulateTransactionResult
-
     simulation = RpcSimulateTransactionResult(err=None, logs=None)
     payload = SendTransactionPreflightFailureMessage(
         "Transaction simulation failed: Error processing Instruction 2: "
@@ -2407,3 +2407,33 @@ def test_scalar_quote_cap_still_covers_every_asset() -> None:
     with pytest.raises(TradeLimitExceeded):
         policy.validate_budgets(1_000_001, 5_000, quote_mint=USDC_MINT)
     assert policy.session_quote_cap(USDC_MINT) == 2_000_000
+
+
+def test_letsbonk_sol_destination_validates_quote_vault_and_platform() -> None:
+    buyer = object.__new__(PlatformAwareBuyer)
+    provider = LetsBonkAddressProvider()
+    mint = Pubkey.new_unique()
+    derived = provider.derive_quote_vault(mint, WSOL_MINT)
+
+    token = TokenInfo(
+        name="Token",
+        symbol="TOK",
+        uri="",
+        mint=mint,
+        platform=Platform.LETS_BONK,
+        quote_mint=WSOL_MINT,
+    )
+    assert buyer._get_sol_destination(token, provider) == derived
+
+    token.quote_vault = derived
+    assert buyer._get_sol_destination(token, provider) == derived
+
+    token.quote_vault = Pubkey.new_unique()
+    with pytest.raises(
+        ValueError, match="LetsBonk quote_vault does not match pool metadata"
+    ):
+        buyer._get_sol_destination(token, provider)
+
+    unsupported = SimpleNamespace(platform="unknown", mint=mint)
+    with pytest.raises(ValueError, match="Unsupported trading platform"):
+        buyer._get_sol_destination(unsupported, provider)

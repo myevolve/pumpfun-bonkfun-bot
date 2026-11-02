@@ -172,28 +172,47 @@ class FlowRules:
     single_sell_pct: float | None = None  # one sell >= this fraction of real SOL
     net_outflow_pct: float | None = None  # net sell flow over window vs real SOL
     window: int = 5
+    max_stall_slots: int | None = None  # slots since peak_sol without advancing
+    entry_floor_pct: float | None = None  # drop below entry_sol before higher peak
 
     def __post_init__(self) -> None:
-        for name in ("trailing_stop", "single_sell_pct", "net_outflow_pct"):
+        for name in (
+            "trailing_stop",
+            "single_sell_pct",
+            "net_outflow_pct",
+            "entry_floor_pct",
+        ):
             value = getattr(self, name)
             if value is not None and (
                 isinstance(value, bool)
                 or not isinstance(value, int | float)
                 or not 0 < value < 1
             ):
-                raise ValueError(f"{name} must be a fraction in (0, 1) or None")
+                raise ValueError(f"{name} must be a fraction in (0, 1) or None")  # noqa: TRY003
         if (
             isinstance(self.window, bool)
             or not isinstance(self.window, int)
             or self.window < 1
         ):
-            raise ValueError("window must be a positive integer")
+            raise ValueError("window must be a positive integer")  # noqa: TRY003
+        if self.max_stall_slots is not None and (
+            isinstance(self.max_stall_slots, bool)
+            or not isinstance(self.max_stall_slots, int)
+            or self.max_stall_slots < 1
+        ):
+            raise ValueError("max_stall_slots must be a positive integer or None")  # noqa: TRY003
 
     @property
     def enabled(self) -> bool:
         return self.creator_sell or any(
             v is not None
-            for v in (self.trailing_stop, self.single_sell_pct, self.net_outflow_pct)
+            for v in (
+                self.trailing_stop,
+                self.single_sell_pct,
+                self.net_outflow_pct,
+                self.max_stall_slots,
+                self.entry_floor_pct,
+            )
         )
 
 
@@ -215,13 +234,15 @@ class FlowMonitor:
     keeps firing on later events so a caller that missed one can still act.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         *,
         mint: str,
         creator: str,
         rules: FlowRules,
         entry_price: float | None = None,
+        entry_sol: int | None = None,
+        entry_slot: int | None = None,
     ) -> None:
         """``entry_price`` seeds the trailing-stop peak so a pump that happened
         between the buy and the first streamed event still counts as the peak."""
@@ -231,16 +252,35 @@ class FlowMonitor:
         self.peak_price: float | None = (
             entry_price if entry_price is not None and entry_price > 0 else None
         )
+        self.entry_sol: int | None = (
+            entry_sol if entry_sol is not None and entry_sol > 0 else None
+        )
+        self.peak_sol: int | None = self.entry_sol
+        self.peak_slot: int | None = (
+            entry_slot if entry_slot is not None and entry_slot >= 0 else None
+        )
         self.last_price: float | None = None
         self._recent: deque[tuple[bool, int]] = deque(maxlen=rules.window)
 
-    def observe(self, event: TradeEvent) -> FlowSignal | None:
+    def observe(  # noqa: C901, PLR0911, PLR0912
+        self, event: TradeEvent
+    ) -> FlowSignal | None:
         if event.mint != self.mint:
             return None
         price = event.price
         self.last_price = price
         if self.peak_price is None or price > self.peak_price:
             self.peak_price = price
+        if event.real_sol_reserves > 0:
+            if self.entry_sol is None:
+                self.entry_sol = event.real_sol_reserves
+            if self.peak_sol is None:
+                self.peak_sol = event.real_sol_reserves
+                if self.peak_slot is None:
+                    self.peak_slot = event.slot
+            elif event.real_sol_reserves > self.peak_sol:
+                self.peak_sol = event.real_sol_reserves
+                self.peak_slot = event.slot
         self._recent.append((event.is_buy, event.sol_amount))
         rules = self.rules
 
@@ -277,6 +317,34 @@ class FlowMonitor:
                     price,
                     event.slot,
                 )
+        if (
+            rules.entry_floor_pct is not None
+            and self.entry_sol is not None
+            and self.peak_sol is not None
+            and self.peak_sol <= self.entry_sol
+            and event.real_sol_reserves <= self.entry_sol * (1 - rules.entry_floor_pct)
+        ):
+            return FlowSignal(
+                "entry_floor",
+                f"real SOL {event.real_sol_reserves / _LAMPORTS_PER_SOL:.4f} is "
+                f"{1 - event.real_sol_reserves / self.entry_sol:.0%} below "
+                f"entry {self.entry_sol / _LAMPORTS_PER_SOL:.4f}",
+                price,
+                event.slot,
+            )
+        if (
+            rules.max_stall_slots is not None
+            and self.peak_slot is not None
+            and self.peak_sol is not None
+            and event.slot - self.peak_slot >= rules.max_stall_slots
+        ):
+            return FlowSignal(
+                "velocity_stall",
+                f"no real SOL peak advance for {event.slot - self.peak_slot} slots "
+                f"(peak {self.peak_sol / _LAMPORTS_PER_SOL:.4f} SOL at slot {self.peak_slot})",
+                price,
+                event.slot,
+            )
         if (
             rules.trailing_stop is not None
             and self.peak_price is not None
@@ -344,6 +412,14 @@ class TradeQueue(asyncio.Queue[TradeEvent]):
                 return self.get_nowait()
             except asyncio.QueueEmpty:
                 continue  # Another reader consumed the last item after wakeup.
+
+    def pop_if_slot_le(self, max_slot: int) -> TradeEvent | None:
+        """Consume the next queued event only if its slot is at most ``max_slot``."""
+        if self.loss_reason:
+            raise TradeFlowLossError(self.loss_reason)
+        if not self._queue or self._queue[0].slot > max_slot:
+            return None
+        return self.get_nowait()
 
     def invalidate(self, reason: _LossReason) -> int:
         """Discard unconsumed history and wake every reader with a sticky failure."""
@@ -500,29 +576,51 @@ class GateRules:
     max_buyers: int | None = None  # measured sweet band: 2-3 buyers at accept
     max_real_sol: float | None = 0.5  # skip if the curve already holds more
     min_real_sol: float = 0.1
+    max_single_buy_sol: float | None = None  # reject large single-sweep tranche buys
+    max_buyer_share: float | None = None  # reject concentrated single-wallet volume
+    max_inflow_sol_per_slot: float | None = (
+        None  # hold until real_sol / slots_waited <= cap
+    )
+    max_creator_launches: int | None = None  # reject repeat creators (> N launches)
     require_creator_holding: bool = True  # any creator sell => skip
+    min_wait_slots: int = 0  # require crossing to hold past creation + N slots
     max_wait_slots: int = 3  # give up if no decision by creation + N slots
     max_wait_ms: int = 1500  # wall-clock bound in case the stream stalls
 
     def __post_init__(self) -> None:
+        for name, min_val, allow_none in (
+            ("min_buyers", 0, False),
+            ("min_wait_slots", 0, False),
+            ("max_wait_slots", 1, False),
+            ("max_wait_ms", 1, False),
+            ("max_creator_launches", 1, True),
+        ):
+            value = getattr(self, name)
+            if allow_none and value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, int) or value < min_val:
+                suffix = " or None" if allow_none else ""
+                raise ValueError(f"{name} must be an integer >= {min_val}{suffix}")  # noqa: TRY003
         if (
-            isinstance(self.min_buyers, bool)
-            or not isinstance(self.min_buyers, int)
-            or self.min_buyers < 0
+            isinstance(self.max_buyers, bool)
+            or not isinstance(self.max_buyers, int | None)
+            or (self.max_buyers is not None and self.max_buyers < self.min_buyers)
         ):
-            raise ValueError("min_buyers must be a non-negative integer")
-        if isinstance(self.max_buyers, bool) or not isinstance(
-            self.max_buyers, int | None
+            raise ValueError("max_buyers must be >= min_buyers or None")  # noqa: TRY003
+        for name in ("max_real_sol", "max_single_buy_sol", "max_inflow_sol_per_slot"):
+            value = getattr(self, name)
+            if value is not None and (
+                isinstance(value, bool)
+                or not isinstance(value, int | float)
+                or value <= 0
+            ):
+                raise ValueError(f"{name} must be positive or None")  # noqa: TRY003
+        if self.max_buyer_share is not None and (
+            isinstance(self.max_buyer_share, bool)
+            or not isinstance(self.max_buyer_share, int | float)
+            or not 0 < self.max_buyer_share <= 1
         ):
-            raise ValueError("max_buyers must be a non-negative integer or None")
-        if self.max_buyers is not None and self.max_buyers < self.min_buyers:
-            raise ValueError("max_buyers must be >= min_buyers")
-        if self.max_real_sol is not None and (
-            isinstance(self.max_real_sol, bool)
-            or not isinstance(self.max_real_sol, int | float)
-            or self.max_real_sol <= 0
-        ):
-            raise ValueError("max_real_sol must be positive or None")
+            raise ValueError("max_buyer_share must be in (0, 1] or None")  # noqa: TRY003
         if (
             isinstance(self.min_real_sol, bool)
             or not isinstance(self.min_real_sol, int | float)
@@ -531,11 +629,9 @@ class GateRules:
                 self.max_real_sol is not None and self.min_real_sol >= self.max_real_sol
             )
         ):
-            raise ValueError("min_real_sol must be >= 0 and below max_real_sol")
-        for name in ("max_wait_slots", "max_wait_ms"):
-            value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-                raise ValueError(f"{name} must be a positive integer")
+            raise ValueError("min_real_sol must be >= 0 and below max_real_sol")  # noqa: TRY003
+        if self.min_wait_slots > self.max_wait_slots:
+            raise ValueError("min_wait_slots must be <= max_wait_slots")  # noqa: TRY003
 
 
 @dataclass(frozen=True, slots=True)
@@ -559,6 +655,7 @@ class EntryGate:
         self.creation_slot = creation_slot
         self.rules = rules
         self.buyers: set[str] = set()
+        self.buyer_sol: dict[str, int] = {}
         self.last_event: TradeEvent | None = None
 
     def _decision(
@@ -572,45 +669,85 @@ class EntryGate:
             accept, reason, len(self.buyers), real, slot - self.creation_slot, event
         )
 
-    def observe(self, event: TradeEvent) -> GateDecision | None:
-        if event.mint != self.mint:
-            return None
-        if event.slot < self.creation_slot:
-            return self._decision(
-                accept=False, reason="trade_before_creation", event=self.last_event
-            )
-        if self.last_event is not None and event.slot < self.last_event.slot:
-            return self._decision(
-                accept=False, reason="trade_stream_out_of_order", event=self.last_event
-            )
-        self.last_event = event
+    def _reject_reason(self, event: TradeEvent) -> str | None:
         rules = self.rules
         if event.slot - self.creation_slot > rules.max_wait_slots:
-            return self._decision(False, "window_expired", event)
+            return "window_expired"
         if (
             rules.require_creator_holding
             and not event.is_buy
             and event.user == self.creator
         ):
-            return self._decision(False, "creator_sold", event)
+            return "creator_sold"
         if (
             rules.max_real_sol is not None
             and event.real_sol_reserves > rules.max_real_sol * _LAMPORTS_PER_SOL
         ):
-            return self._decision(False, "too_much_sol", event)
+            return "too_much_sol"
+        if (
+            rules.max_single_buy_sol is not None
+            and event.is_buy
+            and event.sol_amount > rules.max_single_buy_sol * _LAMPORTS_PER_SOL
+        ):
+            return "single_buy_too_large"
+        return None
+
+    def observe(self, event: TradeEvent) -> GateDecision | None:  # noqa: C901, PLR0911
+        if event.mint != self.mint:
+            return None
+        if event.slot < self.creation_slot or (
+            self.last_event is not None and event.slot < self.last_event.slot
+        ):
+            reason = (
+                "trade_before_creation"
+                if event.slot < self.creation_slot
+                else "trade_stream_out_of_order"
+            )
+            return self._decision(accept=False, reason=reason, event=self.last_event)
+        self.last_event = event
+        if reject := self._reject_reason(event):
+            return self._decision(False, reject, event)
         if (
             event.is_buy
             and event.user != self.creator
             and event.user != MAYHEM_SOL_VAULT
         ):
             self.buyers.add(event.user)
-        if len(self.buyers) < rules.min_buyers:
-            return None
+            self.buyer_sol[event.user] = (
+                self.buyer_sol.get(event.user, 0) + event.sol_amount
+            )
+        rules = self.rules
         if rules.max_buyers is not None and len(self.buyers) > rules.max_buyers:
             return self._decision(False, "too_many_buyers", event)
-        if event.real_sol_reserves < rules.min_real_sol * _LAMPORTS_PER_SOL:
-            return None  # wait for more liquidity within the window
-        return self._decision(True, "buyers_present", event)
+        if (
+            not event.is_buy
+            or event.user == self.creator
+            or event.user == MAYHEM_SOL_VAULT
+        ):
+            return None  # non-organic trades can trigger vetoes above, never an entry
+        if (
+            len(self.buyers) < rules.min_buyers
+            or event.real_sol_reserves < rules.min_real_sol * _LAMPORTS_PER_SOL
+            or event.slot - self.creation_slot < rules.min_wait_slots
+        ):
+            return None  # wait for buyers, liquidity, and post-bundle slot
+        if rules.max_inflow_sol_per_slot is not None:
+            slots_elapsed = max(1, event.slot - self.creation_slot)
+            if (
+                event.real_sol_reserves / _LAMPORTS_PER_SOL
+            ) / slots_elapsed > rules.max_inflow_sol_per_slot:
+                return None  # wait for curve velocity to stabilize
+        concentrated = (
+            rules.max_buyer_share is not None
+            and bool(self.buyer_sol)
+            and max(self.buyer_sol.values())
+            > rules.max_buyer_share * sum(self.buyer_sol.values())
+        )
+        return self._decision(
+            not concentrated,
+            "buyer_concentration_too_high" if concentrated else "buyers_present",
+            event,
+        )
 
     def timed_out(self) -> GateDecision:
         return self._decision(False, "timeout", self.last_event)

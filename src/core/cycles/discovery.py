@@ -263,9 +263,13 @@ class CycleDiscovery:
         for pool in pools:
             try:
                 tokens = curve_buy_out(vsol, vtoken, amount, self.fee_bps)
+                if event.real_token_reserves > 0 and tokens > event.real_token_reserves:
+                    tokens = 0
                 out_curve_first = pool.quote(mint, tokens) if tokens > 0 else 0
                 pool_tokens = pool.quote(SOL, amount)
                 out_pool_first = curve_sell_out(vsol, vtoken, pool_tokens, self.fee_bps)
+                if out_pool_first > event.real_sol_reserves:
+                    out_pool_first = 0
             except CycleError:
                 continue  # stale or empty pool snapshot; try the next one
             for buy, sell, out in (

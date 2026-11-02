@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import base58
 import pytest
 from solders.pubkey import Pubkey
 
@@ -151,11 +152,63 @@ def test_other_mints_are_ignored() -> None:
 
 
 @pytest.mark.parametrize(
-    "bad", [{"trailing_stop": 0}, {"trailing_stop": 1.5}, {"window": 0}]
+    "bad",
+    [
+        {"trailing_stop": 0},
+        {"trailing_stop": 1.5},
+        {"window": 0},
+        {"max_stall_slots": 0},
+        {"max_stall_slots": True},
+        {"entry_floor_pct": 0},
+        {"entry_floor_pct": 1.0},
+    ],
 )
 def test_rules_reject_invalid_fractions(bad: dict) -> None:
     with pytest.raises(ValueError):
         FlowRules(**bad)
+
+
+def test_velocity_stall_fires_when_peak_sol_stalls_for_max_slots() -> None:
+    rules = FlowRules(creator_sell=False, max_stall_slots=4)
+    assert rules.enabled
+    monitor = FlowMonitor(
+        mint=MINT,
+        creator=CREATOR,
+        rules=rules,
+        entry_sol=5_000_000_000,
+        entry_slot=10,
+    )
+    assert monitor.observe(_event(real=5_000_000_000, slot=13)) is None
+    assert monitor.observe(_event(real=6_000_000_000, slot=13)) is None
+    assert monitor.observe(_event(real=5_900_000_000, slot=16)) is None
+    signal = monitor.observe(_event(real=5_900_000_000, slot=17))
+    assert signal is not None
+    assert signal.rule == "velocity_stall"
+    assert signal.slot == 17
+
+
+def test_entry_floor_fires_before_peak_advance_and_disarms_after_higher_peak() -> None:
+    rules = FlowRules(creator_sell=False, entry_floor_pct=0.15)
+    assert rules.enabled
+    monitor = FlowMonitor(
+        mint=MINT,
+        creator=CREATOR,
+        rules=rules,
+        entry_sol=10_000_000_000,
+    )
+    assert monitor.observe(_event(real=9_000_000_000, is_buy=False)) is None
+    signal = monitor.observe(_event(real=8_500_000_000, is_buy=False))
+    assert signal is not None
+    assert signal.rule == "entry_floor"
+
+    disarmed = FlowMonitor(
+        mint=MINT,
+        creator=CREATOR,
+        rules=rules,
+        entry_sol=10_000_000_000,
+    )
+    assert disarmed.observe(_event(real=11_000_000_000, is_buy=True)) is None
+    assert disarmed.observe(_event(real=8_000_000_000, is_buy=False)) is None
 
 
 def _encode_trade_event(parser: IDLParser, **overrides: object) -> str:
@@ -182,8 +235,6 @@ def _encode_trade_event(parser: IDLParser, **overrides: object) -> str:
         "real_quote_reserves": 18_000_000_000,
     }
     fields.update(overrides)
-    import base58
-
     body = b"".join(
         [
             base58.b58decode(fields["mint"]),
@@ -1147,3 +1198,156 @@ async def test_unstarted_geyser_stream_invalidates_subscriptions(stage: str) -> 
     with pytest.raises(TradeFlowLossError):
         hub.subscribe(MINT).get_nowait()
     assert hub.dropped == 1
+
+
+@pytest.mark.asyncio
+async def test_geyser_stream_failure_before_first_update_increments_reconnect_attempt() -> (
+    None
+):
+    listener = UniversalGeyserListener(
+        "offline.invalid:443", "", "x-token", platforms=[Platform.PUMP_FUN]
+    )
+
+    async def fail_before_first_update() -> None:
+        raise ConnectionError("Stream removed")  # noqa: TRY003
+
+    call = MagicMock()
+    call.initial_metadata = AsyncMock(return_value=())
+    call.__aiter__.side_effect = lambda: call
+    call.__anext__.side_effect = fail_before_first_update
+    listener._create_geyser_connection = AsyncMock(
+        return_value=(
+            SimpleNamespace(Subscribe=lambda _requests: call),
+            SimpleNamespace(close=AsyncMock()),
+        )
+    )
+    observed_attempts: list[int] = []
+
+    async def record_attempt(attempt: int, _failure: Exception) -> None:
+        observed_attempts.append(attempt)
+        if len(observed_attempts) >= 2:  # noqa: PLR2004
+            raise asyncio.CancelledError
+
+    listener.wait_before_reconnect = record_attempt
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(listener.listen_for_tokens(AsyncMock()), 1)
+
+    assert observed_attempts == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_consume_trade_flow_skips_pre_fill_events_and_propagates_entry_slot() -> (
+    None
+):
+    parser = IDLParser(
+        str(Path(__file__).resolve().parents[1] / "idl/pump_fun_idl.json")
+    )
+    hub = TradeFlowHub(parser)
+    token = TokenInfo(
+        name="Token",
+        symbol="TOK",
+        uri="",
+        mint=Pubkey.from_string(MINT),
+        platform=Platform.PUMP_FUN,
+        creator=Pubkey.from_string(CREATOR),
+        slot=1,
+        real_sol_reserves=5_000_000_000,
+        state_from_event=True,
+    )
+    trader = object.__new__(UniversalTrader)
+    trader.trade_hub = hub
+    trader.gate_rules = GateRules(
+        mayhem_only=False,
+        min_buyers=1,
+        min_real_sol=0.0,
+        max_real_sol=None,
+        min_wait_slots=0,
+        max_wait_slots=20,
+    )
+    trader.flow_rules = FlowRules(creator_sell=True, max_stall_slots=4)
+    trader._gate_queues = {MINT: hub.subscribe(MINT)}
+    trader._flow_signals = {}
+    trader._flow_latched = set()
+    trader._flow_wakeups = {MINT: asyncio.Event()}
+    trader._active_positions = {}
+    trader._reserved_mints = {MINT}
+    trader.processed_tokens = set()
+    trader._write_recovery_journal = lambda: None
+    trader._is_repeat_creator = lambda _token: False
+
+    entry_slot = 10
+    stall_slot = 14
+    trader._gate_queues[MINT].put_nowait(_event(slot=entry_slot))
+    decision = await trader._await_entry_gate(token)
+    assert decision is not None and decision.accept
+    assert trader._entry_slots[MINT] == entry_slot
+
+    # Inject a pre-fill creator sell (slot < entry_slot) directly into the deque
+    # and a post-fill stall event at slot 14 (4 slots after entry_slot 10).
+    trader._gate_queues[MINT]._queue.appendleft(
+        _event(user=CREATOR, is_buy=False, slot=entry_slot - 1)
+    )
+    trader._gate_queues[MINT].put_nowait(_event(slot=stall_slot, real=5_000_000_000))
+
+    position = SimpleNamespace(entry_price=1.0, is_active=True)
+    task = asyncio.create_task(trader._consume_trade_flow(token, position))
+    try:
+        await asyncio.wait_for(trader._flow_wakeups[MINT].wait(), 1)
+        signal = trader._flow_signals[MINT]
+        assert signal.rule == "velocity_stall"
+        assert signal.slot == stall_slot
+    finally:
+        position.is_active = False
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 1)
+
+    trader._remove_position(token.mint)
+    assert MINT not in trader._entry_slots
+    assert MINT not in trader._flow_signals
+    assert MINT not in trader._flow_wakeups
+    assert MINT not in trader._gate_queues
+
+
+@pytest.mark.asyncio
+async def test_consume_trade_flow_recovers_from_overflowed_gate_queue() -> None:
+    parser = IDLParser(
+        str(Path(__file__).resolve().parents[1] / "idl/pump_fun_idl.json")
+    )
+    hub = TradeFlowHub(parser)
+    old_queue = hub.subscribe(MINT)
+    old_queue.invalidate("overflow")
+
+    token = TokenInfo(
+        name="Token",
+        symbol="TOK",
+        uri="",
+        mint=Pubkey.from_string(MINT),
+        platform=Platform.PUMP_FUN,
+        creator=Pubkey.from_string(CREATOR),
+        slot=5,
+    )
+    trader = object.__new__(UniversalTrader)
+    trader.trade_hub = hub
+    trader.flow_rules = FlowRules(creator_sell=True)
+    trader._gate_queues = {MINT: old_queue}
+    trader._flow_signals = {}
+    trader._flow_latched = set()
+    trader._flow_wakeups = {MINT: asyncio.Event()}
+    trader._entry_slots = {MINT: 5}
+
+    position = SimpleNamespace(entry_price=1.0, is_active=True)
+    task = asyncio.create_task(trader._consume_trade_flow(token, position))
+    try:
+        await asyncio.sleep(0)
+        fresh_queue = trader._gate_queues[MINT]
+        assert fresh_queue is not old_queue
+        assert fresh_queue.loss_reason is None
+        fresh_queue.put_nowait(_event(user=CREATOR, is_buy=False, slot=6))
+        await asyncio.wait_for(trader._flow_wakeups[MINT].wait(), 1)
+        assert trader._flow_signals[MINT].rule == "creator_sell"
+    finally:
+        position.is_active = False
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 1)

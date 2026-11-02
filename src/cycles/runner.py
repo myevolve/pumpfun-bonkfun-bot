@@ -419,22 +419,27 @@ async def evaluate_cycle(
     # The program itself refuses COMPLETE curves even with reserves, so a
     # mixed-bank read that pairs a pre-completion curve snapshot with a
     # post-completion pool must be rejected here, not on-chain.
+    real_quote = curve_state.get("real_sol_reserves", 0)
+    real_token = curve_state.get("real_token_reserves", 0)
     if (
         vsol <= 0
         or curve_state.get("complete") is not False
-        or curve_state.get("real_sol_reserves", 0) <= 0
-        or curve_state.get("real_token_reserves", 0) <= 0
+        or real_quote <= 0
+        or real_token <= 0
     ):
         return None, -amount_lamports
 
     # Direction 1: buy tokens on curve, sell on AMM
     curve_tokens = curve_buy_out(vsol, vtoken, amount_lamports, curve_fee_bps)
+    if curve_tokens > real_token:
+        curve_tokens = 0
     amm_out_d1 = amm_pool.quote(mint, curve_tokens) if curve_tokens > 0 else 0
 
     # Direction 2: buy tokens on AMM, sell on curve
     amm_tokens = amm_pool.quote(SOL, amount_lamports)
     curve_out_d2 = curve_sell_out(vsol, vtoken, amm_tokens, curve_fee_bps)
-
+    if curve_out_d2 > real_quote:
+        curve_out_d2 = 0
     best_out = max(amm_out_d1, curve_out_d2)
     # Net gate: a gross spread that the transaction fee consumes is not an
     # opportunity, so the candidate is dropped rather than reported.
@@ -524,6 +529,8 @@ def evaluate_pamm_cycle(
 
     # Direction 1: buy tokens on curve, sell on PumpSwap
     curve_tokens = curve_buy_out(vsol, vtoken, amount_lamports, curve_fee_bps)
+    if curve_tokens > real_token:
+        curve_tokens = 0
     pamm_out_d1 = 0
     if curve_tokens > 0:
         try:
@@ -552,21 +559,25 @@ def evaluate_pamm_cycle(
     # charge lp+proto+creator on the quote INPUT (max_sol_cost); model it
     # with the current tier instead of quoting fee-free (audited: 12,500
     # lamports of phantom margin per cycle at fresh-pool tier).
+    pamm_tokens = 0
+    curve_out_d2 = 0
     try:
         fees0 = _fee_snapshot_cached().config.regular_tiers[0].fees
         pamm_buy_bps = fees0.lp_fee_bps + fees0.protocol_fee_bps + fees0.creator_fee_bps
         pamm_buy_fee = (amount_lamports * pamm_buy_bps + 9_999) // 10_000
-    except Exception:
-        pamm_buy_fee = 0
-    net_quote_in = amount_lamports - pamm_buy_fee
-    pamm_tokens = quote_pamm_buy(
-        base_reserve_raw=pamm_state["base_reserve_raw"],
-        quote_reserve_raw=pamm_state["quote_reserve_raw"],
-        virtual_quote_reserve_raw=pamm_state["virtual_quote_reserve_raw"],
-        quote_amount_in_raw=net_quote_in,
-    )
-    curve_out_d2 = curve_sell_out(vsol, vtoken, pamm_tokens, curve_fee_bps)
-
+        net_quote_in = amount_lamports - pamm_buy_fee
+        if net_quote_in > 0:
+            pamm_tokens = quote_pamm_buy(
+                base_reserve_raw=pamm_state["base_reserve_raw"],
+                quote_reserve_raw=pamm_state["quote_reserve_raw"],
+                virtual_quote_reserve_raw=pamm_state["virtual_quote_reserve_raw"],
+                quote_amount_in_raw=net_quote_in,
+            )
+            curve_out_d2 = curve_sell_out(vsol, vtoken, pamm_tokens, curve_fee_bps)
+            if curve_out_d2 > real_quote:
+                curve_out_d2 = 0
+    except Exception as exc:
+        logger.debug(f"pAMM buy quote failed for {mint[:12]}: {exc}")
     # All-in gate: the margin carries the transaction's own fee, priced with
     # the same estimator and limits this runner submits with, so a candidate is
     # never reported gross while expected_out_raw stays the pool output.
@@ -778,7 +789,7 @@ async def run_session(
                         time.time(),
                         pumpswap.fee_schedule.require_snapshot(),
                     )
-                except Exception:
+                except Exception:  # noqa: S110
                     pass
 
                 # Discover recently graduated coins
@@ -1503,7 +1514,7 @@ async def run_event_session(
                         try:
                             lb_status = await letsbonk_reader.status(lb_mint)
                             lb_val = int(lb_status) if lb_status is not None else -1
-                        except Exception:
+                        except Exception:  # noqa: S112
                             continue
                         last = letsbonk_watch[lb_mint]
                         # While FUNDING, snapshot the curve reserves into
@@ -1527,7 +1538,7 @@ async def run_event_session(
                                         "real_sol": lb_curve["real_sol_reserves"],
                                         "real_token": lb_curve["real_token_reserves"],
                                     }
-                            except Exception:  # noqa: BLE001
+                            except Exception:  # noqa: BLE001, S110
                                 pass
                             continue
                         # Flip detection: int entries flip on value; dict

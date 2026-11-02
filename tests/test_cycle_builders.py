@@ -14,8 +14,9 @@ from types import SimpleNamespace
 import pytest
 from solders.pubkey import Pubkey
 
+import cycles.runner as runner_mod
 from core.client import COMPUTE_BUDGET_PROGRAM_ID, estimate_transaction_fee_lamports
-from core.cycles.core import AMM, CPMM
+from core.cycles.core import AMM, CPMM, SOL
 from core.cycles.discovery import CycleCandidate, CycleLeg
 from core.pubkeys import ASSOCIATED_TOKEN_PROGRAM, TOKEN_PROGRAM, WSOL_MINT
 from cycles.builders import (
@@ -34,7 +35,6 @@ from cycles.runner import (
     cycle_fee_lamports,
     evaluate_pool_pair_cycle,
 )
-from core.cycles.core import SOL
 from platforms.pumpfun.pumpswap import (
     PUMP_SWAP_GLOBAL_CONFIG_DISCRIMINATOR,
     PumpSwapAddresses,
@@ -347,3 +347,41 @@ def test_pool_pair_candidate_is_net_of_the_wire_fee() -> None:
     )
     assert profitable is not None
     assert margin == 5_000
+
+
+@pytest.mark.asyncio
+async def test_cycle_evaluators_enforce_real_reserve_caps_and_fail_closed_on_missing_pamm_fees(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    amount = 10_000_000
+    fee = 95_000
+    curve = _curve_state()
+    pamm = _pamm_state()
+    # Rich pool that would pay 2x on either side if the curve leg were executable:
+    pamm["quote_reserve_raw"] = 500_000_000_000
+    pamm["base_reserve_raw"] = 100_000_000_000_000
+
+    # 1. When PumpSwap fee snapshot cache is unset, evaluate_pamm_cycle must fail closed
+    #    in BOTH directions instead of falling back to pamm_buy_fee = 0.
+    monkeypatch.setattr(runner_mod, "_fee_snapshot_cache", None)
+    cand_no_fee, _ = runner_mod.evaluate_pamm_cycle(
+        curve, pamm, str(MINT), amount, 125, fee_lamports=fee
+    )
+    assert cand_no_fee is None
+
+    # 2. In evaluate_cycle, if curve_tokens > real_token_reserves on Direction 1
+    #    and curve_out_d2 > real_sol_reserves on Direction 2, both legs are rejected.
+    capped_curve = {
+        **curve,
+        "real_token_reserves": 100,  # too few real tokens for a 0.01 SOL buy
+        "real_sol_reserves": 1_000,  # too little real SOL to pay out a 0.01 SOL sell
+    }
+    rich_amm = SimpleNamespace(
+        program=AMM,
+        address="synthetic-amm",
+        quote=lambda m, _v: 50_000_000_000_000 if m == SOL else 20_000_000,
+    )
+    cand_capped, _ = await runner_mod.evaluate_cycle(
+        capped_curve, rich_amm, str(MINT), amount, 125, 25, fee_lamports=fee
+    )
+    assert cand_capped is None

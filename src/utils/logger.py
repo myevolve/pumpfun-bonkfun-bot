@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 _CORRELATION_FIELDS = ("bot_id", "event_id", "intent_id", "signature")
-_LOG_CONTEXT: ContextVar[dict[str, str]] = ContextVar("log_context", default={})
+_LOG_CONTEXT: ContextVar[dict[str, str]] = ContextVar("log_context", default={})  # noqa: B039
 _SECRET_DIGESTS: set[bytes] = set()
 _LOCK = threading.RLock()
 _loggers: dict[str, logging.Logger] = {}
@@ -47,6 +47,10 @@ _SENSITIVE_LABEL_RE = re.compile(
     r"|[^\s,\"'&}\]]+)"
 )
 _URL_USERINFO_RE = re.compile(r"(?i)\b((?:https?|wss?|grpcs?)://)[^/@\s]+@")
+_URL_CREDENTIAL_RE = re.compile(
+    r"(?i)\b((?:https?|wss?|grpcs?)://[^\s\"'<>/?#]+/(?:v\d+/|api/|rpc/)?)"
+    r"([A-Za-z0-9_-]{20,})(?=[/?#\"'\s]|$)"
+)
 _BASE58_TOKEN_RE = re.compile(
     r"(?<![1-9A-HJ-NP-Za-km-z])[1-9A-HJ-NP-Za-km-z]{32,128}"
     r"(?![1-9A-HJ-NP-Za-km-z])"
@@ -73,9 +77,10 @@ def register_secret(secret: str | bytes | bytearray) -> None:
         _SECRET_DIGESTS.add(sha256(secret_text.encode("ascii")).digest())
 
 
-def _redact(value: Any) -> str:
+def _redact_text(value: Any) -> str:
     text = str(value)
     text = _URL_USERINFO_RE.sub(r"\1[REDACTED]@", text)
+    text = _URL_CREDENTIAL_RE.sub(r"\1[REDACTED]", text)
     text = _SENSITIVE_LABEL_RE.sub(r"\1\2[REDACTED]", text)
 
     def redact_registered(match: re.Match[str]) -> str:
@@ -85,6 +90,10 @@ def _redact(value: Any) -> str:
             return "[REDACTED]" if digest in _SECRET_DIGESTS else candidate
 
     return _BASE58_TOKEN_RE.sub(redact_registered, text)
+
+
+def _redact(value: Any) -> str:
+    return _redact_text(value)
 
 
 def _sanitize_argument(value: Any, _seen: set[int] | None = None) -> Any:

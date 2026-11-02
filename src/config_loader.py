@@ -110,6 +110,8 @@ ALLOWED_CONFIG_KEYS: dict[str, set[str] | None] = {
         "single_sell_pct",
         "net_outflow_pct",
         "window",
+        "max_stall_slots",
+        "entry_floor_pct",
     },
     "entry_gate": {
         "enabled",
@@ -119,7 +121,12 @@ ALLOWED_CONFIG_KEYS: dict[str, set[str] | None] = {
         "max_buyers",
         "max_real_sol",
         "min_real_sol",
+        "max_single_buy_sol",
+        "max_buyer_share",
+        "max_inflow_sol_per_slot",
+        "max_creator_launches",
         "require_creator_holding",
+        "min_wait_slots",
         "max_wait_slots",
         "max_wait_ms",
     },
@@ -191,7 +198,9 @@ INTEGER_RANGES: dict[str, tuple[int | None, int | None, bool, bool]] = {
     "retries.wait_after_buy": (0, None, True, True),
     "trade.extreme_fast_token_amount": (1, None, True, True),
     "flow_exit.window": (1, 100, True, True),
+    "flow_exit.max_stall_slots": (1, 1000, True, True),
     "entry_gate.min_buyers": (0, 50, True, True),
+    "entry_gate.min_wait_slots": (0, 1000, True, True),
     "entry_gate.max_wait_slots": (1, 1000, True, True),
     "entry_gate.max_wait_ms": (1, 300_000, True, True),
     "trade.max_exit_sell_attempts": (1, 100, True, True),
@@ -226,8 +235,12 @@ NUMBER_RANGES: dict[str, tuple[float | None, float | None, bool, bool]] = {
     "flow_exit.trailing_stop": (0, 1, False, False),
     "flow_exit.single_sell_pct": (0, 1, False, False),
     "flow_exit.net_outflow_pct": (0, 1, False, False),
+    "flow_exit.entry_floor_pct": (0, 1, False, False),
     "entry_gate.max_real_sol": (0, None, False, True),
     "entry_gate.min_real_sol": (0, None, True, True),
+    "entry_gate.max_single_buy_sol": (0, None, False, True),
+    "entry_gate.max_buyer_share": (0, 1, False, True),
+    "entry_gate.max_inflow_sol_per_slot": (0, None, False, True),
     "priority_fees.extra_percentage": (0, 1, True, True),
     "filters.max_token_age": (0, None, True, True),
     "retries.wait_after_creation": (0, None, True, True),
@@ -453,7 +466,7 @@ def _validate_unresolved_placeholders(value: Any, path: str = "<root>") -> None:
     if isinstance(value, Mapping):
         for key, nested in value.items():
             _validate_unresolved_placeholders(nested, f"{path}.{key}")
-    elif isinstance(value, (list, tuple)):
+    elif isinstance(value, list | tuple):
         for index, nested in enumerate(value):
             _validate_unresolved_placeholders(nested, f"{path}[{index}]")
 
@@ -494,14 +507,42 @@ def validate_config(config: dict[str, Any]) -> None:
         if not 0 <= max_buyers <= 50:
             raise ValueError("entry_gate.max_buyers must be between 0 and 50")
 
+    present, max_creator_launches = _optional_nested_value(
+        config, "entry_gate.max_creator_launches"
+    )
+    if present and max_creator_launches is not None:
+        if isinstance(max_creator_launches, bool) or not isinstance(
+            max_creator_launches, int
+        ):
+            raise ValueError(
+                "entry_gate.max_creator_launches must be an integer or null"
+            )
+        if max_creator_launches < 1:
+            raise ValueError("entry_gate.max_creator_launches must be >= 1")
+
     for path, limits in INTEGER_RANGES.items():
         present, value = _optional_nested_value(config, path)
-        if not present:
+        if not present or (path == "flow_exit.max_stall_slots" and value is None):
             continue
         if isinstance(value, bool) or not isinstance(value, int):
             raise ValueError(f"{path} must be an integer")
         _validate_range(path, value, limits)
 
+    has_min_wait, min_wait_slots = _optional_nested_value(
+        config, "entry_gate.min_wait_slots"
+    )
+    has_max_wait, max_wait_slots = _optional_nested_value(
+        config, "entry_gate.max_wait_slots"
+    )
+    if (
+        has_min_wait
+        and min_wait_slots is not None
+        and min_wait_slots
+        > (max_wait_slots if has_max_wait and max_wait_slots is not None else 3)
+    ):
+        raise ValueError(  # noqa: TRY003
+            "entry_gate.min_wait_slots must be <= entry_gate.max_wait_slots"
+        )
     from core.pubkeys import resolve_quote_mint
 
     for path in QUOTE_CAP_FIELDS:
@@ -519,7 +560,21 @@ def validate_config(config: dict[str, Any]) -> None:
 
     for path, limits in NUMBER_RANGES.items():
         present, value = _optional_nested_value(config, path)
-        if not present:
+        if not present or (
+            value is None
+            and (
+                path.startswith("flow_exit.")
+                or path
+                in {
+                    "entry_gate.max_real_sol",
+                    "entry_gate.max_single_buy_sol",
+                    "entry_gate.max_buyer_share",
+                    "entry_gate.max_inflow_sol_per_slot",
+                    "trade.take_profit_percentage",
+                    "trade.stop_loss_percentage",
+                }
+            )
+        ):
             continue
         validate_finite_number(value, path)
         _validate_range(path, value, limits)
@@ -659,10 +714,10 @@ def get_platform_from_config(config: dict) -> Platform:
     platform_str = config.get("platform", "pump_fun")
     try:
         return Platform(platform_str)
-    except ValueError:
+    except ValueError as exc:
         raise ValueError(
             f"Invalid platform '{platform_str}'. Must be one of: {[p.value for p in Platform]}"
-        )
+        ) from exc
 
 
 def validate_platform_listener_combination(

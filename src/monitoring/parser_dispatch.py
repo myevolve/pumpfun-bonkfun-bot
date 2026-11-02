@@ -194,7 +194,7 @@ def parse_normalized_event(
                     if _same_creation(item[0], log_token)
                 ]
                 if len(candidates) != 1:
-                    logger.error(
+                    logger.warning(
                         "Rejected uncorrelated or ambiguous %s log creation at %s",
                         platform.value,
                         platform_event.signature,
@@ -223,7 +223,7 @@ def parse_normalized_event(
                         tokens.append(accepted)
                 continue
             if platform_event.instructions:
-                logger.error(
+                logger.warning(
                     "Rejected %s log creation without a matching program instruction "
                     "at %s",
                     platform.value,

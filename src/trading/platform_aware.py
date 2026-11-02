@@ -18,6 +18,7 @@ from core.client import (
     TransactionSubmissionUnknown,
     estimate_transaction_fee_lamports,
 )
+from core.execution_policy import ExecutionBlocked
 from core.priority_fee.manager import PriorityFeeManager
 from core.pubkeys import (
     TOKEN_DECIMALS,
@@ -222,6 +223,14 @@ async def _read_pool_state_with_retry(  # noqa: PLR0913
                 )
                 result = (state, None)
         except Exception as error:  # noqa: BLE001
+            if isinstance(error, ValueError) and any(
+                marker in str(error)
+                for marker in (
+                    "virtual_token_reserves must be a positive raw u64 integer",
+                    "bonding curve is complete",
+                )
+            ):
+                raise
             last_error = error
             if monotonic() + delay_seconds > deadline:
                 break
@@ -627,6 +636,15 @@ class PlatformAwareBuyer(Trader):
                         f"Invalid price_per_token: {token_price_sol} for "
                         f"pool {pool_address} (mint: {token_info.mint})"
                     )
+                for reserve_field in (
+                    "virtual_quote_reserves",
+                    "virtual_token_reserves",
+                    "real_token_reserves",
+                    "real_sol_reserves",
+                ):
+                    reserve_val = pool_state.get(reserve_field)
+                    if _is_raw_u64(reserve_val):
+                        setattr(token_info, reserve_field, reserve_val)
                 token_info.is_mayhem_mode = pool_state.get("is_mayhem_mode", False)
                 token_info.is_cashback_coin = pool_state.get(
                     "is_cashback_coin", token_info.is_cashback_coin
@@ -926,6 +944,68 @@ class PlatformAwareBuyer(Trader):
             )
         except EvidencePersistenceError:
             raise
+        except ExecutionBlocked as e:
+            logger.info(
+                "Dry-run buy submission blocked for %s: %s", token_info.symbol, e
+            )
+            return TradeResult(
+                success=False,
+                platform=token_info.platform,
+                tx_signature=submitted_signature,
+                error_message=str(e),
+                amount=token_amount,
+                price=token_price_sol,
+                amount_raw=expected_token_amount_raw,
+                quote_amount_raw=max_quote_amount_raw,
+                fee_lamports=transaction_fee_lamports,
+                account_balance_baseline_raw=account_balance_baseline_raw,
+                status=(
+                    TransactionStatus.UNKNOWN.value
+                    if submitted_signature is not None
+                    else None
+                ),
+            )
+        except ValueError as e:
+            if any(
+                marker in str(e)
+                for marker in (
+                    "virtual_token_reserves must be a positive raw u64 integer",
+                    "bonding curve is complete",
+                )
+            ):
+                logger.info(
+                    "Skipping buy for %s on completed curve: %s",
+                    token_info.symbol,
+                    e,
+                )
+                return TradeResult(
+                    success=False,
+                    platform=token_info.platform,
+                    error_message=str(e),
+                    status=getattr(
+                        TransactionStatus,
+                        "PREFLIGHT_REJECTED",
+                        "preflight_rejected",
+                    ),
+                )
+            logger.exception("Buy operation failed")
+            return TradeResult(
+                success=False,
+                platform=token_info.platform,
+                tx_signature=submitted_signature,
+                error_message=str(e),
+                amount=token_amount,
+                price=token_price_sol,
+                amount_raw=expected_token_amount_raw,
+                quote_amount_raw=max_quote_amount_raw,
+                fee_lamports=transaction_fee_lamports,
+                account_balance_baseline_raw=account_balance_baseline_raw,
+                status=(
+                    TransactionStatus.UNKNOWN.value
+                    if submitted_signature is not None
+                    else None
+                ),
+            )
         except Exception as e:
             logger.exception("Buy operation failed")
             return TradeResult(
@@ -1140,7 +1220,7 @@ class PlatformAwareBuyer(Trader):
             Address where SOL is transferred during buy
 
         Raises:
-            NotImplementedError: If platform SOL destination is not implemented
+            ValueError: If platform is unsupported or quote_vault mismatches metadata
         """
         if token_info.platform == Platform.PUMP_FUN:
             # For pump.fun, SOL goes directly to bonding curve
@@ -1148,17 +1228,21 @@ class PlatformAwareBuyer(Trader):
                 return token_info.bonding_curve
             return address_provider.derive_pool_address(token_info.mint)
         elif token_info.platform == Platform.LETS_BONK:
-            # For letsbonk, SOL goes to quote_vault (WSOL vault)
-            if hasattr(token_info, "quote_vault") and token_info.quote_vault:
-                return token_info.quote_vault
-            # Derive quote_vault if not available
-            return address_provider.derive_quote_vault(token_info.mint)
+            quote_mint = normalize_quote_mint(token_info.quote_mint)
+            derived = address_provider.derive_quote_vault(token_info.mint, quote_mint)
+            if (
+                getattr(address_provider, "platform", None) is Platform.LETS_BONK
+                and token_info.quote_vault is not None
+                and token_info.quote_vault != derived
+            ):
+                raise ValueError("LetsBonk quote_vault does not match pool metadata")
+            return (
+                token_info.quote_vault
+                if token_info.quote_vault is not None
+                else derived
+            )
 
-        raise NotImplementedError(
-            f"SOL destination not implemented for platform {token_info.platform.value}. "
-            f"Add platform-specific logic to _get_sol_destination() to specify where "
-            f"SOL is transferred during buy transactions for this platform."
-        )
+        raise ValueError(f"Unsupported trading platform: {token_info.platform!r}")
 
     def _get_cu_override(self, operation: str, platform: Platform) -> int | None:
         """Get compute unit override from configuration.
@@ -1249,7 +1333,7 @@ class PlatformAwareSeller(Trader):
             raise ValueError("token_amount_raw must be a positive integer")
         if token_price is not None and (
             isinstance(token_price, bool)
-            or not isinstance(token_price, (int, float))
+            or not isinstance(token_price, int | float)
             or not isfinite(token_price)
             or token_price <= 0
         ):

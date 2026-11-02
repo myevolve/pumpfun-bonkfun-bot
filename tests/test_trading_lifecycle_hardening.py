@@ -7,6 +7,7 @@ import asyncio
 import fcntl
 import json
 import logging
+from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from time import monotonic
 from types import SimpleNamespace
@@ -26,11 +27,14 @@ from core.pubkeys import USDC_MINT, SystemAddresses
 from core.transaction_ledger import EvidencePersistenceError, TransactionLedger
 from core.transaction_state import TransactionOutcome
 from interfaces.core import Platform, TokenInfo
+from learning.journal import LessonJournal
+from learning.report import load_report
 from monitoring.trade_flow import (
     FlowRules,
     FlowSignal,
     GateRules,
     TradeEvent,
+    TradeFlowHub,
     TradeQueue,
 )
 from platforms.pumpfun.curve_manager import PumpFunCurveManager
@@ -2148,6 +2152,53 @@ async def test_single_token_listener_failure_propagates_without_waiting_for_time
 
 
 @pytest.mark.asyncio
+async def test_queue_refusal_cleans_subscription_and_persists_paper_exclusions(
+    tmp_path: Path,
+) -> None:
+    trader = _lifecycle_trader(yolo_mode=True)
+    trader.token_queue = asyncio.Queue(maxsize=1)
+    trader.trade_hub = TradeFlowHub(Mock())
+    trader._gate_queues = {}
+    trader.max_token_age = 0.001
+    trader._handle_token = AsyncMock()
+    admitted, refused = _token(Platform.LETS_BONK), _token(Platform.LETS_BONK)
+    with closing(LessonJournal(tmp_path / "lessons.sqlite3")) as journal:
+        trader.lesson_journal = journal
+        assert await trader._queue_token(admitted)
+        assert not await trader._queue_token(refused)
+        assert str(refused.mint) not in trader._reserved_mints
+        assert str(refused.mint) not in trader.token_timestamps
+        assert str(refused.mint) not in trader._gate_queues
+        assert list(trader.trade_hub._subscribers) == [str(admitted.mint)]
+        trader.token_timestamps[str(admitted.mint)] = monotonic() - 10
+        processor = asyncio.create_task(UniversalTrader._process_token_queue(trader))
+        try:
+            await asyncio.wait_for(trader.token_queue.join(), timeout=1)
+        finally:
+            processor.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await processor
+        assert not trader.trade_hub.active
+        trader._handle_token.assert_not_awaited()
+        report = load_report(db_path=tmp_path / "lessons.sqlite3")
+        exclusions = {row["reason"]: row for row in report["observation_exclusions"]}
+        assert {reason: row["n"] for reason, row in exclusions.items()} == {
+            "token_queue_full": 1,
+            "stale_token": 1,
+        }
+        assert exclusions["stale_token"]["mean_queue_age_s"] >= 10
+        assert exclusions["token_queue_full"]["mean_queue_age_s"] is None
+        assert report["skip_reasons"] == {}
+        assert report["paper_coverage"]["planned_entries"] == 0
+        journal.close()
+        assert await trader._queue_token(_token(Platform.LETS_BONK))
+        with pytest.raises(EvidencePersistenceError):
+            await trader._queue_token(refused)
+        assert str(refused.mint) not in trader._gate_queues
+        assert str(refused.mint) not in trader._reserved_mints
+
+
+@pytest.mark.asyncio
 async def test_recovered_token_keeps_original_age_when_queued() -> None:
     trader = _lifecycle_trader(yolo_mode=True)
     trader.max_token_age = 10
@@ -3188,7 +3239,7 @@ async def test_flow_signal_wakes_monitor_and_sells_unconditionally_at_event_pric
     trader.price_read_outage_budget = 300.0
     trader.flow_rules = FlowRules(creator_sell=True)
     trader.geyser_endpoint = "geyser.invalid"
-    trader.geyser_api_token = "token"
+    trader.geyser_api_token = "token"  # noqa: S105
     trader.geyser_auth_type = "x-token"
     trader._flow_signals = {}
     trader._flow_wakeups = {}
@@ -3273,7 +3324,7 @@ async def test_flow_exit_latches_across_a_reverted_sell_with_no_further_events(
     trader.price_read_outage_budget = 300.0
     trader.flow_rules = FlowRules(creator_sell=True)
     trader.geyser_endpoint = "geyser.invalid"
-    trader.geyser_api_token = "token"
+    trader.geyser_api_token = "token"  # noqa: S105
     trader.geyser_auth_type = "x-token"
     trader._gate_queues = {}
     calculate_token_price = AsyncMock(return_value=1.05)
@@ -3974,6 +4025,169 @@ async def test_rollover_strategy_holds_pool_rise_and_sells_on_five_percent_drop(
     assert position.is_active is False
     assert position.exit_reason is ExitReason.GRADUATED
     assert position.exit_price == 1.88
+
+
+@pytest.mark.asyncio
+async def test_rollover_strategy_rides_out_early_shakeout_dip_above_entry_and_sells_after_recovery() -> (
+    None
+):
+    """Within the 10s post-graduation shakeout window, dips below pool_open_price
+    that stay above entry_price and above 0.85 * pool_open_price are ridden out;
+    rallies above pool_open_price tighten back to the 5% trailing stop."""
+    trader = object.__new__(UniversalTrader)
+    token = _token(Platform.PUMP_FUN)
+    token.creator = Pubkey.new_unique()
+    token.pool_status = "funding"
+    position = Position.create_from_buy_result(
+        mint=token.mint,
+        symbol=token.symbol,
+        entry_price=1.0,
+        quantity=2.0,
+        quantity_raw=2_000_000,
+        quote_amount_raw=100_000,
+        buy_fee_lamports=40_000,
+        position_id="buy-signature",
+    )
+    trader._shutdown_event = asyncio.Event()
+    trader.exit_strategy = "rollover"
+    trader.price_check_interval = 0.001
+    trader.max_exit_sell_attempts = 1
+    trader.price_read_outage_budget = 300.0
+    trader.flow_rules = None
+    trader._flow_signals = {}
+    trader._flow_wakeups = {}
+    trader._gate_queues = {}
+
+    # Poll 1: pool open at 1.80 (seeds open=1.80, peak=1.80)
+    # Poll 2: -8% early shakeout dip to 1.656 (> 1.0 entry and > 1.80 * 0.85 = 1.53, holds)
+    # Poll 3: recovers and rallies to 2.00 (updates peak=2.00)
+    # Poll 4: -6% drop from 2.00 to 1.88 (above open=1.80, so 5% trailing stop fires!)
+    prices = iter([1.80, 1.656, 2.00, 1.88])
+
+    async def read_pool_path(*_args: object, **_kwargs: object) -> float:
+        token.pool_status = "pumpswap"
+        return next(prices)
+
+    calculate_token_price = AsyncMock(side_effect=read_pool_path)
+    trader.platform_implementations = SimpleNamespace(
+        curve_manager=SimpleNamespace(calculate_token_price=calculate_token_price)
+    )
+    trader.seller = SimpleNamespace(
+        execute=AsyncMock(
+            return_value=TradeResult(
+                success=True,
+                platform=Platform.PUMP_FUN,
+                tx_signature="sell-signature",
+                amount=2.0,
+                amount_raw=2_000_000,
+                price=1.88,
+                status=TransactionStatus.SUCCESS.value,
+            )
+        )
+    )
+    trader.solana_client = SimpleNamespace()
+    trader.wallet = SimpleNamespace()
+    trader.priority_fee_manager = SimpleNamespace()
+    trader.cleanup_mode = None
+    trader.cleanup_with_priority_fee = False
+    trader.cleanup_force_close_with_burn = False
+    trader._get_pool_address = lambda token_info: token_info.bonding_curve
+    trader._persist_position = lambda token_info, active_position: None
+    trader._log_trade = lambda *args, **kwargs: None
+    trader._remove_position = lambda mint: None
+
+    import trading.universal_trader as ut
+
+    ut.handle_cleanup_after_sell = AsyncMock(return_value=None)
+
+    await asyncio.wait_for(trader._monitor_position_until_exit(token, position), 5)
+
+    assert calculate_token_price.await_count == 4
+    assert position.is_active is False
+    assert position.exit_reason is ExitReason.GRADUATED
+    assert position.exit_price == 1.88
+
+
+@pytest.mark.asyncio
+async def test_rollover_strategy_unstabilized_dip_at_g_plus_six_triggers_immediate_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An un-stabilized -12% dip below pool_open_price at G+6.0s (1.584 < 1.80 * 0.90 = 1.62)
+    triggers immediate exit under the 5s-10s stabilization threshold."""
+    trader = object.__new__(UniversalTrader)
+    token = _token(Platform.PUMP_FUN)
+    token.creator = Pubkey.new_unique()
+    token.pool_status = "funding"
+    position = Position.create_from_buy_result(
+        mint=token.mint,
+        symbol=token.symbol,
+        entry_price=1.0,
+        quantity=2.0,
+        quantity_raw=2_000_000,
+        quote_amount_raw=100_000,
+        buy_fee_lamports=40_000,
+        position_id="buy-signature",
+    )
+    trader._shutdown_event = asyncio.Event()
+    trader.exit_strategy = "rollover"
+    trader.price_check_interval = 0.001
+    trader.max_exit_sell_attempts = 1
+    trader.price_read_outage_budget = 300.0
+    trader.flow_rules = None
+    trader._flow_signals = {}
+    trader._flow_wakeups = {}
+    trader._gate_queues = {}
+
+    clock = iter([100.0, 102.0, 106.0])
+    monkeypatch.setattr("trading.universal_trader.monotonic", lambda: next(clock))
+
+    # Poll 1 (G+0.0s): pool open at 1.80 (seeds open=1.80, peak=1.80)
+    # Poll 2 (G+2.0s): -12% early shakeout dip to 1.584 (> 1.80 * 0.85 = 1.53, holds)
+    # Poll 3 (G+6.0s): still at 1.584 (< 1.80 * 0.90 = 1.62, triggers immediate exit!)
+    prices = iter([1.80, 1.584, 1.584])
+
+    async def read_pool_path(*_args: object, **_kwargs: object) -> float:
+        token.pool_status = "pumpswap"
+        return next(prices)
+
+    calculate_token_price = AsyncMock(side_effect=read_pool_path)
+    trader.platform_implementations = SimpleNamespace(
+        curve_manager=SimpleNamespace(calculate_token_price=calculate_token_price)
+    )
+    trader.seller = SimpleNamespace(
+        execute=AsyncMock(
+            return_value=TradeResult(
+                success=True,
+                platform=Platform.PUMP_FUN,
+                tx_signature="sell-signature",
+                amount=2.0,
+                amount_raw=2_000_000,
+                price=1.584,
+                status=TransactionStatus.SUCCESS.value,
+            )
+        )
+    )
+    trader.solana_client = SimpleNamespace()
+    trader.wallet = SimpleNamespace()
+    trader.priority_fee_manager = SimpleNamespace()
+    trader.cleanup_mode = None
+    trader.cleanup_with_priority_fee = False
+    trader.cleanup_force_close_with_burn = False
+    trader._get_pool_address = lambda token_info: token_info.bonding_curve
+    trader._persist_position = lambda token_info, active_position: None
+    trader._log_trade = lambda *args, **kwargs: None
+    trader._remove_position = lambda mint: None
+
+    import trading.universal_trader as ut
+
+    ut.handle_cleanup_after_sell = AsyncMock(return_value=None)
+
+    await asyncio.wait_for(trader._monitor_position_until_exit(token, position), 5)
+
+    assert calculate_token_price.await_count == 3
+    assert position.is_active is False
+    assert position.exit_reason is ExitReason.GRADUATED
+    assert position.exit_price == 1.584
 
 
 @pytest.mark.asyncio

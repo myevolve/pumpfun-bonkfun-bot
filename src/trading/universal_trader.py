@@ -46,6 +46,7 @@ from core.priority_fee.manager import PriorityFeeManager
 from core.pubkeys import (
     TOKEN_DECIMALS,
     WSOL_MINT,
+    SystemAddresses,
     is_sol_paired,
     normalize_quote_mint,
     quote_units_per_token,
@@ -63,6 +64,10 @@ from learning.journal import (
     PAPER_HORIZONS,
     PAPER_MARK_MAX_LATENESS_S,
     ROLLOVER_EXIT_DROP_FRACTION,
+    ROLLOVER_SHAKEOUT_DROP_FRACTION,
+    ROLLOVER_SHAKEOUT_WINDOW_S,
+    ROLLOVER_STABILIZE_AFTER_S,
+    ROLLOVER_STABILIZE_DROP_FRACTION,
     GateSnapshot,
     JevScorer,
     LessonJournal,
@@ -113,6 +118,9 @@ DEFAULT_MAX_EXIT_SELL_ATTEMPTS = 3
 # Read-only price checks ride out RPC outages for this many seconds before the
 # monitor fails closed. 0 fails on the first read error.
 DEFAULT_PRICE_READ_OUTAGE_BUDGET = 300.0
+
+# Maximum concurrent entry-gate watchers when gate_rules is enabled.
+_MAX_CONCURRENT_GATES = 64
 
 
 def _resolve_quote_config(
@@ -221,6 +229,10 @@ class UniversalTrader:
     # tools) run without them.
     lesson_journal: object | None = None
     jev_scorer: object | None = None
+    rollover_shakeout_window_s: float = ROLLOVER_SHAKEOUT_WINDOW_S
+    rollover_shakeout_drop_fraction: float = ROLLOVER_SHAKEOUT_DROP_FRACTION
+    rollover_stabilize_after_s: float = ROLLOVER_STABILIZE_AFTER_S
+    rollover_stabilize_drop_fraction: float = ROLLOVER_STABILIZE_DROP_FRACTION
 
     def __init__(
         self,
@@ -463,11 +475,15 @@ class UniversalTrader:
         self._flow_signals: dict[str, FlowSignal] = {}
         self._flow_wakeups: dict[str, asyncio.Event] = {}
         self._flow_latched: set[str] = set()
+        self._paper_flow_watches: set[str] = set()
 
         # Learning (optional): per-transaction lesson journal with optional
         # Jev scoring. Both fail open (disabled) without configuration.
         self.lesson_journal = LessonJournal()
         self.jev_scorer = JevScorer(env_file=state_path("configs", "typesafe.env"))
+        self._creator_mints: dict[str, set[str]] = {}
+        self._allowed_creator_mints: set[str] = set()
+        self._creator_mints_journal: object | None = None
 
         # State tracking
         self.traded_mints: set[Pubkey] = set()
@@ -1338,6 +1354,13 @@ class UniversalTrader:
         self._active_positions.pop(token_key, None)
         self._reserved_mints.discard(token_key)
         self.processed_tokens.add(token_key)
+        getattr(self, "_flow_wakeups", {}).pop(token_key, None)
+        getattr(self, "_flow_signals", {}).pop(token_key, None)
+        if hasattr(self, "_flow_latched"):
+            self._flow_latched.discard(token_key)
+        getattr(self, "_entry_slots", {}).pop(token_key, None)
+        if hasattr(self, "_gate_queues"):
+            self._unsubscribe_trades(token_key)
         self._write_recovery_journal()
 
     @staticmethod
@@ -1904,7 +1927,6 @@ class UniversalTrader:
                     # skips most coins, so keep taking coins until a buy is
                     # attempted or the wait budget is spent.
                     wait_deadline = monotonic() + self.token_wait_timeout
-                    attempts_before = getattr(self, "_buy_attempts", 0)
                     while True:
                         if monotonic() >= wait_deadline:
                             logger.info(
@@ -2064,8 +2086,12 @@ class UniversalTrader:
 
             try:
                 await self._cleanup_resources()
-            except BaseException as exc:
-                shutdown_errors.append(("resource cleanup", exc))
+            except asyncio.CancelledError as cleanup_error:
+                if primary_error is None:
+                    primary_error = cleanup_error
+                    primary_traceback = cleanup_error.__traceback__
+            except BaseException as cleanup_error:
+                shutdown_errors.append(("resource cleanup", cleanup_error))
 
             await asyncio.sleep(0)
             monitor_errors: list[BaseException] = []
@@ -2092,11 +2118,17 @@ class UniversalTrader:
             if primary_error is None and shutdown_errors:
                 _, primary_error = shutdown_errors.pop(0)
                 primary_traceback = primary_error.__traceback__
-            for stage, error in shutdown_errors:
+            for stage, cleanup_error in shutdown_errors:
+                if isinstance(cleanup_error, asyncio.CancelledError):
+                    continue
                 logger.error(
                     "Secondary failure during %s",
                     stage,
-                    exc_info=(type(error), error, error.__traceback__),
+                    exc_info=(
+                        type(cleanup_error),
+                        cleanup_error,
+                        cleanup_error.__traceback__,
+                    ),
                 )
             if self._active_positions:
                 logger.warning(
@@ -2324,7 +2356,7 @@ class UniversalTrader:
             if token_key in self.processed_tokens or token_key in self._reserved_mints:
                 return False
             self._reserved_mints.add(token_key)
-            if not recovered:
+            if not recovered and self._needs_trade_subscription(token_info):
                 self._subscribe_trades(token_key)
             queued_at = monotonic()
             if recovered:
@@ -2340,6 +2372,8 @@ class UniversalTrader:
             except asyncio.QueueFull:
                 self._reserved_mints.discard(token_key)
                 self.token_timestamps.pop(token_key, None)
+                self._unsubscribe_trades(token_key)
+                self._record_observation_exclusion(token_info, "token_queue_full")
                 logger.warning(
                     f"Token queue full; dropped {token_info.symbol} ({token_info.mint})"
                 )
@@ -2348,6 +2382,83 @@ class UniversalTrader:
             f"Queued {'recovered ' if recovered else ''}token: "
             f"{token_info.symbol} ({token_info.mint})"
         )
+        return True
+
+    def _ensure_creator_mints(self) -> dict[str, set[str]]:
+        creator_mints = getattr(self, "_creator_mints", None)
+        if creator_mints is None:
+            creator_mints = {}
+            self._creator_mints = creator_mints
+        journal = getattr(self, "lesson_journal", None)
+        if (
+            journal is not None
+            and getattr(self, "_creator_mints_journal", None) is not journal
+            and hasattr(journal, "creator_mints")
+        ):
+            allowed_mints = getattr(self, "_allowed_creator_mints", None)
+            if allowed_mints is None:
+                allowed_mints = set()
+                self._allowed_creator_mints = allowed_mints
+            max_launches = getattr(
+                getattr(self, "gate_rules", None), "max_creator_launches", None
+            )
+            for creator, mints in journal.creator_mints().items():
+                seeded = creator_mints.setdefault(creator, set())
+                seeded.update(mints)
+                if max_launches is not None and len(seeded) <= max_launches:
+                    allowed_mints.update(seeded)
+            self._creator_mints_journal = journal
+        return creator_mints
+
+    def _is_repeat_creator(self, token_info: TokenInfo) -> bool:
+        rules = getattr(self, "gate_rules", None)
+        max_launches = getattr(rules, "max_creator_launches", None)
+        if (
+            rules is None
+            or max_launches is None
+            or token_info.platform is not Platform.PUMP_FUN
+            or not token_info.creator
+        ):
+            return False
+        creator_key = str(token_info.creator)
+        token_key = str(token_info.mint)
+        creator_mints = self._ensure_creator_mints()
+        allowed_mints = getattr(self, "_allowed_creator_mints", None)
+        if allowed_mints is None:
+            allowed_mints = set()
+            self._allowed_creator_mints = allowed_mints
+        mints = creator_mints.setdefault(creator_key, set())
+        if token_key not in mints:
+            mints.add(token_key)
+            if len(mints) <= max_launches:
+                allowed_mints.add(token_key)
+                return False
+            return True
+        return token_key not in allowed_mints and len(mints) > max_launches
+
+    def _needs_trade_subscription(self, token_info: TokenInfo) -> bool:
+        """Skip TradeFlowHub subscription when _handle_token or gate rejects immediately."""
+        if token_info.platform != getattr(self, "platform", token_info.platform):
+            return False
+        allowed_quote_mints = getattr(self, "allowed_quote_mints", None)
+        if (
+            (
+                token_info.platform is not Platform.PUMP_FUN
+                or token_info.state_from_event
+            )
+            and allowed_quote_mints is not None
+            and normalize_quote_mint(token_info.quote_mint) not in allowed_quote_mints
+        ):
+            return False
+        rules = getattr(self, "gate_rules", None)
+        if token_info.platform is Platform.PUMP_FUN and rules is not None:
+            repeat_creator = self._is_repeat_creator(token_info)
+            if rules.mayhem_only and not token_info.is_mayhem_mode:
+                return False
+            if rules.exclude_mayhem and token_info.is_mayhem_mode:
+                return False
+            if repeat_creator:
+                return False
         return True
 
     def _subscribe_trades(self, token_key: str) -> None:
@@ -2362,6 +2473,38 @@ class UniversalTrader:
         hub = getattr(self, "trade_hub", None)
         if queue is not None and hub is not None:
             hub.unsubscribe(token_key, queue)
+
+    def _record_observation_exclusion(
+        self, token_info: TokenInfo, reason: str, *, queue_age_s: float | None = None
+    ) -> None:
+        """Keep paper queue exclusions separate from gate or outcome evidence."""
+        policy = getattr(self, "execution_policy", None)
+        journal = getattr(self, "lesson_journal", None)
+        if (
+            policy is None
+            or policy.mode is not ExecutionMode.DRY_RUN
+            or journal is None
+        ):
+            return
+        record_id = journal.record(
+            LessonObservation(
+                kind="observation_skip",
+                mint=str(token_info.mint),
+                symbol=token_info.symbol,
+                name=token_info.name,
+                platform=token_info.platform.value,
+                mayhem=token_info.is_mayhem_mode,
+                decision=reason,
+                raw={
+                    "creator": str(token_info.creator) if token_info.creator else None,
+                    "queue_age_s": queue_age_s,
+                    "max_token_age_s": self.max_token_age,
+                },
+            )
+        )
+        if record_id is None:
+            message = "Paper observation-exclusion evidence was not saved"
+            raise EvidencePersistenceError(message)
 
     def _finish_token_reservation(self, token_info: TokenInfo, handled: bool) -> None:
         """Release a mint only when it is safe for another callback to claim."""
@@ -2384,92 +2527,173 @@ class UniversalTrader:
         )
         if not has_durable_state and not has_pending_recovery:
             self._reserved_mints.discard(token_key)
-        if token_key not in self._active_positions:
+        if token_key not in self._active_positions and token_key not in getattr(
+            self, "_paper_flow_watches", ()
+        ):
             self._unsubscribe_trades(token_key)
+            getattr(self, "_entry_slots", {}).pop(token_key, None)
         self.token_timestamps.pop(token_key, None)
         if handled or pending_changed:
             self._write_recovery_journal()
 
-    async def _process_token_queue(self) -> None:
-        """Process claimed queue items and acknowledge only actual claims."""
-        while True:
-            claimed = False
-            token_info: TokenInfo | None = None
-            handled = False
-            try:
-                token_info = await self.token_queue.get()
-                claimed = True
-                token_key = str(token_info.mint)
-                self._inflight_tokens[token_key] = token_info
-                token_age = monotonic() - self.token_timestamps.get(
-                    token_key, monotonic()
-                )
-                if token_age > self.max_token_age:
-                    logger.info(
-                        f"Skipping stale token {token_info.symbol} "
-                        f"({token_age:.1f}s > {self.max_token_age}s)"
-                    )
-                    self._record_trade_evidence(
-                        "decision", token_info, action="skip", reason="stale_token"
-                    )
-                    handled = True
-                else:
-                    handled = await self._handle_token(token_info)
-            except asyncio.CancelledError:
-                if (
-                    claimed
-                    and token_info is not None
-                    and str(token_info.mint) not in self._active_positions
-                    and str(token_info.mint) not in self._unresolved_buys
-                    and all(
-                        pending.mint != token_info.mint
-                        for pending in self._pending_recovery_tokens
-                    )
-                ):
-                    self._pending_recovery_tokens.append(token_info)
-                    self._write_recovery_journal()
-                logger.info("Token queue processor was cancelled")
-                raise
-            except ExecutionBlocked as exc:
-                if self.execution_policy.mode is ExecutionMode.DRY_RUN:
-                    logger.info(
-                        "Paper fill blocked by dry-run gate: %s — "
-                        "continuing to next token",
-                        exc,
-                    )
-                    continue
-                logger.exception("Fatal error in token queue processor")
-                raise
-            except Exception:
-                logger.exception("Fatal error in token queue processor")
-                raise
-            finally:
-                if claimed and token_info is not None:
-                    self._inflight_tokens.pop(str(token_info.mint), None)
-                    self._finish_token_reservation(token_info, handled)
-                    self.token_queue.task_done()
+    def _get_execution_lock(self) -> asyncio.Lock:
+        lock = getattr(self, "_execution_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._execution_lock = lock
+        return lock
 
-    def _schedule_paper_marks(
+    async def _process_claimed_token(self, token_info: TokenInfo) -> None:
+        """Evaluate and handle one claimed token, guaranteeing reservation release."""
+        handled = False
+        token_key = str(token_info.mint)
+        self._inflight_tokens[token_key] = token_info
+        try:
+            token_age = monotonic() - self.token_timestamps.get(token_key, monotonic())
+            if token_age > self.max_token_age:
+                logger.info(
+                    f"Skipping stale token {token_info.symbol} "
+                    f"({token_age:.6f}s > {self.max_token_age:.6f}s)"
+                )
+                self._record_trade_evidence(
+                    "decision", token_info, action="skip", reason="stale_token"
+                )
+                self._record_observation_exclusion(
+                    token_info, "stale_token", queue_age_s=token_age
+                )
+                handled = True
+            else:
+                handled = await self._handle_token(token_info)
+        except asyncio.CancelledError:
+            if (
+                token_key not in self._active_positions
+                and token_key not in self._unresolved_buys
+                and all(
+                    pending.mint != token_info.mint
+                    for pending in self._pending_recovery_tokens
+                )
+            ):
+                self._pending_recovery_tokens.append(token_info)
+                self._write_recovery_journal()
+            raise
+        except ExecutionBlocked as exc:
+            if self.execution_policy.mode is ExecutionMode.DRY_RUN:
+                logger.info(
+                    "Paper fill blocked by dry-run gate: %s — continuing to next token",
+                    exc,
+                )
+                handled = True
+                return
+            logger.exception("Fatal error in token queue processor")
+            raise
+        except Exception:
+            logger.exception("Fatal error in token queue processor")
+            raise
+        finally:
+            self._inflight_tokens.pop(token_key, None)
+            self._finish_token_reservation(token_info, handled)
+            self.token_queue.task_done()
+
+    async def _process_token_queue(self) -> None:
+        """Process claimed queue items; run gates concurrently when gate_rules is active."""
+        if getattr(self, "gate_rules", None) is None:
+            while True:
+                try:
+                    token_info = await self.token_queue.get()
+                    await self._process_claimed_token(token_info)
+                except asyncio.CancelledError:
+                    logger.info("Token queue processor was cancelled")
+                    raise
+            return
+
+        active_tasks: set[asyncio.Task[None]] = set()
+        get_task: asyncio.Task[TokenInfo] | None = None
+        try:
+            while True:
+                if get_task is None and len(active_tasks) < _MAX_CONCURRENT_GATES:
+                    get_task = asyncio.create_task(self.token_queue.get())
+                wait_set: set[asyncio.Task] = set(active_tasks)
+                if get_task is not None:
+                    wait_set.add(get_task)
+                done, _ = await asyncio.wait(
+                    wait_set, return_when=asyncio.FIRST_COMPLETED
+                )
+                for task in done:
+                    if task in active_tasks:
+                        active_tasks.remove(task)
+                        task.result()
+                if get_task in done:
+                    token_info = get_task.result()
+                    get_task = None
+                    self._inflight_tokens[str(token_info.mint)] = token_info
+                    active_tasks.add(
+                        asyncio.create_task(self._process_claimed_token(token_info))
+                    )
+        except asyncio.CancelledError:
+            logger.info("Token queue processor was cancelled")
+            raise
+        finally:
+            pending_to_await: list[asyncio.Task[object]] = list(active_tasks)
+            if get_task is not None:
+                if not get_task.done():
+                    get_task.cancel()
+                    pending_to_await.append(get_task)
+                else:
+                    try:
+                        unclaimed = get_task.result()
+                    except BaseException:  # noqa: S110
+                        pass
+                    else:
+                        if (
+                            str(unclaimed.mint) not in self._active_positions
+                            and str(unclaimed.mint) not in self._unresolved_buys
+                            and all(
+                                p.mint != unclaimed.mint
+                                for p in self._pending_recovery_tokens
+                            )
+                        ):
+                            self._pending_recovery_tokens.append(unclaimed)
+                            self._write_recovery_journal()
+                        self._finish_token_reservation(unclaimed, False)
+                        self.token_queue.task_done()
+            for task in active_tasks:
+                if not task.done():
+                    task.cancel()
+            if pending_to_await:
+                await asyncio.gather(*pending_to_await, return_exceptions=True)
+
+    def _schedule_paper_marks(  # noqa: PLR0913
         self,
         token_info: TokenInfo,
         entry_id: int | None,
         event: TradeEvent | None,
         started: float,
+        *,
+        entry_price_override: float | None = None,
+        censor_reason: str | None = None,
     ) -> None:
         """Observe an accepted gate decision; do not pretend a blocked buy filled."""
         if entry_id is None:
             message = "Paper gate evidence was not saved"
             raise EvidencePersistenceError(message)
         entry_price = None
-        if (
+        if censor_reason is None and (
             token_info.platform is Platform.PUMP_FUN
             and is_sol_paired(token_info.quote_mint)
-            and event is not None
-            and event.mint == str(token_info.mint)
-            and event.virtual_sol_reserves > 0
-            and event.virtual_token_reserves > 0
         ):
-            entry_price = event.price
+            if (
+                entry_price_override is not None
+                and isfinite(entry_price_override)
+                and entry_price_override > 0
+            ):
+                entry_price = entry_price_override
+            elif (
+                event is not None
+                and event.mint == str(token_info.mint)
+                and event.virtual_sol_reserves > 0
+                and event.virtual_token_reserves > 0
+            ):
+                entry_price = event.price
         self.lesson_journal.start_paper_marks(entry_id, entry_price)
         for horizon in PAPER_HORIZONS:
             if entry_price is None:
@@ -2477,7 +2701,7 @@ class UniversalTrader:
                     entry_id,
                     horizon,
                     elapsed_s=monotonic() - started,
-                    reason="unsupported_or_missing_entry",
+                    reason=censor_reason or "unsupported_or_missing_entry",
                 )
                 continue
             task = asyncio.create_task(
@@ -2491,14 +2715,26 @@ class UniversalTrader:
                 )
             )
         if entry_price is None:
-            return  # no entry baseline: G-marks need an anchor too
-        watch = asyncio.create_task(
-            self._graduation_watch(token_info, entry_id, started)
-        )
+            return  # no entry baseline: G-marks and flow marks need an anchor too
         watch_tasks = getattr(self, "_watch_tasks", None)
         if watch_tasks is None:
             watch_tasks = set()
             self._watch_tasks = watch_tasks
+        if (
+            censor_reason is None
+            and self._flow_enabled_for(token_info)
+            and str(token_info.mint) in getattr(self, "_gate_queues", {})
+        ):
+            flow_watch = asyncio.create_task(
+                self._paper_flow_watch(token_info, entry_id, started, entry_price)
+            )
+            watch_tasks.add(flow_watch)
+            flow_watch.add_done_callback(
+                lambda done: self._paper_mark_finished(done, entry_id, -1, started)
+            )
+        watch = asyncio.create_task(
+            self._graduation_watch(token_info, entry_id, started)
+        )
         watch_tasks.add(watch)
         watch.add_done_callback(
             lambda done: self._paper_mark_finished(done, entry_id, -1, started)
@@ -2563,7 +2799,11 @@ class UniversalTrader:
         return await self._graduated_pool_price(token_info, remaining)
 
     async def _graduated_pool_price(
-        self, token_info: TokenInfo, remaining: float
+        self,
+        token_info: TokenInfo,
+        remaining: float,
+        *,
+        settle: bool = True,
     ) -> tuple[float, str] | None:
         """Honest whale-ride exit price: the canonical pool's live state.
 
@@ -2576,9 +2816,13 @@ class UniversalTrader:
         if remaining <= 0 or getattr(self, "solana_client", None) is None:
             return None
         # Migration race: the pool/vault accounts can be briefly unreadable
-        # (the 14h-run's TypeError censoring). A short settle delay catches
-        # the pool in its readable state; the mark's own budget bounds it.
-        await asyncio.sleep(min(2.0, remaining / 4))
+        # on the initial open read. Subsequent post-open polls pass settle=False.
+        if settle:
+            await asyncio.sleep(min(2.0, remaining / 4))
+        import struct
+
+        from spl.token.instructions import get_associated_token_address
+
         from platforms.pumpfun.pumpswap import (
             PumpSwapAddresses,
             _decode_pool_account,
@@ -2587,23 +2831,46 @@ class UniversalTrader:
         pool = PumpSwapAddresses.derive_canonical_pool(token_info.mint, WSOL_MINT)
         for attempt in range(2):
             try:
+                base_program = (
+                    token_info.token_program_id or SystemAddresses.TOKEN_2022_PROGRAM
+                )
+                cand_base_v = token_info.base_vault or get_associated_token_address(
+                    pool, token_info.mint, base_program
+                )
+                cand_quote_v = token_info.quote_vault or get_associated_token_address(
+                    pool, WSOL_MINT, SystemAddresses.TOKEN_PROGRAM
+                )
                 async with asyncio.timeout(remaining):
                     accounts = await self.solana_client.get_multiple_accounts(
-                        [pool], commitment="processed"
+                        [pool, cand_base_v, cand_quote_v], commitment="processed"
                     )
-                value = accounts[0]
-                if value is None:
+                if not accounts or accounts[0] is None:
                     return None  # pool not created: censored, priced elsewhere never
-                decoded = _decode_pool_account(value, pool, token_info.mint, WSOL_MINT)
-                async with asyncio.timeout(remaining):
-                    vaults = await self.solana_client.get_multiple_accounts(
-                        [decoded.base_vault, decoded.quote_vault],
-                        commitment="processed",
-                    )
-                base_v, quote_v = vaults
-                if base_v is None or quote_v is None:
-                    return None
-                import struct
+                decoded = _decode_pool_account(
+                    accounts[0], pool, token_info.mint, WSOL_MINT
+                )
+                token_info.base_vault = decoded.base_vault
+                token_info.quote_vault = decoded.quote_vault
+                if (
+                    len(accounts) == 3
+                    and decoded.base_vault == cand_base_v
+                    and decoded.quote_vault == cand_quote_v
+                ):
+                    base_v, quote_v = accounts[1], accounts[2]
+                else:
+                    async with asyncio.timeout(remaining):
+                        vaults = await self.solana_client.get_multiple_accounts(
+                            [decoded.base_vault, decoded.quote_vault],
+                            commitment="processed",
+                        )
+                    base_v, quote_v = vaults
+                if (
+                    base_v is None
+                    or quote_v is None
+                    or len(bytes(base_v.data)) < 72
+                    or len(bytes(quote_v.data)) < 72
+                ):
+                    raise ValueError("Pool vault account unavailable or truncated")
 
                 base_amt = struct.unpack_from("<Q", bytes(base_v.data), 64)[0]
                 quote_amt = struct.unpack_from("<Q", bytes(quote_v.data), 64)[0]
@@ -2643,6 +2910,7 @@ class UniversalTrader:
         try:
             deadline = started + 960
             graduated = False
+            pool_price: tuple[float, str] | None = None
             while monotonic() < deadline:
                 remaining = deadline - monotonic()
                 try:
@@ -2662,16 +2930,20 @@ class UniversalTrader:
                     # The strict decoder rejects a zeroed completed curve (the
                     # whale swept it) before reporting complete. Check the raw
                     # bytes: complete=1 plus a readable pool prices the open.
-                    if await self._completed_curve_pool_price(token_info, remaining):
+                    pool_price = await self._completed_curve_pool_price(
+                        token_info, remaining
+                    )
+                    if pool_price is not None:
                         graduated = True
                         break
                 await asyncio.sleep(2.0)
             if not graduated:
                 return  # never graduated inside the watch window
             grad_elapsed = monotonic() - started
-            pool_price = await self._graduated_pool_price(
-                token_info, remaining=max(5.0, deadline - monotonic())
-            )
+            if pool_price is None:
+                pool_price = await self._graduated_pool_price(
+                    token_info, remaining=max(5.0, deadline - monotonic())
+                )
             is_new = self.lesson_journal.record_grad_open(
                 entry_id,
                 grad_elapsed,
@@ -2682,14 +2954,40 @@ class UniversalTrader:
                 return
             grad_at = monotonic()
             pending = {5: "p5", 30: "p30", 120: "p120"}
-            peak = (pool_price[0] if pool_price else 0.0, 0.0)  # (price, elapsed_s)
+            open_val = pool_price[0] if pool_price else 0.0
+            peak = (open_val, 0.0)  # (price, elapsed_s)
             rollover = None
-            while monotonic() < deadline and not (rollover and not pending):
+            stabilized_rollover = None
+            shakeout_window_s = getattr(
+                self,
+                "rollover_shakeout_window_s",
+                ROLLOVER_SHAKEOUT_WINDOW_S,
+            )
+            shakeout_drop = getattr(
+                self,
+                "rollover_shakeout_drop_fraction",
+                ROLLOVER_SHAKEOUT_DROP_FRACTION,
+            )
+            stabilize_after_s = getattr(
+                self,
+                "rollover_stabilize_after_s",
+                ROLLOVER_STABILIZE_AFTER_S,
+            )
+            stabilize_drop = getattr(
+                self,
+                "rollover_stabilize_drop_fraction",
+                ROLLOVER_STABILIZE_DROP_FRACTION,
+            )
+            while monotonic() < deadline and not (
+                rollover and stabilized_rollover and not pending
+            ):
                 await asyncio.sleep(2.0)
-                elapsed = monotonic() - grad_at
                 price = await self._graduated_pool_price(
-                    token_info, remaining=max(5.0, deadline - monotonic())
+                    token_info,
+                    remaining=max(5.0, deadline - monotonic()),
+                    settle=False,
                 )
+                elapsed = monotonic() - grad_at
                 if price is None:
                     continue
                 for offset, column in tuple(pending.items()):
@@ -2698,15 +2996,106 @@ class UniversalTrader:
                             entry_id, column, price[0], elapsed
                         )
                         del pending[offset]
-                if peak[0] and price[0] < peak[0] * (1 - ROLLOVER_EXIT_DROP_FRACTION):
-                    rollover = (peak[0], peak[1], price[0], elapsed)
-                    self.lesson_journal.record_grad_rollover(entry_id, *rollover)
-                elif price[0] > peak[0]:
+                if rollover is None:
+                    if peak[0] and price[0] < peak[0] * (
+                        1 - ROLLOVER_EXIT_DROP_FRACTION
+                    ):
+                        rollover = (peak[0], peak[1], price[0], elapsed)
+                        self.lesson_journal.record_grad_rollover(entry_id, *rollover)
+                if stabilized_rollover is None and peak[0]:
+                    in_shakeout_grace = (
+                        0 <= elapsed <= shakeout_window_s and price[0] < open_val
+                    )
+                    drop_fraction = (
+                        (
+                            shakeout_drop
+                            if elapsed < stabilize_after_s
+                            else stabilize_drop
+                        )
+                        if in_shakeout_grace
+                        else ROLLOVER_EXIT_DROP_FRACTION
+                    )
+                    if price[0] < peak[0] * (1 - drop_fraction) or (
+                        in_shakeout_grace and price[0] <= open_val * (1 - drop_fraction)
+                    ):
+                        stabilized_rollover = (price[0], elapsed)
+                        if hasattr(
+                            self.lesson_journal, "record_grad_stabilized_rollover"
+                        ):
+                            self.lesson_journal.record_grad_stabilized_rollover(
+                                entry_id, price[0], elapsed
+                            )
+                if price[0] > peak[0]:
                     peak = (price[0], elapsed)
         except Exception:  # noqa: BLE001 - the watch is optional instrumentation
             logger.warning(
                 "Graduation watch for entry %s censored", entry_id, exc_info=True
             )
+
+    async def _paper_flow_watch(
+        self, token_info: TokenInfo, entry_id: int, started: float, entry_price: float
+    ) -> None:
+        """Record the first FlowMonitor curve exit for a paper (dry-run) entry.
+
+        Consumes the same gate queue a live ``_consume_trade_flow`` would read,
+        bounded by ``max_hold_time``. Any stream loss degrades to the polling
+        horizons; the finally block guarantees the subscription is released.
+        """
+        token_key = str(token_info.mint)
+        flow_watches = getattr(self, "_paper_flow_watches", None)
+        if flow_watches is None:
+            flow_watches = set()
+            self._paper_flow_watches = flow_watches
+        flow_watches.add(token_key)
+        try:
+            hold_s = float(getattr(self, "max_hold_time", 0) or 90.0)
+            deadline = monotonic() + max(1.0, hold_s)
+            entry_slot = getattr(self, "_entry_slots", {}).get(token_key)
+            if entry_slot is None:
+                entry_slot = token_info.slot
+            monitor = FlowMonitor(
+                mint=token_key,
+                creator=str(token_info.creator) if token_info.creator else "",
+                rules=self.flow_rules,
+                entry_price=entry_price,
+                entry_sol=token_info.real_sol_reserves,
+                entry_slot=entry_slot,
+            )
+            while True:
+                remaining = deadline - monotonic()
+                if remaining <= 0:
+                    return
+                hub_queue = self._gate_queues.get(token_key)
+                if hub_queue is None:
+                    return
+                try:
+                    async with asyncio.timeout(remaining):
+                        event = await hub_queue.get()
+                except TimeoutError:
+                    return
+                except TradeFlowLossError:
+                    return  # history lost: the polling horizons stay honest
+                if event.slot < entry_slot:
+                    continue  # pre-fill trade buffered during the gate wait
+                signal = monitor.observe(event)
+                if signal is not None:
+                    self.lesson_journal.record_paper_flow_mark(
+                        entry_id,
+                        signal.rule,
+                        signal.price,
+                        monotonic() - started,
+                        signal.slot,
+                    )
+                    return
+        except Exception:  # noqa: BLE001 - optional instrumentation
+            logger.warning(
+                "Paper flow watch for entry %s censored", entry_id, exc_info=True
+            )
+        finally:
+            flow_watches.discard(token_key)
+            getattr(self, "_entry_slots", {}).pop(token_key, None)
+            if token_key not in getattr(self, "_active_positions", {}):
+                self._unsubscribe_trades(token_key)
 
     async def _paper_mark(
         self, token_info: TokenInfo, entry_id: int, horizon_s: int, started: float
@@ -2860,7 +3249,11 @@ class UniversalTrader:
                         reason="quote_amount_missing",
                     )
                     return True
-            if not self.extreme_fast_mode:
+            if (
+                not self.extreme_fast_mode
+                and getattr(self, "gate_rules", None) is None
+                and self.wait_time_after_creation > 0
+            ):
                 await self._save_token_info(token_info)
                 logger.info(
                     f"Waiting for {self.wait_time_after_creation} seconds "
@@ -2869,118 +3262,188 @@ class UniversalTrader:
                 await asyncio.sleep(self.wait_time_after_creation)
 
             decision = await self._await_entry_gate(token_info)
-            entry_started = monotonic()
-            entry_lesson_id = None
-            if self.lesson_journal is not None:
-                jev = None
-                if self.jev_scorer is not None and self.jev_scorer.enabled:
-                    jev = await self.jev_scorer.score_candidate(
-                        name=token_info.name,
-                        symbol=token_info.symbol,
-                        mayhem=token_info.is_mayhem_mode,
-                        gate=GateSnapshot(
-                            buyers=decision.buyers if decision else 0,
-                            real_sol=decision.real_sol if decision else None,
-                        ),
-                    )
-                entry_lesson_id = self.lesson_journal.record(
-                    LessonObservation(
-                        kind="gate_skip"
-                        if decision and not decision.accept
-                        else "gate_pass",
-                        mint=str(token_info.mint),
-                        symbol=token_info.symbol,
-                        name=token_info.name,
-                        platform=token_info.platform.value,
-                        mayhem=token_info.is_mayhem_mode,
-                        decision=decision.reason if decision else "entry_gate_disabled",
-                        buyers=decision.buyers if decision else None,
-                        real_sol=decision.real_sol if decision else None,
-                        raw={"gate": asdict(decision)} if decision else {},
-                    ),
-                    jev=jev,
-                )
-            self._record_trade_evidence(
-                "decision",
-                token_info,
-                action="buy" if decision is None or decision.accept else "skip",
-                intent_id=self._buy_intent_id(token_info),
-                reason=decision.reason
-                if decision is not None
-                else "entry_gate_disabled",
-                gate=asdict(decision) if decision is not None else None,
-            )
             if decision is not None and not decision.accept:
-                return True
-            drawdown = getattr(self, "_drawdown", None)
-            if drawdown is not None and drawdown.tripped_reason is not None:
+                if self.lesson_journal is not None:
+                    jev = None
+                    if self.jev_scorer is not None and self.jev_scorer.enabled:
+                        jev = await self.jev_scorer.score_candidate(
+                            name=token_info.name,
+                            symbol=token_info.symbol,
+                            mayhem=token_info.is_mayhem_mode,
+                            gate=GateSnapshot(
+                                buyers=decision.buyers,
+                                real_sol=decision.real_sol,
+                            ),
+                        )
+                    self.lesson_journal.record(
+                        LessonObservation(
+                            kind="gate_skip",
+                            mint=str(token_info.mint),
+                            symbol=token_info.symbol,
+                            name=token_info.name,
+                            platform=token_info.platform.value,
+                            mayhem=token_info.is_mayhem_mode,
+                            decision=decision.reason,
+                            buyers=decision.buyers,
+                            real_sol=decision.real_sol,
+                            raw={
+                                "creator": (
+                                    str(token_info.creator)
+                                    if token_info.creator
+                                    else None
+                                ),
+                                "gate": asdict(decision),
+                            },
+                        ),
+                        jev=jev,
+                    )
                 self._record_trade_evidence(
                     "decision",
                     token_info,
                     action="skip",
-                    reason="circuit_breaker_tripped",
-                    breaker=self._drawdown.tripped_reason,
-                )
-                logger.warning(
-                    "Circuit breaker tripped (%s): skipping entry for %s",
-                    self._drawdown.tripped_reason,
-                    token_info.symbol,
+                    intent_id=self._buy_intent_id(token_info),
+                    reason=decision.reason,
+                    gate=asdict(decision),
                 )
                 return True
 
-            if (
-                self.execution_policy.mode is ExecutionMode.DRY_RUN
-                and self.lesson_journal is not None
-            ):
-                self._schedule_paper_marks(
+            async with self._get_execution_lock():
+                entry_started = monotonic()
+                entry_lesson_id = None
+                if self.lesson_journal is not None:
+                    jev = None
+                    if self.jev_scorer is not None and self.jev_scorer.enabled:
+                        jev = await self.jev_scorer.score_candidate(
+                            name=token_info.name,
+                            symbol=token_info.symbol,
+                            mayhem=token_info.is_mayhem_mode,
+                            gate=GateSnapshot(
+                                buyers=decision.buyers if decision else 0,
+                                real_sol=decision.real_sol if decision else None,
+                            ),
+                        )
+                    entry_lesson_id = self.lesson_journal.record(
+                        LessonObservation(
+                            kind="gate_pass",
+                            mint=str(token_info.mint),
+                            symbol=token_info.symbol,
+                            name=token_info.name,
+                            platform=token_info.platform.value,
+                            mayhem=token_info.is_mayhem_mode,
+                            decision=decision.reason
+                            if decision
+                            else "entry_gate_disabled",
+                            buyers=decision.buyers if decision else None,
+                            real_sol=decision.real_sol if decision else None,
+                            raw={
+                                "creator": (
+                                    str(token_info.creator)
+                                    if token_info.creator
+                                    else None
+                                ),
+                                **({"gate": asdict(decision)} if decision else {}),
+                            },
+                        ),
+                        jev=jev,
+                    )
+                self._record_trade_evidence(
+                    "decision",
                     token_info,
-                    entry_lesson_id,
-                    decision.last_event if decision else None,
-                    entry_started,
+                    action="buy",
+                    intent_id=self._buy_intent_id(token_info),
+                    reason=decision.reason
+                    if decision is not None
+                    else "entry_gate_disabled",
+                    gate=asdict(decision) if decision is not None else None,
                 )
+                drawdown = getattr(self, "_drawdown", None)
+                if drawdown is not None and drawdown.tripped_reason is not None:
+                    self._record_trade_evidence(
+                        "decision",
+                        token_info,
+                        action="skip",
+                        reason="circuit_breaker_tripped",
+                        breaker=self._drawdown.tripped_reason,
+                    )
+                    logger.warning(
+                        "Circuit breaker tripped (%s): skipping entry for %s",
+                        self._drawdown.tripped_reason,
+                        token_info.symbol,
+                    )
+                    return True
 
-            if token_quote_mint is None:
-                logger.info(
-                    f"Buying {token_info.symbol} on {token_info.platform.value} "
-                    "after authoritative quote-asset refresh..."
-                )
-            else:
-                logger.info(
-                    f"Buying {self.quote_amounts[token_quote_mint]:.6f} of quote "
-                    f"{token_quote_mint} worth of {token_info.symbol} "
-                    f"on {token_info.platform.value}..."
-                )
-            token_key = str(token_info.mint)
-            if all(
-                str(pending.mint) != token_key
-                for pending in self._pending_recovery_tokens
-            ):
-                self._pending_recovery_tokens.append(token_info)
+                if token_quote_mint is None:
+                    logger.info(
+                        f"Buying {token_info.symbol} on {token_info.platform.value} "
+                        "after authoritative quote-asset refresh..."
+                    )
+                else:
+                    logger.info(
+                        f"Buying {self.quote_amounts[token_quote_mint]:.6f} of quote "
+                        f"{token_quote_mint} worth of {token_info.symbol} "
+                        f"on {token_info.platform.value}..."
+                    )
+                token_key = str(token_info.mint)
+                if all(
+                    str(pending.mint) != token_key
+                    for pending in self._pending_recovery_tokens
+                ):
+                    self._pending_recovery_tokens.append(token_info)
+                    self._write_recovery_journal()
+                self._buy_attempts = getattr(self, "_buy_attempts", 0) + 1
+                buy_result: TradeResult = await self.buyer.execute(token_info)
+                if (
+                    self.execution_policy.mode is ExecutionMode.DRY_RUN
+                    and self.lesson_journal is not None
+                ):
+                    executable_dry_run = buy_result.success or (
+                        buy_result.price is not None and buy_result.price > 0
+                    )
+                    refreshed_marginal_price = (
+                        (token_info.virtual_quote_reserves / 1e9)
+                        / (token_info.virtual_token_reserves / 10**TOKEN_DECIMALS)
+                        if (
+                            type(token_info.virtual_quote_reserves) is int
+                            and token_info.virtual_quote_reserves > 0
+                            and type(token_info.virtual_token_reserves) is int
+                            and token_info.virtual_token_reserves > 0
+                        )
+                        else None
+                    )
+                    self._schedule_paper_marks(
+                        token_info,
+                        entry_lesson_id,
+                        decision.last_event if decision else None,
+                        entry_started,
+                        entry_price_override=refreshed_marginal_price,
+                        censor_reason=(
+                            None
+                            if executable_dry_run
+                            else "unexecutable_completed_curve"
+                        ),
+                    )
+                if buy_result.success:
+                    await self._handle_successful_buy(
+                        token_info, buy_result, entry_lesson_id=entry_lesson_id
+                    )
+                    handled = True
+                else:
+                    handled = await self._handle_failed_buy(
+                        token_info, buy_result, entry_lesson_id=entry_lesson_id
+                    )
+                self._pending_recovery_tokens = [
+                    pending
+                    for pending in self._pending_recovery_tokens
+                    if str(pending.mint) != token_key
+                ]
                 self._write_recovery_journal()
-            self._buy_attempts = getattr(self, "_buy_attempts", 0) + 1
-            buy_result: TradeResult = await self.buyer.execute(token_info)
-            if buy_result.success:
-                await self._handle_successful_buy(
-                    token_info, buy_result, entry_lesson_id=entry_lesson_id
-                )
-                handled = True
-            else:
-                handled = await self._handle_failed_buy(
-                    token_info, buy_result, entry_lesson_id=entry_lesson_id
-                )
-            self._pending_recovery_tokens = [
-                pending
-                for pending in self._pending_recovery_tokens
-                if str(pending.mint) != token_key
-            ]
-            self._write_recovery_journal()
-            # Only wait for next token in yolo mode
-            if self.yolo_mode:
-                logger.info(
-                    f"YOLO mode enabled. Waiting {self.wait_time_before_new_token} seconds before looking for next token..."
-                )
-                await asyncio.sleep(self.wait_time_before_new_token)
-            return handled
+                # Only wait for next token in yolo mode
+                if self.yolo_mode and self.wait_time_before_new_token > 0:
+                    logger.info(
+                        f"YOLO mode enabled. Waiting {self.wait_time_before_new_token} seconds before looking for next token..."
+                    )
+                    await asyncio.sleep(self.wait_time_before_new_token)
+                return handled
 
         except Exception:
             logger.exception(f"Error handling token {token_info.symbol}")
@@ -2997,12 +3460,16 @@ class UniversalTrader:
         rules = getattr(self, "gate_rules", None)
         if rules is None or token_info.platform is not Platform.PUMP_FUN:
             return None
+        repeat_creator = self._is_repeat_creator(token_info)
         if rules.mayhem_only and not token_info.is_mayhem_mode:
             logger.info("Gate skip %s: not_mayhem", token_info.symbol)
             return GateDecision(False, "not_mayhem", 0, None, 0)
         if rules.exclude_mayhem and token_info.is_mayhem_mode:
             logger.info("Gate skip %s: mayhem_excluded", token_info.symbol)
             return GateDecision(False, "mayhem_excluded", 0, None, 0)
+        if repeat_creator:
+            logger.info("Gate skip %s: repeat_creator", token_info.symbol)
+            return GateDecision(False, "repeat_creator", 0, None, 0)
         token_key = str(token_info.mint)
         queue = self._gate_queues.get(token_key)
         if queue is None or token_info.slot is None:
@@ -3015,9 +3482,15 @@ class UniversalTrader:
             rules=rules,
         )
         started = monotonic()
-        deadline = started + rules.max_wait_ms / 1000
+        queued_at = getattr(self, "token_timestamps", {}).get(token_key, started)
+        deadline = min(started, queued_at) + rules.max_wait_ms / 1000
         decision: GateDecision | None = None
-        if rules.min_buyers == 0 and rules.min_real_sol <= 0 and not queue.loss_reason:
+        if (
+            rules.min_buyers == 0
+            and rules.min_real_sol <= 0
+            and rules.min_wait_slots == 0
+            and not queue.loss_reason
+        ):
             # No wait and no liquidity floor: accept at creation. With a
             # min_real_sol crossing rule (the whale-ride entry), fall through
             # to the event loop — the EntryGate waits for the crossing.
@@ -3045,17 +3518,51 @@ class UniversalTrader:
                 )
                 break
             decision = gate.observe(event)
+            try:
+                while (
+                    decision is not None
+                    and decision.accept
+                    and decision.last_event is not None
+                ):
+                    pop_same_slot = getattr(queue, "pop_if_slot_le", None)
+                    if callable(pop_same_slot):
+                        same_slot_event = pop_same_slot(decision.last_event.slot)
+                    elif (
+                        getattr(queue, "_queue", None)
+                        and queue._queue[0].slot <= decision.last_event.slot
+                    ):
+                        same_slot_event = queue.get_nowait()
+                    else:
+                        same_slot_event = None
+                    if same_slot_event is None:
+                        break
+                    decision = gate.observe(same_slot_event)
+            except TradeFlowLossError as exc:
+                decision = GateDecision(
+                    accept=False,
+                    reason=f"trade_stream_{exc.reason}",
+                    buyers=0,
+                    real_sol=None,
+                    slots_waited=0,
+                )
+                break
         waited_ms = (monotonic() - started) * 1000
         last = decision.last_event
-        if decision.accept and last is not None and token_info.state_from_event:
-            token_info.virtual_quote_reserves = last.virtual_sol_reserves
-            token_info.virtual_token_reserves = last.virtual_token_reserves
-            # The trigger buyer's TradeEvent carries the freshest real
-            # reserves on the curve; the CreateEvent values are stale by the
-            # entire gate wait. Quote bounds computed from stale reserves are
-            # what produced the live 6002 revert (see bound-displacement math).
-            token_info.real_token_reserves = last.real_token_reserves
-            token_info.real_sol_reserves = last.real_sol_reserves
+        if decision.accept and last is not None:
+            entry_slots = getattr(self, "_entry_slots", None)
+            if entry_slots is None:
+                entry_slots = {}
+                self._entry_slots = entry_slots
+            entry_slots[token_key] = last.slot
+            if token_info.state_from_event:
+                token_info.virtual_quote_reserves = last.virtual_sol_reserves
+                token_info.virtual_token_reserves = last.virtual_token_reserves
+                # The trigger buyer's TradeEvent carries the freshest real
+                # reserves on the curve; the CreateEvent values are stale by the
+                # entire gate wait. Quote bounds computed from stale reserves are
+                # what produced the live 6002 revert (see bound-displacement math).
+                token_info.real_token_reserves = last.real_token_reserves
+                token_info.real_sol_reserves = last.real_sol_reserves
         logger.info(
             "Gate %s %s: %s after %.0f ms, %d slot(s), buyers=%d real=%s",
             "accept" if decision.accept else "skip",
@@ -3155,7 +3662,21 @@ class UniversalTrader:
         entry_lesson_id: int | None = None,
     ) -> bool:
         """Keep unknown buys unresolved; clean up only terminal failures."""
-        logger.error(f"Failed to buy {token_info.symbol}: {buy_result.error_message}")
+        if self.execution_policy.mode is ExecutionMode.DRY_RUN and any(
+            marker in (buy_result.error_message or "")
+            for marker in (
+                "submission blocked",
+                "virtual_token_reserves must be a positive",
+                "bonding curve is complete",
+            )
+        ):
+            logger.info(
+                f"Failed to buy {token_info.symbol}: {buy_result.error_message}"
+            )
+        else:
+            logger.error(
+                f"Failed to buy {token_info.symbol}: {buy_result.error_message}"
+            )
         self._record_trade_evidence(
             "trade_result",
             token_info,
@@ -3493,11 +4014,18 @@ class UniversalTrader:
         the poll loop never depends on it.
         """
         token_key = str(token_info.mint)
+        entry_slot = (
+            getattr(position, "entry_slot", None)
+            or getattr(self, "_entry_slots", {}).get(token_key)
+            or token_info.slot
+        )
         monitor = FlowMonitor(
             mint=token_key,
             creator=str(token_info.creator) if token_info.creator else "",
             rules=self.flow_rules,
             entry_price=position.entry_price,
+            entry_sol=token_info.real_sol_reserves,
+            entry_slot=entry_slot,
         )
         if not token_info.creator:
             logger.warning(
@@ -3505,10 +4033,21 @@ class UniversalTrader:
                 token_info.symbol,
             )
         hub_queue = self._gate_queues.get(token_key)
+        if (
+            hub_queue is not None
+            and hub_queue.loss_reason
+            and getattr(self, "trade_hub", None) is not None
+        ):
+            self.trade_hub.unsubscribe(token_key, hub_queue)
+            hub_queue = self.trade_hub.subscribe(token_key)
+            self._gate_queues[token_key] = hub_queue
 
         async def hub_events() -> AsyncIterator[TradeEvent]:
             while True:
-                yield await hub_queue.get()
+                ev = await hub_queue.get()
+                if entry_slot is not None and ev.slot < entry_slot:
+                    continue
+                yield ev
 
         if hub_queue is not None:
             events = hub_events()
@@ -3619,7 +4158,9 @@ class UniversalTrader:
         curve_manager = self.platform_implementations.curve_manager
         exit_sell_attempts = 0
         price_outage_started: float | None = None
+        pool_open_price: float = 0.0
         pool_peak_price: float = 0.0
+        pool_open_at: float | None = None
         while position.is_active and not self._shutdown_event.is_set():
             try:
                 if position.pending_exit_signature is not None:
@@ -3807,16 +4348,74 @@ class UniversalTrader:
                         # sell into the pool's opening liquidity.
                         should_exit, exit_reason = True, ExitReason.GRADUATED
                     elif strategy == "rollover":
+                        now = monotonic()
                         if pool_peak_price <= 0:
+                            pool_open_price = current_price
                             pool_peak_price = current_price
+                            pool_open_at = now
                             if current_price <= position.entry_price:
                                 should_exit, exit_reason = True, ExitReason.GRADUATED
-                        elif current_price < pool_peak_price * (
-                            1 - ROLLOVER_EXIT_DROP_FRACTION
-                        ):
-                            should_exit, exit_reason = True, ExitReason.GRADUATED
-                        elif current_price > pool_peak_price:
-                            pool_peak_price = current_price
+                        else:
+                            shakeout_window_s = getattr(
+                                self,
+                                "rollover_shakeout_window_s",
+                                ROLLOVER_SHAKEOUT_WINDOW_S,
+                            )
+                            shakeout_drop = getattr(
+                                self,
+                                "rollover_shakeout_drop_fraction",
+                                ROLLOVER_SHAKEOUT_DROP_FRACTION,
+                            )
+                            stabilize_after_s = getattr(
+                                self,
+                                "rollover_stabilize_after_s",
+                                ROLLOVER_STABILIZE_AFTER_S,
+                            )
+                            stabilize_drop = getattr(
+                                self,
+                                "rollover_stabilize_drop_fraction",
+                                ROLLOVER_STABILIZE_DROP_FRACTION,
+                            )
+                            elapsed = (
+                                (now - pool_open_at)
+                                if pool_open_at is not None
+                                else 0.0
+                            )
+                            in_shakeout_grace = (
+                                pool_open_at is not None
+                                and 0 <= elapsed <= shakeout_window_s
+                                and current_price < pool_open_price
+                            )
+                            if in_shakeout_grace:
+                                drop_fraction = (
+                                    shakeout_drop
+                                    if elapsed < stabilize_after_s
+                                    else stabilize_drop
+                                )
+                                if (
+                                    current_price <= position.entry_price
+                                    or current_price
+                                    < pool_peak_price * (1 - drop_fraction)
+                                    or current_price
+                                    <= pool_open_price * (1 - drop_fraction)
+                                ):
+                                    should_exit, exit_reason = (
+                                        True,
+                                        ExitReason.GRADUATED,
+                                    )
+                            else:
+                                drop_fraction = ROLLOVER_EXIT_DROP_FRACTION
+                                if (
+                                    current_price <= position.entry_price
+                                    or current_price
+                                    < pool_peak_price * (1 - drop_fraction)
+                                ):
+                                    should_exit, exit_reason = (
+                                        True,
+                                        ExitReason.GRADUATED,
+                                    )
+                                elif current_price > pool_peak_price:
+                                    pool_peak_price = current_price
                 if should_exit and exit_reason:
                     exit_sell_attempts += 1
                     if (

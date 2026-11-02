@@ -1,3 +1,4 @@
+# ruff: noqa: S101, SLF001, PLR2004
 from __future__ import annotations
 
 import asyncio
@@ -20,6 +21,7 @@ from interfaces.core import Platform, TokenInfo
 from trading.position import Position
 from trading.universal_trader import UniversalTrader
 from utils import paths
+from utils.logger import _redact_text
 
 
 def live_config() -> dict:
@@ -787,3 +789,16 @@ def test_bulk_runner_propagates_signal_and_kills_stubborn_child(
     assert process.terminate_calls == 1
     assert process.kill_calls == 1
     assert all(timeout is not None for timeout in process.join_timeouts)
+
+
+def test_redact_text_redacts_query_and_path_tokens() -> None:
+    assert (
+        _redact_text(
+            "POST https://rpc.example.com/89952546c0bbaea1e348bbe1d3f1acc4 "
+            "and https://rpc.example.com/v1/89952546c0bbaea1e348bbe1d3f1acc4 "
+            "and https://rpc.example.com/rpc?api_key=secret-token&region=us"
+        )
+        == "POST https://rpc.example.com/[REDACTED] "
+        "and https://rpc.example.com/v1/[REDACTED] "
+        "and https://rpc.example.com/rpc?api_key=[REDACTED]&region=us"
+    )

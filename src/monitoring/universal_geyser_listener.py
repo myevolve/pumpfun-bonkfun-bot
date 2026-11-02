@@ -155,7 +155,6 @@ class UniversalGeyserListener(BaseTokenListener):
                         "Geyser subscription acknowledgement timed out"
                     ) from exc
 
-                reconnect_attempt = 0
                 if self.trade_hub is not None:
                     self.trade_hub.stream_resumed()
                 logger.info("Connected to Geyser endpoint: %s", self.geyser_endpoint)
@@ -169,6 +168,7 @@ class UniversalGeyserListener(BaseTokenListener):
                 )
 
                 async for update in call:
+                    reconnect_attempt = 0
                     token_infos = self._process_update_events(update)
                     for token_info in token_infos:
                         logger.info(

@@ -292,6 +292,8 @@ def _flow_rules_from_config(cfg: dict) -> FlowRules | None:
         single_sell_pct=section.get("single_sell_pct"),
         net_outflow_pct=section.get("net_outflow_pct"),
         window=section.get("window", 5),
+        max_stall_slots=section.get("max_stall_slots"),
+        entry_floor_pct=section.get("entry_floor_pct"),
     )
 
 
@@ -308,9 +310,20 @@ def _gate_rules_from_config(cfg: dict) -> GateRules | None:
         max_buyers=section.get("max_buyers", defaults.max_buyers),
         max_real_sol=section.get("max_real_sol", defaults.max_real_sol),
         min_real_sol=section.get("min_real_sol", defaults.min_real_sol),
+        max_single_buy_sol=section.get(
+            "max_single_buy_sol", defaults.max_single_buy_sol
+        ),
+        max_buyer_share=section.get("max_buyer_share", defaults.max_buyer_share),
+        max_inflow_sol_per_slot=section.get(
+            "max_inflow_sol_per_slot", defaults.max_inflow_sol_per_slot
+        ),
+        max_creator_launches=section.get(
+            "max_creator_launches", defaults.max_creator_launches
+        ),
         require_creator_holding=section.get(
             "require_creator_holding", defaults.require_creator_holding
         ),
+        min_wait_slots=section.get("min_wait_slots", defaults.min_wait_slots),
         max_wait_slots=section.get("max_wait_slots", defaults.max_wait_slots),
         max_wait_ms=section.get("max_wait_ms", defaults.max_wait_ms),
     )

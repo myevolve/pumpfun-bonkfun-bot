@@ -1,3 +1,4 @@
+# ruff: noqa: S101
 from __future__ import annotations
 
 import os
@@ -242,7 +243,7 @@ def test_env_file_must_be_a_regular_file(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "env_file",
-    ["../outside.env", "/tmp/outside.env", "${ENV_PATH}"],
+    ["../outside.env", "/tmp/outside.env", "${ENV_PATH}"],  # noqa: S108
 )
 def test_env_file_rejects_unsafe_paths(tmp_path: Path, env_file: str) -> None:
     config = minimal_config()
@@ -430,4 +431,18 @@ def test_bot_name_cannot_escape_log_directory(name: str) -> None:
     config["name"] = name
 
     with pytest.raises(ValueError, match="name"):
+        validate_config(config)
+
+
+def test_entry_gate_min_wait_slots_validation() -> None:
+    config = minimal_config()
+    config["entry_gate"] = {
+        "enabled": True,
+        "min_wait_slots": 1,
+        "max_wait_slots": 10,
+    }
+    validate_config(config)
+
+    config["entry_gate"]["min_wait_slots"] = 11
+    with pytest.raises(ValueError, match="min_wait_slots"):
         validate_config(config)
