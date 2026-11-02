@@ -224,6 +224,151 @@ time and RPC spend required to diagnose it using this workflow, and seek an expl
 paid-pilot commitment. No customer interviews, revenue or willingness-to-pay claim
 is implied by the implementation.
 
+### Evidence-quality improvements and next opportunities
+
+The bounded operational audit retained 7,746 queued-token log records,
+6,776 stale-token skips and 971 gate skips between 09:39:58 and 16:42:26 UTC
+on October 31. These are log-event counts, not matched unique-discovery
+denominators. The configured age threshold was 0.001 seconds; no threshold,
+concurrency or gate was changed. Four trade-history overflows discarded
+2,052 events. A separately reproduced queue-full subscription leak was fixed;
+no queue-full warning was observed in that window, so it is not established
+as the cause of those overflows.
+
+New paper `observation_skip` rows retain queue-full/stale events separately
+from gate outcomes and preserve queue ages. A failed exclusion write stops
+the operation rather than reporting complete evidence. Existing historical
+captures are not rewritten. Four October 6 unpriced 60-second observations
+remain unresolved; absence of an outcome is not an invented loss or a live task.
+
+| Priority | Next move | Decision value / required proof | Placement |
+|---|---|---|---|
+| 1 | Run a paid strategy-audit pilot using an operator's own misleading result | Measure reproducible corrections, decision changed, review time and provider requests; require an explicit paid commitment, not positive feedback alone. | Before billing/hosting expansion |
+| 2 | Use the frozen planned-entry corpus and matching source for reproducible audits | Implemented freeze/analyze workflow preserves missing observations and repeated mints. It remains retrospective and excludes explicitly listed pre-plan history; it does not establish trading edge. | Before another entry-rule claim |
+| 3 | Reconcile creator-wide transfers and actual collection receipts | Separate balance changes, deposits and claims; pool attribution and actual capital recovery remain unproved. New acquisition requires its own approved bounds. | Before any creator-pilot economics gate |
+| 4 | Schedule a controlled collector/logging maintenance window | Bounded future console capture and UTC/progress fixes are verified offline. Existing stdout is preserved; activation/archive still needs a quiet maintenance point. | Before unattended/customer deployment |
+
+Customer case-review worksheet: original claim; frozen evidence paths/hashes;
+missingness and assumptions; reproducible correction; review time/provider
+requests; operator decision changed; explicit paid-pilot response; retention
+consent. Public data, a score or a dashboard alone is not defensibility.
+
+### Reproducible acceptance evidence and keeper repairs
+
+The first real frozen package is
+`.state/research/accept-clues-20261101T043757Z.{cohort.json,report.json,source.py}`.
+It retains **122 planned entries / 120 distinct mints**, rather than selecting
+only the 100 fully priced entries. TRAIN has 24 fixed entry IDs and the
+historical holdout has 98. The 2,151 accepted rows without paper plans remain
+explicitly outside this study; this is not complete market-discovery coverage.
+
+| Horizon | Observed | Terminal censored | Pending |
+|---|---:|---:|---:|
+| 60 seconds | 106 | 12 | 4 |
+| 300 seconds | 103 | 19 | 0 |
+| 900 seconds | 102 | 20 | 0 |
+
+The saved matching source reproduced the saved report from the immutable
+artifact. Nine comparisons expose available pair counts and null insufficient
+statistics. Invalid completion/timing metadata and oversized imports are
+rejected. Neither fixed historical membership nor a checksum establishes
+preregistration, source authenticity, native execution or a profitable strategy.
+
+The future keeper console sink now has bounded files/records, safe whole-stream
+continuation censoring, private no-follow output files and retryable cleanup.
+Review caught and repaired multiline disclosure, overlapping regex CPU, symlink
+following and a slow-writer cleanup race before integration. All security
+diagnostics used synthetic data; this is not a claim of production compromise.
+
+Two additional shadow health regressions failed before and passed after the
+fix: ISO UTC parsing had shifted epochs in non-UTC timezones, and a short quiet
+poll after long uptime could trigger the 900-second frozen-slot rule. Progress
+now resets on actual slot change and restart; the configured threshold is
+unchanged. No running collector or historical log was altered.
+
+#### Physical lines are not credential boundaries
+
+The first bounded-console implementation masked a synthetic credential label
+but retained its newline-separated value. The root cause was treating a
+physical line boundary as proof that a sensitive value had ended.
+Next time I will keep bounded per-stream privacy state across chunks, newlines
+and blank lines, and test the actual stream consumer rather than a regex alone.
+Signal to recognize: a masked assignment followed by retained unlabeled
+continuation text. The conservative choice here censors that stream through
+EOF; useful diagnostics still exist in the independent stream and structured
+logs, but no exhaustive secret-detection claim follows.
+See the [keeper console guide](../learning-examples/token-lifecycles/README.md#keeper-console-safety-for-future-runs).
+
+#### Intra-slot bundle lookahead and pre-quote paper marks
+
+Joining the 43 post-Oct-14 band-gated accepts in `lessons.sqlite3` 1-to-1 against
+`keeper.stdout.log` showed that 35 of 43 (`81.4%`, every entry with
+`grad_elapsed_s < 4.0s`) failed `PlatformAwareBuyer.execute()` 1 ms later with
+`virtual_token_reserves must be a positive raw u64 integer`. Creators swept their
+curves in 4 same-slot tranches (`~21 -> 42 -> 63 -> 85 SOL`); `EntryGate.observe()`
+returned `accept=True` on Tranche 3 while Tranche 4 (`85 SOL`, curve complete in
+slot 0) remained in `TradeQueue`, and `UniversalTrader._handle_token()` scheduled
+`paper_marks` before `buyer.execute()`. The 8 genuinely executable entries had
+3 graduations and averaged `-17.40%` at 60s (`-8.86%` composite policy).
+
+Next time an event-driven gate evaluates multi-event transactions or slots, drain
+all queued events from the triggering slot before finalizing an accept, require
+`min_wait_slots >= 1` when excluding creation-slot bundles, and schedule paper
+marks only after the buyer's curve refresh confirms an executable quote (censoring
+already-completed curves as `unexecutable_completed_curve`). Signal to recognize:
+`slots_waited == 0` accepts that "graduate" in `~2s` (one RPC settle sleep) while
+`buyer.execute()` logs zeroed reserves. Verified offline by
+`learning-examples/token-lifecycles/verify_executable_crossing_gate.py`.
+
+#### Sequential gate head-of-line blocking and concurrent gate evaluation
+
+Running `UniversalTrader._process_token_queue()` as a single sequential loop
+with `max_wait_ms = 30000` throttled throughput from `16.68 tokens/min` (at
+`max_wait_ms = 3000`) to `2.36 tokens/min`: each slow non-Mayhem coin blocked
+up to 30s at the head of `token_queue`, causing subsequent coins to sit in
+`TradeQueue` for 30–240s and fail immediately on their first observed trade
+with `window_expired` at `slots_waited = 76..600` (`68.4%` of skips).
+`_process_token_queue()` now dispatches up to `_MAX_CONCURRENT_GATES = 64`
+concurrent token tasks, anchors `_await_entry_gate()` deadlines to the discovery
+timestamp (`token_timestamps[mint] + max_wait_ms / 1000`), and skips
+`TradeFlowHub` subscription in `_queue_token()` when static gate rules
+(`mayhem_only` / `exclude_mayhem`) already exclude the token.
+
+#### Exact CreateEvent log pre-filtering and quote-mint correlation
+
+Checking `any("Instruction: Create" in log for log in logs)` matched
+substring-collide instructions (`Instruction: CreateIdempotent`,
+`Instruction: CreateTokenAccount`, `Instruction: CreatePool`), triggering full
+invocation-stack attribution and Borsh decode attempts on ordinary trades.
+`PumpFunEventParser` now matches exact `_CREATE_INSTRUCTION_LOGS`
+(`"Program log: Instruction: Create"`, `"Program log: Instruction: CreateV2"`)
+and correlates `CreateEvent` to the matching `create`/`create_v2` instruction by
+mint rather than assuming `parsed_Creates[0]`, preserving exotic `quote_mint`
+accounts in multi-create transactions.
+
+#### Creator-vault withdrawal reconciliation
+
+Endpoint balance diffs `(last - first)` on `creator_vault` undercount accrued
+creator fees whenever a creator withdraws mid-window via
+`collect_coin_creator_fee`. Summing positive step increases (`max(0, b[t] - b[t-1])`)
+separately from negative step decreases across the 100 tracked graduated pools
+reconciles **`152.95 WSOL` accrued (`50,983 SOL` implied PumpSwap volume at 30 bps)**
+and **`113.07 WSOL` withdrawn across `27/100` claiming creators**.
+
+#### 24,015-coin OOS microstructure and post-graduation PumpSwap reclaim
+
+Out-of-sample evaluation on the 24,015-coin exact-CPMM tape coupled with the
+100-pool PumpSwap post-graduation tracker shows that single-wallet sweep
+concentration (`max_buyer_share > 0.75` or `max_single_buy_sol > 10.0`) drives
+manufactured completions, while top-decile fee-generating organic graduations
+(`grad_elapsed_s = 18.26s` median) dip immediately after migration (`p5/open = 0.917x`)
+before reclaiming `open_price` (`+5%` reclaim confirmation) and rallying to
+`p120/open = 1.155x`.
+
+
+
+
+
 ## What the market taught us (negative results, held-out)
 
 1. **The tested post-creation signals lost held-out in the recorded study.**
@@ -738,115 +883,53 @@ captured-of-peak while minimizing false-fire giveback is the design answer;
 4 paths is too few to declare it, but the sweep can run on every new record
 as the instrument accumulates paths.
 
-## Success leaves clues: the buyer-count census, the first survivors (2026-10-09 14:5xZ)
+## Historical buyer-count exploration — not confirmation
 
-The reverse-engineering study ran with the threshold-miner discipline
-(`token-lifecycles/analyze_accept_clues.py`): cohort = 37 resolved accepts;
-TRAIN = first 24 by time, LOCK = last 13; 12 pre-registered candidates
-counted; survivors must confirm sign-consistently on LOCK.
+The old `analyze_accept_clues.py` selected complete cases, changed LOCK
+membership as more outcomes appeared, and claimed 12 preregistered candidates
+while executing nine comparisons. Its historical buyer-band “survivor,”
+causality and confirmation interpretations are withdrawn. The source journal
+and historical captures remain unchanged.
 
-**The buyer-count clue survived — the first census survivor:**
+The replacement freezes planning-selected membership, features and observations
+before analysis and reports each comparison's actual available pair counts.
+It retains repeated mints and incomplete outcomes; a fixed retrospective split
+does not become an untouched forward test. Descriptive correlations and gross
+price marks do not establish fees, executable returns or an entry edge.
 
-| buyers at accept | n | mean r60 | mean r900 |
-|---|---|---|---|
-| 1 | 2 | -92.0% | -92.0% |
-| 2-3 | 8 | **+102.5%** | **+30.0%** |
-| 4-10 | 21 | -10.4% | -45.1% |
-| >10 | 6 | -23.1% | -86.2% |
+Existing buyer/mayhem gate support is not an authorization to change or arm a
+policy. This correction changes neither the running paper settings nor risk
+caps. Missing historical Jev scores cannot be invented, and enabling a paid
+scorer is not part of this repair.
 
-TRAIN: sweet 2-3 = +1.07 vs others -0.25. LOCK: sweet 2-3 = +0.98 vs
-others -0.06. Same sign, similar magnitude, both halves (n=4+4).
+## Creator-vault observations: earlier annuity verdict withdrawn
 
-**The clues, read mechanically:**
-1. **buyers = 1 is instant death** (the whale swept alone - no crowd to
-   sell to). Both such coins died -92% by 60s.
-2. **buyers 2-3 is the sweet spot** - the sweep landed AND a small crowd
-   was already in; room to grow.
-3. **buyers >= 4 decays monotonically** - the accept is late; the
-   position IS the exit liquidity (buyers=50: -89%).
-4. **mayhem = independent killer**: all 4 mayhem accepts lost 80-98% at
-   every horizon, regardless of buyer count (even a 2-buyer mayhem
-   lost -80%, breaking the sweet rule for mayhem).
-5. The one rank survivor (real_sol x r900, negative both halves) is
-   weak; the bucket clue is the real one.
-6. 68368 (Oct 9): the largest resolved outcome yet - the rollover fired
-   at G+10.2s (+98% vs entry) but the pool kept rising to **+742% at
-   900s**. The WICK class in reverse: the fixed timeline won on this
-   one. Buyer count 3, fund 63.2, non-mayhem - the sweet-spot profile.
+The earlier “earned fees,” collection amounts, pacing causality and payback
+claims in this section were not established by the retained snapshots and
+are withdrawn. The historical JSONL/logs remain unchanged.
 
-**The gate change (implemented, not armed)**: `entry_gate.min_buyers/
-max_buyers/exclude_mayhem` now supported end-to-end (validation,
-translation, 4 new tests, 834 green). The operator's config still reads
-min_buyers: 0 - arming the band rule (min 2, max 3, exclude mayhem) is
-the operator's call; the instrument then re-measures under the new gate
-and the clue either confirms live or dies.
+The tracker observed WSOL token-account balances belonging to creator-vault
+PDAs, not pool-specific cumulative revenue. One creator may own several
+pools; adding per-pool observations can count the same balance repeatedly.
+Decreases do not identify fee claims or recipients, increases do not
+attribute fees, and an absent account was historically recorded as zero.
+Truncated creator identities and omitted mints in old rows cannot establish
+an identity-bound baseline or lifetime income.
 
-**A Jev gap found**: accepted entries carry NO jev scores - the
-admissible Jev-quality-vs-PnL test (declared pending in the ecosystem
-survey) is blocked by missing scores, not by analysis. The shadow
-config should enable the scorer.
+Schema v2 retains complete creator/PDA/ATA identity, raw WSOL units, explicit
+null censors, baseline status and actual elapsed interval. Reads validate
+token mint/program/authority and deduplicate shared vaults. Only exhausted
+transport reads are unavailable; malformed responses and permanent errors
+fail the snapshot. The passive summarizer verifies retained schema/baselines,
+not independent account authenticity or on-chain PDA provenance.
 
-## Phase 0 live: the creator annuity measured on real pools (2026-10-11)
-**Phase 0 result, 252.7 hours / 10.53 days of tracking (55 snapshots through `2026-10-21 23:12Z`, covering all 66 of 66 graduated `grad_marks` pools + 34 tape pools; `--limit 100`)**: creators actively collect mid-tracking (`SPOOF` creator drained another `0.815 SOL` between 05:11Z and 23:12Z), while `IOF` (`73272`) crossed **`21.03 SOL`** in its creator vault (`21.029 SOL` uncollected) and two newly included tape pools (`wQhUuD6j` **`6.80 SOL`**, `tWgUKYTg` **`1.51 SOL`**) surfaced in the expanded 100-pool batch. Top cumulative fee earners across `10.53 days`:
+First v2 observations cannot pair with legacy rows. At least two valid
+same-identity v2 observations are needed for a balance change, which still
+does not establish fees, payouts or launch profitability. Creator economics
+remain unvalidated, not merely blocked on funding. Synthetic launch quote
+checks do not attest native execution, applicable live fee tiers or an
+actually collected rebate. See the corrected creator-pilot design.
 
-- `SPOOF` (`71452`, `60.2 SOL` fund): **`36.87 SOL`** cumulative (`22.15 SOL` peak + re-accruals; creator drained `0.815 SOL` on Oct 21) -> **payback ~7 days**
-- `INTENTS` (`73896`, `60.7 SOL` fund): **`26.58 SOL`** cumulative -> **payback ~10 days**
-- `FLAMBO` (`91174`, `62.9 SOL` fund): **`24.73 SOL`** accrued on launch day (`23.46 SOL` drained by creator) -> **payback ~3 days** at launch velocity
-- `IOF` (`73272`, `64.0 SOL` fund): **`21.03 SOL`** (`21.029 SOL` in vault) -> **payback ~13 days**
-- `SEED` (`70989`, `70.0 SOL` fund): **`15.09 SOL`** -> **payback ~14 days**
-- `wQhUuD6j` (tape whale-band pool): **`6.80 SOL`** (`6.801 SOL` in vault)
-- `SNIFFR` (`76580`, `72.8 SOL` fund, paced `21.2s` sweep): **`2.995 SOL`** (drained by creator) -> **payback ~4 days**
-- `Mishu` (`65703`, `60.8 SOL` fund, paced `11.0s` sweep): **`1.572 SOL`** (`1.369 SOL` peak)
-- `tWgUKYTg` (tape whale-band pool): **`1.51 SOL`** (`1.512 SOL` in vault)
-- `DOMP` (`79349`, `63.2 SOL` fund): **`1.284 SOL`** (drained by creator)
-- **10 of 100 tracked pools earned ≥1.28 SOL (`10.0%`, `138.47 SOL` combined)**; **`8 of 66` (`12.1%`) graduated `grad_marks` pools earned ≥1.28 SOL (`130.15 SOL` combined)**; median pool earned `~0.0001 SOL`.
-
-**Sweep-pacing determinant across all 49 graduated pools (2026-10-14)**:
-- **Paced sweeps (`grad_elapsed_s >= 8s`, `n=13`)**: `3/13` (`23.1%`) earned `>15 SOL`, `6/13` (`46.2%`) earned `≥0.1 SOL`, mean **`5.40 SOL`**, median **`0.0150 SOL`**.
-- **Instant sweeps (`grad_elapsed_s < 8s`, `n=36`)**: `1/36` (`2.8%`) earned `>1 SOL`, `3/36` (`8.3%`) earned `≥0.1 SOL`, mean **`0.54 SOL`**, median **`0.000037 SOL`** (`405x` lower median).
-- **G+120s retention**: `4/28` (`14.3%`) pools holding `≥50%` of `open_price` at `G+120s` earned `>15 SOL` (mean `3.16 SOL`) vs `0/20` (`0%`) pools that dumped `<50%` by `G+120s` (mean `0.05 SOL`).
-- **Actionable Phase 2 design rule**: pace the 4 self-sweep tranches over `15–60s` (`4–15s` per tranche) rather than a single-slot bundle so organic followers discover the rising curve before migration.
-The measured picture replaces both earlier estimates: the annuity is NOT
-the uniform 15-day payback the census suggested, and NOT the ~50x-below
-fear the first 15-minute window suggested. It is a **lottery among
-launches**: ~16% of graduates earn material fees (payback ~6-9 days,
-better than estimated), the rest earn ~nothing. The creator pilot's
-economics therefore hinge entirely on coin quality — the Jev
-pre-launch screen is no longer optional, it is the whole game.
-
-
-**Snapshot 2 (same day, ~15 min later — the per-interval rate, not daily
-yet)**: the two accreting pools confirmed and accelerated — INTENTS
-+2.89 SOL, SPOOD +0.58, SEED +0.006 (the rest zero). INTENTS' vault now
-3.30 SOL total, SPOOF 5.05, SEED 14.22 (collected earlier). Mean
-interval accrual 0.139 SOL across 25 pools. The distribution is
-extremely heavy-tailed: 2 of 25 pools earn essentially everything —
-matching the whale census's structure (few pools hold the volume). The
-daily cadence continues; the payback fit waits for a true 24h delta.
-
-
-
-The Phase 0 tracker (`token-lifecycles/track_creator_fees.py`) is live on
-25 recent graduated pools (the instrument's own grad_marks cohort, fund
->= 60 SOL, Oct 7-11). Three implementation lessons were paid to get real
-numbers:
-
-1. Creator fees accrue as **WSOL in the creator-vault PDA's associated
-   token account**, not lamports in the PDA (CAPYWIFGUN: PDA 0.0,
-   ATA 0.0149). The first two snapshots read the wrong account and
-   measured zero.
-2. The fee_config confirmed live: `creator_fee_bps=30` on every tier
-   (flat + regular), lp 0 / protocol 95 - the census config unchanged.
-3. The cohort must be RECENT migrations: the tape's Sep whale-band
-   creators collected long ago (0 funded vaults in the first 25).
-
-First deltas (one ~4-minute window, n=25): median 0.0000, mean 0.0082,
-max 0.1036 SOL - two pools accruing (~0.10/day each), eighteen at zero.
-Two real data points, not yet a curve: the 15-day payback hypothesis
-needs ~85 SOL/15d = 5.7 SOL/day on the median pool, and the measured
-top is 0.10/day on the best pool. Early signal points well below the
-survivorship estimate - the daily cadence continues, and the Phase 0
-gate (payback > 45 days -> STOP) will decide on data, not hope.
 
 ## The wallet census + the net regime re-test (2026-10-09 14:9xZ)
 
@@ -1267,10 +1350,10 @@ stop-loss) that prevents losing more than the edge pays — a backstop, not
 a target. The 60/300/900s paper-mark horizons are **measurement
 scaffolding**: they record the decay curve so an exit rule can be designed
 from evidence; they are not the policy, and no config forces a minimum
-hold. What we report is **average realized hold** — the elapsed time of
-resolved exits, by reason — now in every evidence bundle
-(`avg_hold_s`, `avg_hold_by_reason`) so the hold statistics accumulate
-with the rest of the honest record.
+hold. The bundle reports **average priced-mark observation elapsed time**
+(`avg_observation_elapsed_s`, `observation_elapsed_by_reason`), not average
+realized hold. A price mark or rollover trigger does not attest an executed
+exit, received proceeds or net profit.
 
 ## First complete pool-priced whale-ride cycle (2026-10-07 02:29Z)
 
@@ -1556,3 +1639,40 @@ Closed all four queued censuses in `docs/STRATEGIES.md` against the 24,015-coin 
    - Protocol-owned (`Global.authority`), not creator-accessible, and 0 curve trades on the 24h tape.
 4. **Serial-sniper clone (`50` wallets with `≥10` coins bought and `0` curve sells)**:
    - Either slot-0 graduation bundlers (`100%` grad rate at `85 SOL`, `med_dslot = 0`) or multi-wallet token routers (`756..779` coins, `5.4%..7.3%` grad rate). Following the top 8 non-slot-0 never-sellers loses in every cell (`−1.87%` to `−44.80%` mean, `−3.19%` to `−84.62%` median).
+
+## Waves 5–9: Executable Crossing Funnel, Organic Trigger Guards, Flow Exits & Rollover Stabilization (2026-11-02)
+
+1. **Organic Buy Trigger Guard & Buyer Cohort Discrimination (Waves 5, 7 & 9)**:
+   - Auditing `lessons.sqlite3` ($n=2,280$ `buyers_present` passes) surfaced 6 historical gate passes where `EntryGate.observe` accepted on a `MAYHEM_SOL_VAULT` (`BwWK17cbHxwWBKZkUYvzxLcNQ1YVyaFezduWbtm2de6s`) trade after earlier human buyers had already satisfied `min_buyers`. In `learning.report`'s `paper_by_buyer_cohort`, `mayhem_vault_buyer` entries had **`0%` win rate ($0/4$)**, **`-86.66%` mean 60s return**, and **`-83.20%` policy return**, whereas `organic_repeat_buyer` entries yielded **`81.8%` win rate ($18/22$)**, **`+80.43%` mean 60s**, and **`+72.04%` policy return**.
+   - `EntryGate.observe` now requires an organic non-creator buy to fire accept (blocking sell events `is_buy=False`, `MAYHEM_SOL_VAULT`, and creator self-buys), paired with `max_single_buy_sol: 45.0`, `max_buyer_share: 0.75`, `max_creator_launches: 1`, and `max_inflow_sol_per_slot`.
+
+2. **Flow Rules Hardening (Wave 5)**:
+   - Holding coins through prolonged curve stalls or immediate post-entry dumps degraded returns. `FlowRules` now enforces:
+     - `max_stall_slots: 35` (`velocity_stall`): exits when curve peak real SOL fails to advance for 35 slots.
+     - `entry_floor_pct: 0.15` (`entry_floor`): stops out if real SOL drops $\ge 15\%$ below entry SOL before establishing a higher peak.
+
+3. **Three-Tier $G+5\text{s}$ Stabilized Rollover Exit (Wave 6)**:
+   - Across 91 graduated coins in `grad_marks`, 16 suffered early whipsaw stop-outs ($\le 10\text{s}$ below open) before rebounding above open at 30s/120s.
+   - Replacing the immediate flat trailing stop with a three-tier stabilized schedule (`0.85 * open` for $0\text{--}5\text{s} \to 0.90 * \text{open}$ for $5\text{--}10\text{s} \to 5\%$ trailing drop off peak) absorbs initial migration sell-pressure, lifting `p5`-confirmed shakeout returns from **`-1.11%`** to **`+1.49%`** vs pool open.
+
+4. **4-Stage Executable Entry Funnel & 5.3-Day Latency Shadow Corroboration (Waves 8–9)**:
+   - Progressive filtration in `learning.report` (`executable_funnel`) and `dashboard.py` separates unexecutable Poll-1 slot-0 completion bundles from fillable post-slot entries:
+     - Stage 1 (`unexecutable_poll1_bundle`, $n=73$ planned, $72$ observed): $70.8\%$ win, $+1,949.62\%$ 60s, $+1,937.43\%$ policy (unfillable slot-0 completions).
+     - Stage 2 (`executable_curve_all`, $n=56$ planned, $41$ observed): $51.2\%$ win, $-10.45\%$ 60s, $+5.58\%$ policy.
+     - Stage 3 (`executable_in_band_post_slot`, $n=3$ planned, $3$ observed): $100\%$ win, $+22.32\%$ 60s, $+37.11\%$ policy.
+     - Stage 4 (`executable_full_gate`, $n=3$ planned, $3$ observed — `SPOOF` + `Mask` + `KIMVERSE`, matching `max_single_buy_sol: 45.0` and non-vault trigger): **`3/3` (`100%`) win**, **`+0.2232` (`+22.32%`) 60s mean**, **`+0.3711` (`+37.11%`) policy gross mean**.
+   - Independently corroborated by the 5.3-day `qd1946_tests` live latency shadow ($n=116$ signals): `92%–96%` of slot-0 signals ($\text{age} < 0.4\text{s}$) were infeasible (curve already completed at $85\text{ SOL}$), while the `52` feasible post-slot signals at $L=0.4\text{s}$ achieved **`75.9%` graduation hit rate** and **`+53.9%` median net ROI**.
+
+## Wave 10: Exit-Grid Calibration (`60..80 SOL`), Pre-Fill Slot Guard & Keeper Supervisor Resilience (2026-11-02)
+
+1. **Exit-Grid Calibration on the `60..80 SOL` Band (`whaleride-paper.yaml`)**:
+   - On the `lifecycles_24h` `60..80 SOL` crossing cohort, `max_stall_slots: 35` prematurely stopped out **`73.0%` of eventually graduating curves** (median pre-graduation stall gap = `74` slots, `p75 = 107` slots), dragging out-of-sample LOCK mean return to **`-7.2%`**. Likewise, `max_hold_time: 60` cut **`31.7%` of `qd1946_tests` graduating winners** that graduated after `60s` (including `71452 SPOOF` at `62.74s`).
+   - Calibrating `trade.max_hold_time: 90` (capturing `80.5%` of `qd1946_tests` graduating winners) and `flow_exit` to `max_stall_slots: 180`, `entry_floor_pct: 0.10`, and `single_sell_pct: 0.25` turns the `lifecycles_24h` LOCK cohort positive at **`+6.0%..+6.8%` LOCK mean (`67.6%..70.6%` LOCK win rate)**.
+
+2. **`entry_gate` $\leftrightarrow$ `flow_exit` Pre-Fill Slot Guard & Queue Resubscription**:
+   - Pre-entry trade events buffered in `TradeQueue` prior to fill slot could leak into `FlowPosition` evaluation or leave the queue unsubscribed if `TradeHub` overflowed during gate evaluation.
+   - `EntryGate` now records and propagates `entry_slot` into `FlowPosition`, `_consume_trade_flow` discards events with `ev.slot < entry_slot`, and `UniversalTrader` resubscribes `trade_hub` if the shared queue overflowed (`q.overflowed`), ensuring continuous post-fill flow monitoring without false pre-entry triggers.
+
+3. **Keeper Supervisor Startup Grace & Uptime Budget Reset (`keep_whaleride_shadow.py`)**:
+   - Newly spawned children before their first row flush or long-lived keepers accumulating isolated transient restarts over multi-day runs could trip false stale kills or exhaust `MAX_RESTARTS`.
+   - Stale-output detection now gates on `elapsed > STALE_SECONDS` since child spawn, and `restart_count` resets to `0` after `HEALTHY_RESET_SECONDS = 3600.0` of healthy uptime.

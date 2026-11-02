@@ -61,6 +61,12 @@ jobs:
           uv run learning-examples/verify_tx_status_checks.py
           uv run learning-examples/verify_tp_sl_exit_price.py
           uv run learning-examples/verify_paper_horizons.py
+          uv run learning-examples/token-lifecycles/verify_executable_crossing_gate.py
+          uv run learning-examples/token-lifecycles/verify_evidence_bundle.py
+          uv run learning-examples/token-lifecycles/verify_creator_fee_snapshots.py
+          uv run learning-examples/token-lifecycles/verify_accept_clues.py
+          uv run learning-examples/token-lifecycles/verify_keeper_console.py
+          uv run learning-examples/token-lifecycles/verify_keeper_health.py
 
       - name: Run tests
         run: uv run pytest -q
