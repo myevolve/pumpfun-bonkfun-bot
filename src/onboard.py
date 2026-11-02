@@ -133,7 +133,7 @@ def check_config_load(
         )
 
     platform_str = str(config.get("platform", "pump_fun"))
-    listener = str(config.get("filters", {}).get("listener_type", ""))
+    listener = str((config.get("filters") or {}).get("listener_type", ""))
     try:
         platform = Platform(platform_str)
     except ValueError:
@@ -177,6 +177,13 @@ async def check_rpc_health(rpc_endpoint: str | None) -> dict[str, str]:
     except Exception as exc:  # noqa: BLE001 - report any transport/parse failure
         return _step(3, "RPC health", FAIL, f"getHealth failed: {_exc_reason(exc)}")
 
+    if not isinstance(payload, dict):
+        return _step(
+            3,
+            "RPC health",
+            FAIL,
+            f"getHealth returned unexpected payload: {payload!r}",
+        )
     latency = time.perf_counter() - started
     if payload.get("result") != "ok":
         return _step(
@@ -331,9 +338,21 @@ async def run_onboarding(
     step2, config = check_config_load(config_path)
     steps.append(step2)
 
-    geyser = (config or {}).get("geyser") or {}
-    steps.append(await check_rpc_health((config or {}).get("rpc_endpoint")))
-    steps.append(await check_geyser_reachability(geyser.get("endpoint")))
+    cfg = config or {}
+    listener = str((cfg.get("filters") or {}).get("listener_type", ""))
+    geyser_endpoint = (cfg.get("geyser") or {}).get("endpoint")
+    steps.append(await check_rpc_health(cfg.get("rpc_endpoint")))
+    if listener == "geyser" or geyser_endpoint:
+        steps.append(await check_geyser_reachability(geyser_endpoint))
+    else:
+        steps.append(
+            _step(
+                4,
+                "Geyser reachability",
+                PASS,
+                f"listener={listener!r}; geyser not required",
+            )
+        )
     steps.append(check_execution_safety(config))
     steps.append(check_idl_files())
     steps.append(check_ledger_dir(LEDGER_DIR))

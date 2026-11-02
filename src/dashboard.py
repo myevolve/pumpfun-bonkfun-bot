@@ -60,11 +60,13 @@ def load_config() -> dict:
     # Display-only interpolation of the expected wallet; never any key material.
     env_file = Path(cfg.get("env_file", ""))
     placeholder = "${SOLANA_EXPECTED_WALLET}"
-    expected = cfg.get("execution", {}).get("expected_wallet")
-    if env_file.exists() and expected == placeholder:
+    exec_cfg = cfg.get("execution") or {}
+    expected = exec_cfg.get("expected_wallet")
+    if env_file.is_file() and expected == placeholder:
         for line in env_file.read_text().splitlines():
             if line.startswith("SOLANA_EXPECTED_WALLET="):
-                cfg["execution"]["expected_wallet"] = line.split("=", 1)[1].strip()
+                exec_cfg["expected_wallet"] = line.split("=", 1)[1].strip()
+                cfg["execution"] = exec_cfg
                 break
     return cfg
 
@@ -162,26 +164,31 @@ def load_recent_logs(n: int = 2000) -> list[dict]:
 BUY_RE = re.compile(r"Buying ([\d,.]+) tokens at average quote ([\d.eE+-]+)")
 
 
+def _classify_log_event(entry: dict) -> str | None:
+    msg = entry.get("message", "")
+    msg_lower = msg.lower()
+    if "New token detected" in msg:
+        return "detected"
+    if msg.startswith("Buying "):
+        return "buy"
+    if "Failed to buy" in msg:
+        if "submission blocked" in msg_lower:
+            return "blocked" if entry.get("level") == "ERROR" else None
+        return "fail"
+    if "blocked" in msg_lower and "dry-run" in msg_lower:
+        return "blocked"
+    return None
+
+
 @st.cache_data(ttl=5)
 def load_activity() -> pd.DataFrame:
     """Per-minute event counts (detected/buy/fail/blocked) from recent logs."""
-    rows: list[dict] = []
-    for entry in load_recent_logs(n=2000):
-        msg = entry.get("message", "")
-        ts = entry.get("timestamp", "")
-        if not ts:
-            continue
-        event = None
-        if "New token detected" in msg:
-            event = "detected"
-        elif msg.startswith("Buying "):
-            event = "buy"
-        elif "Failed to buy" in msg:
-            event = "fail"
-        elif "blocked" in msg.lower() and "dry-run" in msg.lower():
-            event = "blocked"
-        if event:
-            rows.append({"ts": ts, "event": event})
+    rows = [
+        {"ts": ts, "event": event}
+        for entry in load_recent_logs(n=2000)
+        if (ts := entry.get("timestamp", ""))
+        and (event := _classify_log_event(entry)) is not None
+    ]
     if not rows:
         return pd.DataFrame()
     df = pd.DataFrame(rows)
@@ -241,35 +248,20 @@ def _evidence_amount(value: int | None) -> str:
     return "Unknown" if value is None else f"{value:,}"
 
 
-@st.cache_data(ttl=10)
-def load_grad_decay() -> dict:
-    """G-anchored decay from the journal's grad_marks table, read-only."""
-    conn = sqlite3.connect(f"file:{LESSON_DB}?mode=ro", uri=True, timeout=5)
-    try:
-        row = conn.execute(
-            "SELECT COUNT(*), AVG(open_price), AVG(p5), AVG(p30), AVG(p120),"
-            " COUNT(rollover_price), AVG(rollover_price / open_price - 1.0),"
-            " AVG(rollover_elapsed_s)"
-            " FROM grad_marks WHERE open_price IS NOT NULL"
-        ).fetchone()
-    except sqlite3.OperationalError:
-        return {}
-    finally:
-        conn.close()
-    if not row or not row[0] or not row[1]:
-        return {}
-    return {
-        "n": row[0],
-        "open": row[1],
-        "p5_over_open": round(row[2] / row[1], 3) if row[2] else None,
-        "p30_over_open": round(row[3] / row[1], 3) if row[3] else None,
-        "p120_over_open": round(row[4] / row[1], 3) if row[4] else None,
-        "rollover_n": row[5] or 0,
-        "rollover_vs_open_pct": (
-            round(row[6] * 100.0, 2) if row[6] is not None else None
-        ),
-        "rollover_elapsed_s": round(row[7], 1) if row[7] is not None else None,
-    }
+def _format_risk_value(val: object) -> str:
+    """Render scalar or per-asset dict risk caps as strings for Arrow-safe tables."""
+    if val is None:
+        return "n/a"
+    if isinstance(val, dict):
+        return ", ".join(
+            f"{k}: {v:,}"
+            if isinstance(v, int | float) and not isinstance(v, bool)
+            else f"{k}: {v}"
+            for k, v in val.items()
+        )
+    if isinstance(val, int | float) and not isinstance(val, bool):
+        return f"{val:,}"
+    return str(val)
 
 
 def load_whaleride_coupling() -> dict:
@@ -341,9 +333,11 @@ def _coupling_from_rows(curves: dict[str, list], pools: dict[str, list]) -> dict
                 exit_row = next((r for r in cs if r["ts"] >= hit["ts"] + 2.0), None)
                 if exit_row is None:
                     continue
+                denom = exit_row["vt"] + tokens
                 pnl = (
-                    exit_row["vq"] * tokens / (exit_row["vt"] + tokens) * 0.9875
-                    - 10_065_000
+                    -10_065_000
+                    if denom <= 0 or exit_row["vq"] <= 0
+                    else exit_row["vq"] * tokens / denom * 0.9875 - 10_065_000
                 )
                 cold_arm.append(pnl)
             crossers += 1
@@ -492,7 +486,7 @@ def paper_config() -> Path:
     """Write a temp bot config: enabled, forced dry-run (no submissions)."""
     cfg = load_config()
     cfg["enabled"] = True
-    cfg.setdefault("execution", {})["mode"] = "dry_run"
+    cfg["execution"] = {**(cfg.get("execution") or {}), "mode": "dry_run"}
     PAPER_CFG_PATH.parent.mkdir(parents=True, exist_ok=True)
     PAPER_CFG_PATH.write_text(yaml.safe_dump(cfg, sort_keys=False))
     return PAPER_CFG_PATH
@@ -502,7 +496,7 @@ def live_config() -> Path:
     """Write a temp bot config: enabled, live mode (needs --authorize-live)."""
     cfg = load_config()
     cfg["enabled"] = True
-    cfg.setdefault("execution", {})["mode"] = "live"
+    cfg["execution"] = {**(cfg.get("execution") or {}), "mode": "live"}
     LIVE_CFG_PATH.parent.mkdir(parents=True, exist_ok=True)
     LIVE_CFG_PATH.write_text(yaml.safe_dump(cfg, sort_keys=False))
     return LIVE_CFG_PATH
@@ -586,10 +580,11 @@ def kill_all() -> None:
 # ─── Dashboard ───────────────────────────────────────────────────────────────
 
 config = load_config()
-wallet = config.get("execution", {}).get("expected_wallet", "")
-risk_session = config.get("execution", {}).get("risk_session_id", "n/a")
+exec_cfg_main = config.get("execution") or {}
+wallet = exec_cfg_main.get("expected_wallet") or ""
+risk_session = exec_cfg_main.get("risk_session_id") or "n/a"
 enabled = config.get("enabled", False)
-mode = config.get("execution", {}).get("mode", "unknown")
+mode = exec_cfg_main.get("mode") or "unknown"
 platform = config.get("platform", "unknown")
 
 live_running = is_running("live")
@@ -629,9 +624,10 @@ with st.sidebar:
     enabled_color = "🟢" if enabled else "🔴"
     st.markdown(f"{enabled_color} Enabled: **{enabled}**")
     st.text(f"Risk session: {risk_session}")
-    buy_amount = config.get("trade", {}).get("buy_amount", "n/a")
+    sidebar_trade_cfg = config.get("trade") or {}
+    buy_amount = sidebar_trade_cfg.get("buy_amount", "n/a")
     st.text(f"Buy amount: {buy_amount} SOL")
-    exit_strategy = config.get("trade", {}).get("exit_strategy", "n/a")
+    exit_strategy = sidebar_trade_cfg.get("exit_strategy", "n/a")
     st.text(f"Exit: {exit_strategy}")
 
     st.divider()
@@ -820,7 +816,7 @@ tab_overview, tab_charts, tab_learning, tab_trades, tab_watch, tab_logs = st.tab
 # ─── Overview tab ────────────────────────────────────────────────────────────
 
 with tab_overview:
-    trade_cfg = config.get("trade", {})
+    trade_cfg = config.get("trade") or {}
     trade_cfg_amt = trade_cfg.get("buy_amount", "n/a")
     max_hold = trade_cfg.get("max_hold_time", "n/a")
     trade_files = load_trade_files()
@@ -862,7 +858,7 @@ with tab_overview:
         )
     with rk:
         st.subheader("Risk limits (lamports)")
-        exec_cfg = config.get("execution", {})
+        exec_cfg = config.get("execution") or {}
         limits = pd.DataFrame(
             {
                 "limit": [
@@ -872,10 +868,10 @@ with tab_overview:
                     "max session fee",
                 ],
                 "value": [
-                    exec_cfg.get("max_trade_quote_raw", "n/a"),
-                    exec_cfg.get("max_session_quote_raw", "n/a"),
-                    exec_cfg.get("max_total_fee_lamports", "n/a"),
-                    exec_cfg.get("max_session_fee_lamports", "n/a"),
+                    _format_risk_value(exec_cfg.get("max_trade_quote_raw")),
+                    _format_risk_value(exec_cfg.get("max_session_quote_raw")),
+                    _format_risk_value(exec_cfg.get("max_total_fee_lamports")),
+                    _format_risk_value(exec_cfg.get("max_session_fee_lamports")),
                 ],
             }
         ).set_index("limit")
@@ -895,8 +891,10 @@ with tab_overview:
     with t4:
         ef = trade_cfg.get("extreme_fast_mode", False)
         st.metric("Extreme fast", "ON" if ef else "off")
-        eg = config.get("entry_gate", {}).get("enabled", False)
+        eg = (config.get("entry_gate") or {}).get("enabled", False)
         st.metric("Entry gate", "ON" if eg else "off")
+        fe = (config.get("flow_exit") or {}).get("enabled", False)
+        st.metric("Flow exit", "ON" if fe else "off")
 
 # ─── Charts tab ──────────────────────────────────────────────────────────────
 
@@ -1016,6 +1014,48 @@ with tab_learning:
                 "Pending and censored observations remain in the denominator."
             )
             st.dataframe(pd.DataFrame(lstats["paper_marks"]), width="stretch")
+        if lstats.get("paper_by_entry_timing"):
+            st.subheader("Paper entries by creation-slot timing")
+            st.caption(
+                "Historical slot_0_creation_bundle entries (slots_waited == 0) were "
+                "predominantly multi-tranche creation-slot sweeps that completed in "
+                "slot 0 before buyer.execute(). Post-creation-slot entries "
+                "(slots_waited >= 1) crossed after creation_slot."
+            )
+            st.dataframe(pd.DataFrame(lstats["paper_by_entry_timing"]), width="stretch")
+        if lstats.get("executable_funnel"):
+            st.subheader("Executable entry funnel & policy returns")
+            st.caption(
+                "Progressive filtration of historical paper entries from unexecutable "
+                "Poll-1 completion bundles down to full-gate survivors (in-band, "
+                "post-creation-slot, non-mayhem, last buy <= 45 SOL, non-vault trigger, first-time creator). "
+                "Policy return accounts for graduation rollover marks vs 60s exit."
+            )
+            st.dataframe(pd.DataFrame(lstats["executable_funnel"]), width="stretch")
+        if lstats.get("paper_by_creator_cohort"):
+            st.subheader("Paper entries by creator deployment frequency")
+            st.caption(
+                "Repeat gate-pass creators (>1 distinct mint passing the gate) vs "
+                "single-mint gate-pass creators."
+            )
+            st.dataframe(
+                pd.DataFrame(lstats["paper_by_creator_cohort"]), width="stretch"
+            )
+        if lstats.get("paper_by_buyer_cohort"):
+            st.subheader("Paper entries by trigger buyer cohort")
+            st.caption(
+                "Trigger buyer (`gate.last_event.user`) classified into Mayhem vault "
+                "buyer, organic repeat buyer (>1 distinct mint in lessons), and "
+                "single-entry buyer."
+            )
+            st.dataframe(pd.DataFrame(lstats["paper_by_buyer_cohort"]), width="stretch")
+        if lstats.get("paper_flow_exits"):
+            st.subheader("Paper flow exits (FlowMonitor curve rules)")
+            st.caption(
+                "First FlowMonitor signal observed on the trade stream for "
+                "non-graduating paper entries; event-price marks, not fills."
+            )
+            st.dataframe(pd.DataFrame(lstats["paper_flow_exits"]), width="stretch")
         if lstats["paper_comparisons"]:
             st.subheader("Same-entry changes versus 60 seconds")
             st.caption(
@@ -1027,6 +1067,15 @@ with tab_learning:
         if lstats["paper_censors"]:
             st.subheader("Missing observations: causes and next checks")
             st.dataframe(pd.DataFrame(lstats["paper_censors"]), width="stretch")
+        if lstats["observation_exclusions"]:
+            st.subheader("Discovery and queue exclusions")
+            st.caption(
+                "Recorded events, not unique discoveries or gate outcomes. "
+                "Historical log-only skips are not backfilled into this journal."
+            )
+            st.dataframe(
+                pd.DataFrame(lstats["observation_exclusions"]), width="stretch"
+            )
 
         if lstats["resolved"] == 0:
             st.info(
@@ -1034,13 +1083,12 @@ with tab_learning:
                 "Gross marks are separate observations, not simulated fills."
             )
 
-        st.subheader("Whale-ride coupling — is the graduation exit alive?")
+        st.subheader("Exploratory shadow coupling model")
         st.caption(
-            "P(graduation | crossed X) from the shadow collector's traces, "
-            "against the EV break-even implied by the graduator and non-"
-            "graduator arms. ACTIVE means a crossing at that level prices "
-            "positive expected value in this snapshot. One reading of one "
-            "collector, not a fill record."
+            "Legacy complete-case model: missing exits are excluded before "
+            "coupling is calculated, so this is not the full discovery denominator. "
+            "Its ACTIVE label is a model indicator, not verified positive net "
+            "returns, a live signal, or execution authorization."
         )
         wr_rows = []
         for key, row in load_whaleride_coupling().items():
@@ -1065,24 +1113,63 @@ with tab_learning:
                 "keep_whaleride_shadow.py"
             )
 
-        gdec = load_grad_decay()
+        gdec = lstats.get("grad_decay") or {}
         if gdec:
             st.caption(
-                f"Graduation-anchored decay (n={gdec['n']}): pool price at "
-                f"G+5s **{gdec['p5_over_open']}**, G+30s "
-                f"**{gdec['p30_over_open']}**, G+120s "
-                f"**{gdec['p120_over_open']}** relative to the pool-open "
-                "price. Detection latency bounded by the 2s watch poll; "
-                "censored horizons are excluded, not zero-filled. The tape's "
-                "median liquidity half-life after peak is 18s."
+                f"Graduation-anchored gross marks ({gdec['n']} opening marks): "
+                f"G+5s **{gdec['p5_over_open']}x** (paired n={gdec['p5_n']}), "
+                f"G+30s **{gdec['p30_over_open']}x** (paired n={gdec['p30_n']}), "
+                f"G+120s **{gdec['p120_over_open']}x** (paired n={gdec['p120_n']}). "
+                "Mean within-entry ratios to pool open; missing horizons stay "
+                "excluded, never zero-filled. These are not executed returns."
             )
-            if gdec.get("rollover_n"):
+            rollover = lstats.get("grad_marks") or {}
+            if rollover.get("rollover_n"):
+                peak_pct = (rollover.get("mean_peak_vs_open") or 0.0) * 100
+                peak_t = rollover.get("mean_peak_elapsed_s") or 0.0
+                rollover_pct = (rollover.get("mean_rollover_vs_open") or 0.0) * 100
+                rollover_t = rollover.get("mean_rollover_elapsed_s") or 0.0
+                shakeout_pct = (rollover.get("post_shakeout_p30_vs_open") or 0.0) * 100
+                stab_str = ""
+                if rollover.get("stabilized_rollover_n"):
+                    stab_pct = (
+                        rollover.get("mean_stabilized_rollover_vs_open") or 0.0
+                    ) * 100
+                    stab_t = rollover.get("mean_stabilized_rollover_elapsed_s") or 0.0
+                    stab_str = (
+                        f" Stabilized rollover (n={rollover['stabilized_rollover_n']}): "
+                        f"**{stab_pct:+.2f}%** vs pool open (mean **G+{stab_t:.1f}s**)."
+                    )
                 st.caption(
-                    f"Rollover exit (`5%` peak drop, n={gdec['rollover_n']}): "
-                    f"**{gdec['rollover_vs_open_pct']:+.2f}%** vs pool open "
-                    f"(mean trigger **G+{gdec['rollover_elapsed_s']}s**)."
+                    f"Rollover price mark (n={rollover['rollover_n']}): "
+                    f"peak **{peak_pct:+.2f}%** vs pool open (mean **G+{peak_t:.1f}s**) → "
+                    f"rollover **{rollover_pct:+.2f}%** vs pool open "
+                    f"(mean **G+{rollover_t:.1f}s**; "
+                    f"p5-confirmed shakeout→G+30s **{shakeout_pct:+.2f}%**). "
+                    f"Rallied >=1%: **{rollover.get('rallied_1pct_n', 0)}**, "
+                    f"whipsawed below open: **{rollover.get('whipsaw_below_open_n', 0)}** "
+                    f"(early <=10s whipsaw→rally: **{rollover.get('early_whipsaw_count', 0)}**), "
+                    f"locked >=open: **{rollover.get('rollover_above_open_n', 0)}**."
+                    f"{stab_str}"
                 )
 
+        cf = lstats.get("creator_fee_summary") or {}
+        if cf:
+            st.subheader("Creator-vault fee & withdrawal-adjusted volume")
+            st.caption(
+                f"Latest snapshot: {cf['latest_ts']} ({cf['snapshot_count']} snapshots, "
+                f"{cf['distinct_latest_pools']} pools, "
+                f"{cf['unique_observed_creator_vaults']} observed vaults). "
+                "Accrued WSOL adds back negative balance deltas (creator claims/withdrawals)."
+            )
+            cf1, cf2, cf3, cf4 = st.columns(4)
+            cf1.metric("Current vault WSOL", f"{cf['current_balance_wsol']:.4f}")
+            cf2.metric("Withdrawn WSOL", f"{cf['total_withdrawn_wsol']:.4f}")
+            cf3.metric("Cumulative accrued WSOL", f"{cf['total_accrued_wsol']:.4f}")
+            cf4.metric(
+                "Implied PumpSwap volume (SOL)",
+                f"{cf['total_implied_volume_sol']:,.1f}",
+            )
         if lstats["pnl_by_quality"]:
             st.subheader("Live outcome associations by raw Jev quality")
             st.caption(

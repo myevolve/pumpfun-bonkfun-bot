@@ -54,6 +54,10 @@ Tuned by the recorded price paths: 2s-poll noise produces sub-2% dips
 (3 of 5 records fired false rollovers at 0% threshold); 5% keeps the
 real rollovers and skips the noise.
 """
+ROLLOVER_SHAKEOUT_WINDOW_S = 10.0
+ROLLOVER_SHAKEOUT_DROP_FRACTION = 0.15
+ROLLOVER_STABILIZE_AFTER_S = 5.0
+ROLLOVER_STABILIZE_DROP_FRACTION = 0.10
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS lessons (
@@ -105,7 +109,22 @@ CREATE TABLE IF NOT EXISTS grad_marks (
     p5 REAL,
     p30 REAL,
     p120 REAL,
+    peak_price REAL,
+    peak_elapsed_s REAL,
+    rollover_price REAL,
+    rollover_elapsed_s REAL,
+    stabilized_rollover_price REAL,
+    stabilized_rollover_elapsed_s REAL,
     reason TEXT,
+    PRIMARY KEY (entry_id)
+);
+CREATE TABLE IF NOT EXISTS paper_flow_marks (
+    entry_id INTEGER NOT NULL REFERENCES lessons(id),
+    rule TEXT NOT NULL,
+    exit_price REAL NOT NULL,
+    elapsed_s REAL NOT NULL,
+    slot INTEGER,
+    recorded_utc TEXT NOT NULL,
     PRIMARY KEY (entry_id)
 );
 """
@@ -170,6 +189,8 @@ class LessonJournal:
             "peak_elapsed_s",
             "rollover_price",
             "rollover_elapsed_s",
+            "stabilized_rollover_price",
+            "stabilized_rollover_elapsed_s",
         ):
             if column not in grad_existing:
                 self._conn.execute(f"ALTER TABLE grad_marks ADD COLUMN {column} REAL")
@@ -196,7 +217,7 @@ class LessonJournal:
             ("rollover", rollover_elapsed_s),
         ):
             if not isfinite(elapsed) or elapsed < 0:
-                raise ValueError(
+                raise ValueError(  # noqa: TRY003
                     f"Graduation {name} elapsed must be finite and nonnegative"
                 )
         with self._conn:
@@ -211,6 +232,52 @@ class LessonJournal:
                     rollover_elapsed_s,
                     entry_id,
                 ),
+            )
+
+    def record_grad_stabilized_rollover(
+        self,
+        entry_id: int,
+        price: float,
+        elapsed_s: float,
+    ) -> None:
+        """Record the 3-tier shakeout-aware stabilized rollover exit sample."""
+        if isinstance(price, bool) or not isfinite(price) or price <= 0:
+            raise ValueError(  # noqa: TRY003
+                "Graduation stabilized rollover price must be finite and positive"
+            )
+        if isinstance(elapsed_s, bool) or not isfinite(elapsed_s) or elapsed_s < 0:
+            raise ValueError(  # noqa: TRY003
+                "Graduation stabilized rollover elapsed must be finite and nonnegative"
+            )
+        with self._conn:
+            self._conn.execute(
+                "UPDATE grad_marks SET stabilized_rollover_price=?,"
+                " stabilized_rollover_elapsed_s=?"
+                " WHERE entry_id=? AND stabilized_rollover_price IS NULL",
+                (price, elapsed_s, entry_id),
+            )
+
+    def record_paper_flow_mark(
+        self,
+        entry_id: int,
+        rule: str,
+        exit_price: float,
+        elapsed_s: float,
+        slot: int | None = None,
+    ) -> None:
+        """Record the first FlowMonitor curve exit observed for a paper entry."""
+        if not isinstance(rule, str) or not rule:
+            raise ValueError("Paper flow exit rule must be a non-empty string")  # noqa: TRY003
+        if isinstance(exit_price, bool) or not isfinite(exit_price) or exit_price <= 0:
+            raise ValueError("Paper flow exit price must be finite and positive")  # noqa: TRY003
+        if isinstance(elapsed_s, bool) or not isfinite(elapsed_s) or elapsed_s < 0:
+            raise ValueError("Paper flow exit elapsed must be finite and nonnegative")  # noqa: TRY003
+        with self._conn:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO paper_flow_marks"
+                " (entry_id, rule, exit_price, elapsed_s, slot, recorded_utc)"
+                " VALUES (?,?,?,?,?,?)",
+                (entry_id, rule, exit_price, elapsed_s, slot, _utc()),
             )
 
     def record(
@@ -251,6 +318,29 @@ class LessonJournal:
             return None
         else:
             return cursor.lastrowid
+
+    def creator_mints(self) -> dict[str, set[str]]:
+        """Return distinct prior mints per creator from stored lessons."""
+        out: dict[str, set[str]] = {}
+        try:
+            rows = self._conn.execute(
+                "SELECT COALESCE("
+                "json_extract(raw, '$.creator'),"
+                " json_extract(raw, '$.gate.last_event.creator')"
+                ") AS creator, mint FROM lessons"
+                " WHERE raw IS NOT NULL AND mint IS NOT NULL"
+            )
+            for creator, mint in rows:
+                if (
+                    isinstance(creator, str)
+                    and creator
+                    and isinstance(mint, str)
+                    and mint
+                ):
+                    out.setdefault(creator, set()).add(mint)
+        except sqlite3.Error:
+            logger.exception("Lesson creator_mints read failed (non-fatal)")
+        return out
 
     def link_outcome(
         self,
@@ -421,7 +511,7 @@ class LessonJournal:
             raise ValueError("Graduation elapsed time must be finite and nonnegative")  # noqa: TRY003
         with self._conn:
             self._conn.execute(
-                f"UPDATE grad_marks SET {column}=?, reason=reason || ?"
+                f"UPDATE grad_marks SET {column}=?, reason=reason || ?"  # noqa: S608
                 f" WHERE entry_id=? AND {column} IS NULL",
                 (price, f" {column}={elapsed_s:.1f}s", entry_id),
             )
