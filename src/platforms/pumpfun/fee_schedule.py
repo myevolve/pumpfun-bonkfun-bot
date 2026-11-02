@@ -610,6 +610,17 @@ class PumpFeeSchedule:
                 await self.accept_account(account)
             except asyncio.CancelledError:
                 raise
+            except RpcUnavailableError as exc:
+                if self._snapshot is not None and not isinstance(
+                    exc, _FeeAttestationError
+                ):
+                    logger.warning(
+                        "Pump fee schedule refresh failed "
+                        "(retaining cached snapshot): %s",
+                        exc,
+                    )
+                else:
+                    logger.exception("Pump fee schedule refresh failed")
             except Exception:
                 logger.exception("Pump fee schedule refresh failed")
 

@@ -1,8 +1,10 @@
+# ruff: noqa: S101
 from __future__ import annotations
 
 import asyncio
 import base64
 import hashlib
+import logging
 import struct
 from collections import deque
 from typing import Any
@@ -294,6 +296,7 @@ class _FakeFeeClient:
         self.post_calls: list[dict[str, Any]] = []
         self.results: deque[PumpFees | BaseException | dict[str, Any] | None] = deque()
         self.block_after_first_account = False
+        self.next_account_error: BaseException | None = None
         self.second_account_started = asyncio.Event()
         self.second_account_cancelled = asyncio.Event()
 
@@ -302,6 +305,10 @@ class _FakeFeeClient:
     ) -> Account:
         del pubkey, commitment
         self.account_calls += 1
+        if self.next_account_error is not None and self.account_calls > 1:
+            error = self.next_account_error
+            self.next_account_error = None
+            raise error
         if self.block_after_first_account and self.account_calls > 1:
             self.second_account_started.set()
             try:
@@ -598,3 +605,34 @@ async def test_close_cancels_inflight_refresh_poll() -> None:
     await schedule.close()
 
     assert client.second_account_cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_poll_transient_rpc_unavailable_retains_cached_snapshot_and_logs_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    account = _fee_account()
+    client = _FakeFeeClient(account)
+    client.queue_attestation(account)
+    client.next_account_error = RpcUnavailableError(
+        "get_account_info", "502 Bad Gateway"
+    )
+    client.block_after_first_account = True
+    clock = _FakeClock()
+    schedule = PumpFeeSchedule(
+        client,
+        PumpFunAddresses.find_fee_config(),
+        PumpFunAddresses.PROGRAM,
+        clock=clock,
+        poll_interval_seconds=0.0,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        await schedule.start()
+        await asyncio.wait_for(client.second_account_started.wait(), timeout=1.0)
+        cached = schedule.require_snapshot()
+        await schedule.close()
+
+    assert cached.config.digest == hashlib.sha256(account.data).hexdigest()
+    assert "Pump fee schedule refresh failed (retaining cached snapshot)" in caplog.text
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]

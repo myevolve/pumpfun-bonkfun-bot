@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 # ruff: noqa: S101 - regression assertions
-
 import base64
 import json
 from pathlib import Path
@@ -516,3 +515,72 @@ def test_geyser_parser_rejects_negative_program_index_before_instruction_decode(
 
     assert parser.parse_token_creation_from_geyser(transaction_info) is None
     assert instruction_parse_calls == 0
+
+
+def test_non_create_prefix_logs_and_exotic_quote_mints_are_rejected_cleanly(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    mint = Pubkey.new_unique()
+    fields = _canonical_event_fields(mint)
+    fields["quote_mint"] = Pubkey.new_unique()  # exotic unsupported quote mint
+    parser = PumpFunEventParser(_StaticEventIDLParser(fields))  # type: ignore[arg-type]
+
+    # 1. CreateIdempotent on a truncated swap log stack must not enter attribute_program_logs
+    truncated_swap_logs = [
+        f"Program {PumpFunAddresses.PROGRAM} invoke [1]",
+        "Program log: Instruction: CreateIdempotent",
+        "Log truncated",
+    ]
+    assert (
+        parser.parse_token_creation_from_logs(truncated_swap_logs, signature="swap")
+        is None
+    )
+
+    # 2. Explicit unsupported quote_mint in CreateEvent must return None (matching instruction path)
+    assert (
+        parser.parse_token_creation_from_logs(_pump_event_logs(), signature="exotic")
+        is None
+    )
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]
+
+
+def test_legacy_create_accepts_canonical_14_account_idl_layout() -> None:
+    class _LegacyCreateIDLParser(_RecordingIDLParser):
+        def decode_instruction(
+            self,
+            _instruction_data: bytes,
+            _account_keys: list[bytes],
+            _accounts: list[int],
+        ) -> dict[str, Any]:
+            self.decode_instruction_calls += 1
+            return {
+                "instruction_name": "create",
+                "args": {
+                    "name": "legacy",
+                    "symbol": "LEG",
+                    "uri": "https://example.invalid/leg.json",
+                    "creator": Pubkey.new_unique(),
+                },
+            }
+
+    provider = PumpFunAddressProvider()
+    mint = Pubkey.new_unique()
+    bonding_curve = provider.derive_pool_address(mint)
+    associated_bonding_curve = provider.derive_associated_bonding_curve(
+        mint, bonding_curve, TOKEN_PROGRAM
+    )
+    user = Pubkey.new_unique()
+    keys = [Pubkey.new_unique() for _ in range(14)]
+    keys[0] = mint
+    keys[2] = bonding_curve
+    keys[3] = associated_bonding_curve
+    keys[7] = user
+    keys[9] = TOKEN_PROGRAM
+
+    parser = PumpFunEventParser(_LegacyCreateIDLParser())  # type: ignore[arg-type]
+    token = parser.parse_token_creation_from_instruction(
+        _CREATE_DISCRIMINATOR, list(range(14)), [bytes(k) for k in keys]
+    )
+    assert token is not None
+    assert token.user == user
+    assert token.token_program_id == TOKEN_PROGRAM

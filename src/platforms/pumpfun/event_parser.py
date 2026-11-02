@@ -45,12 +45,19 @@ PUBKEY_BYTE_LENGTH = 32
 # of the program accounts; treating it like legacy create maps the token program
 # as the user.
 _CREATE_USER_ACCOUNT_INDEX = 7
-_CREATE_TOKEN_PROGRAM_ACCOUNT_INDEX = 8
-_CREATE_ACCOUNT_COUNT = 13
+_CREATE_TOKEN_PROGRAM_ACCOUNT_INDEX = 9
+_CREATE_ACCOUNT_COUNT = 14
 _CREATE_V2_USER_ACCOUNT_INDEX = 5
 _CREATE_V2_TOKEN_PROGRAM_ACCOUNT_INDEX = 7
 _CREATE_V2_ACCOUNT_COUNT = 16
 
+_CREATE_INSTRUCTION_LOGS = frozenset(
+    (
+        "Program log: Instruction: Create",
+        "Program log: Instruction: CreateV2",
+        "Program log: Instruction: Create_v2",
+    )
+)
 _SUPPORTED_TOKEN_PROGRAMS = frozenset(
     (SystemAddresses.TOKEN_PROGRAM, SystemAddresses.TOKEN_2022_PROGRAM)
 )
@@ -272,11 +279,7 @@ class PumpFunEventParser(EventParser):
             TokenInfo if token creation found, None otherwise
         """
         # Check if this is a token creation transaction (create or create_v2 for token2022)
-        if not any(
-            "Program log: Instruction: Create" in log
-            or "Program log: Instruction: Create_v2" in log
-            for log in logs
-        ):
+        if not any(log in _CREATE_INSTRUCTION_LOGS for log in logs):
             return None
 
         logger.info(f"🔍 Parsing token creation from logs for signature: {signature}")
@@ -284,13 +287,18 @@ class PumpFunEventParser(EventParser):
         # Program data is trusted only while the runtime invocation stack says
         # pump.fun owns the active frame. A discriminator alone is forgeable.
         try:
-            entries = attribute_program_logs(logs)
+            try:
+                entries = attribute_program_logs(logs)
+            except ValueError as exc:
+                logger.debug(
+                    "Rejected pump.fun log attribution in %s: %s", signature, exc
+                )
+                return None
             pump_program = str(self.get_program_id())
             create_instruction_found = any(
                 committed
                 and program == pump_program
-                and log.startswith("Program log: Instruction: Create")
-                and not log.startswith("Program log: Instruction: CreateTokenAccount")
+                and log in _CREATE_INSTRUCTION_LOGS
                 for _, program, log, committed in entries
             )
             program_data_entries = [
@@ -440,12 +448,17 @@ class PumpFunEventParser(EventParser):
                         complete_event_state = False
                         token_program_id = None
 
-                    quote_metadata = _resolve_quote_metadata(fields.get("quote_mint"))
-                    if quote_metadata is None:
+                    if fields.get("quote_mint") is None:
                         complete_event_state = False
                         quote_mint = None
                         quote_program = None
                     else:
+                        quote_metadata = _resolve_quote_metadata(fields["quote_mint"])
+                        if quote_metadata is None:
+                            logger.info(
+                                "❌ CreateEvent uses an unsupported or invalid quote mint"
+                            )
+                            continue
                         quote_mint, quote_program = quote_metadata
 
                     associated_bonding_curve = (
@@ -547,18 +560,18 @@ class PumpFunEventParser(EventParser):
             return None
 
         try:
+            validated_accounts = _validate_instruction_accounts(account_keys, accounts)
+            if validated_accounts is None:
+                return None
+            normalized_account_keys, normalized_accounts = validated_accounts
+
             valid_counts = (
                 {_CREATE_V2_ACCOUNT_COUNT, _CREATE_V2_QUOTE_ACCOUNT_COUNT}
                 if is_create_v2
                 else {_CREATE_ACCOUNT_COUNT}
             )
-            if len(accounts) not in valid_counts:
+            if len(normalized_accounts) not in valid_counts:
                 return None
-
-            validated_accounts = _validate_instruction_accounts(account_keys, accounts)
-            if validated_accounts is None:
-                return None
-            normalized_account_keys, normalized_accounts = validated_accounts
 
             def get_account_key(index: int) -> Pubkey | None:
                 if index < 0 or index >= len(normalized_accounts):

@@ -77,8 +77,14 @@ LETSBONK_PLATFORM_CONFIG = Pubkey.from_string(
 
 # Token program and system addresses
 TOKEN_PROGRAM_ID = Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
+TOKEN_2022_PROGRAM_ID = Pubkey.from_string(
+    "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
+)
 SYSTEM_PROGRAM_ID = Pubkey.from_string("11111111111111111111111111111111")
 WSOL_MINT = Pubkey.from_string("So11111111111111111111111111111111111111112")
+USD1_MINT = Pubkey.from_string("USD1ttGY1N17NEEHLmELoaybftRBUSErhqYiQzvEmuB")
+USDC_MINT = Pubkey.from_string("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")
+KNOWN_NON_WSOL_QUOTE_MINTS = (("USD1", USD1_MINT), ("USDC", USDC_MINT))
 COMPUTE_BUDGET_PROGRAM_ID = Pubkey.from_string(
     "ComputeBudget111111111111111111111111111111"
 )
@@ -132,17 +138,20 @@ def derive_event_authority_pda() -> Pubkey:
     return event_authority_pda
 
 
-def derive_pool_state_for_token(base_token_mint: Pubkey) -> Pubkey | None:
+def derive_pool_state_for_token(
+    base_token_mint: Pubkey, quote_mint: Pubkey = WSOL_MINT
+) -> Pubkey:
     """
-    Derive the pool state account for a given base token mint.
+    Derive the pool state account for a given base token mint and quote mint.
 
     Args:
         base_token_mint: The token mint address to search for
+        quote_mint: The quote token mint address (defaults to WSOL)
 
     Returns:
-        Pubkey of the pool state account, or None if not found
+        Pubkey of the pool state account
     """
-    seeds = [b"pool", bytes(base_token_mint), bytes(WSOL_MINT)]
+    seeds = [b"pool", bytes(base_token_mint), bytes(quote_mint)]
     pool_state_pda, _ = Pubkey.find_program_address(seeds, RAYDIUM_LAUNCHLAB_PROGRAM_ID)
     return pool_state_pda
 
@@ -214,13 +223,18 @@ def decode_pool_state(account_data: bytes) -> dict | None:
         return None
 
 
-async def get_pool_state_data(client: AsyncClient, pool_state: Pubkey) -> dict | None:
+async def get_pool_state_data(
+    client: AsyncClient,
+    pool_state: Pubkey,
+    base_token_mint: Pubkey | None = None,
+) -> dict | None:
     """
     Get and decode the pool state account data.
 
     Args:
         client: Solana RPC client
         pool_state: The pool state account address
+        base_token_mint: Optional base token mint to check known non-WSOL quote pools
 
     Returns:
         Dictionary containing decoded pool state data, or None if error
@@ -228,6 +242,27 @@ async def get_pool_state_data(client: AsyncClient, pool_state: Pubkey) -> dict |
     try:
         account_info = await client.get_account_info(pool_state)
         if not account_info.value:
+            if base_token_mint is not None:
+                alt_pools = [
+                    derive_pool_state_for_token(base_token_mint, q_mint)
+                    for _, q_mint in KNOWN_NON_WSOL_QUOTE_MINTS
+                ]
+                alt_resp = await client.get_multiple_accounts(alt_pools)
+                for (label, q_mint), alt_pool, alt_acc in zip(
+                    KNOWN_NON_WSOL_QUOTE_MINTS,
+                    alt_pools,
+                    alt_resp.value or [],
+                    strict=False,
+                ):
+                    if alt_acc is not None:
+                        print(
+                            f"Pool state account not found for WSOL ({WSOL_MINT}), "
+                            f"but token {base_token_mint} has a LaunchLab pool "
+                            f"({alt_pool}) paired against {label} ({q_mint}) rather "
+                            f"than WSOL ({WSOL_MINT}). This example only trades "
+                            "WSOL-paired coins."
+                        )
+                        return None
             print(
                 "Pool state account not found. This coin may have no WSOL "
                 "pool: current bonk launches routinely pair against other "
@@ -242,7 +277,9 @@ async def get_pool_state_data(client: AsyncClient, pool_state: Pubkey) -> dict |
         return None
 
 
-def get_associated_token_address(owner: Pubkey, mint: Pubkey) -> Pubkey:
+def get_associated_token_address(
+    owner: Pubkey, mint: Pubkey, token_program_id: Pubkey = TOKEN_PROGRAM_ID
+) -> Pubkey:
     """
     Calculate the associated token account address for a given owner and mint.
 
@@ -251,19 +288,23 @@ def get_associated_token_address(owner: Pubkey, mint: Pubkey) -> Pubkey:
     Args:
         owner: The wallet that owns the token account
         mint: The token mint address
+        token_program_id: The token program ID (Token or Token-2022)
 
     Returns:
         Pubkey of the associated token account
     """
     ata_address, _ = Pubkey.find_program_address(
-        [bytes(owner), bytes(TOKEN_PROGRAM_ID), bytes(mint)],
+        [bytes(owner), bytes(token_program_id), bytes(mint)],
         ASSOCIATED_TOKEN_PROGRAM_ID,
     )
     return ata_address
 
 
 def create_associated_token_account_idempotent_instruction(
-    payer: Pubkey, owner: Pubkey, mint: Pubkey
+    payer: Pubkey,
+    owner: Pubkey,
+    mint: Pubkey,
+    token_program_id: Pubkey = TOKEN_PROGRAM_ID,
 ) -> Instruction:
     """
     Create an idempotent instruction to create an Associated Token Account.
@@ -274,11 +315,12 @@ def create_associated_token_account_idempotent_instruction(
         payer: The account that will pay for the creation
         owner: The owner of the new token account
         mint: The token mint
+        token_program_id: The token program ID (Token or Token-2022)
 
     Returns:
         Instruction for creating the ATA idempotently
     """
-    ata_address = get_associated_token_address(owner, mint)
+    ata_address = get_associated_token_address(owner, mint, token_program_id)
 
     accounts = [
         AccountMeta(pubkey=payer, is_signer=True, is_writable=True),  # Funding account
@@ -291,7 +333,7 @@ def create_associated_token_account_idempotent_instruction(
             pubkey=SYSTEM_PROGRAM_ID, is_signer=False, is_writable=False
         ),  # System program
         AccountMeta(
-            pubkey=TOKEN_PROGRAM_ID, is_signer=False, is_writable=False
+            pubkey=token_program_id, is_signer=False, is_writable=False
         ),  # Token program
     ]
 
@@ -390,7 +432,9 @@ def create_wsol_account_with_seed(
     return new_account, create_ix, initialize_ix
 
 
-def get_user_base_token_account(payer: Pubkey, base_mint: Pubkey) -> Pubkey:
+def get_user_base_token_account(
+    payer: Pubkey, base_mint: Pubkey, token_program_id: Pubkey = TOKEN_PROGRAM_ID
+) -> Pubkey:
     """
     Get the user's associated token account for the base token.
 
@@ -400,11 +444,12 @@ def get_user_base_token_account(payer: Pubkey, base_mint: Pubkey) -> Pubkey:
     Args:
         payer: The user's wallet address
         base_mint: The base token mint address
+        token_program_id: The token program ID for the base mint
 
     Returns:
         Pubkey of the user's base token account
     """
-    return get_associated_token_address(payer, base_mint)
+    return get_associated_token_address(payer, base_mint, token_program_id)
 
 
 def calculate_maximum_amount_in_from_pool_state(
@@ -504,7 +549,7 @@ async def sell_exact_out(
             return None
 
         # Get and decode pool state data using IDL parser
-        pool_state_data = await get_pool_state_data(client, pool_state)
+        pool_state_data = await get_pool_state_data(client, pool_state, base_token_mint)
         if not pool_state_data:
             print("Failed to decode pool state data")
             return None
@@ -523,6 +568,16 @@ async def sell_exact_out(
         # Derive necessary PDAs
         authority = derive_authority_pda()
         event_authority = derive_event_authority_pda()
+        base_token_program = (
+            TOKEN_2022_PROGRAM_ID
+            if (int(pool_state_data.get("token_program_flag", 0)) & 0b01)
+            else TOKEN_PROGRAM_ID
+        )
+        global_config = (
+            Pubkey.from_string(pool_state_data["global_config"])
+            if pool_state_data.get("global_config")
+            else GLOBAL_CONFIG
+        )
         # platform_config varies per pool — take the pool's own value.
         platform_config = (
             Pubkey.from_string(pool_state_data["platform_config"])
@@ -549,7 +604,9 @@ async def sell_exact_out(
         print(f"Maximum amount in: {maximum_amount_in:,} tokens")
 
         # Get user's base token account (where tokens will be debited from)
-        user_base_token = get_associated_token_address(PAYER.pubkey(), base_token_mint)
+        user_base_token = get_associated_token_address(
+            PAYER.pubkey(), base_token_mint, base_token_program
+        )
 
         # Step 1: Create WSOL account with seed (where WSOL will be received)
         import hashlib
@@ -578,7 +635,7 @@ async def sell_exact_out(
                 pubkey=authority, is_signer=False, is_writable=False
             ),  # authority
             AccountMeta(
-                pubkey=GLOBAL_CONFIG, is_signer=False, is_writable=False
+                pubkey=global_config, is_signer=False, is_writable=False
             ),  # global_config
             AccountMeta(
                 pubkey=platform_config, is_signer=False, is_writable=False
@@ -605,7 +662,7 @@ async def sell_exact_out(
                 pubkey=WSOL_MINT, is_signer=False, is_writable=False
             ),  # quote_token_mint
             AccountMeta(
-                pubkey=TOKEN_PROGRAM_ID, is_signer=False, is_writable=False
+                pubkey=base_token_program, is_signer=False, is_writable=False
             ),  # base_token_program
             AccountMeta(
                 pubkey=TOKEN_PROGRAM_ID, is_signer=False, is_writable=False

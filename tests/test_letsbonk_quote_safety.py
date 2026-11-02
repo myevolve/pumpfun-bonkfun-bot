@@ -1,15 +1,20 @@
+# ruff: noqa: S101
 from __future__ import annotations
 
 import struct
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from solders.pubkey import Pubkey
 
+from core.cycles.core import AMM, CPMM
 from core.pubkeys import SystemAddresses
+from cycles.letsbonk_reader import LetsBonkGraduationReader
+from platforms.letsbonk.address_provider import LetsBonkAddressProvider
 from platforms.letsbonk.curve_manager import (
     LaunchLabCurveType,
     LaunchLabFees,
+    LaunchLabMigrateType,
     LaunchLabPoolStatus,
     LetsBonkCurveManager,
 )
@@ -20,6 +25,7 @@ def _executable_pool_state(**overrides: object) -> dict[str, object]:
     state: dict[str, object] = {
         "curve_type": LaunchLabCurveType.CONSTANT_PRODUCT,
         "status": LaunchLabPoolStatus.FUNDING,
+        "migrate_type": LaunchLabMigrateType.AMM,
         "virtual_base": 1_000,
         "virtual_quote": 1_000,
         "real_base": 2,
@@ -274,3 +280,122 @@ def test_event_parser_preserves_initial_transfer_fee_metadata() -> None:
 
     assert token is not None
     assert token.additional_data["transfer_fee_extension_param"] == transfer_fee
+
+
+def _raw_pool_state_fixture(
+    migrate_type: object,
+) -> tuple[
+    LetsBonkCurveManager,
+    dict[str, object],
+    dict[str, object],
+    dict[str, object],
+    Pubkey,
+]:
+    provider = LetsBonkAddressProvider()
+    base_mint = Pubkey.new_unique()
+    quote_mint = SystemAddresses.SOL_MINT
+    pool_address = provider.derive_pool_address(base_mint, quote_mint)
+    manager = object.__new__(LetsBonkCurveManager)
+    manager.address_provider = provider
+    pool_state: dict[str, object] = {
+        "status": 0,
+        "migrate_type": migrate_type,
+        "base_decimals": 6,
+        "quote_decimals": 9,
+        "supply": 1_000_000_000,
+        "virtual_base": 1_000_000,
+        "virtual_quote": 1_000_000,
+        "real_base": 500_000,
+        "real_quote": 500_000,
+        "token_program_flag": 0,
+        "global_config": Pubkey.new_unique(),
+        "platform_config": Pubkey.new_unique(),
+        "base_mint": base_mint,
+        "quote_mint": quote_mint,
+        "base_vault": provider.derive_base_vault(base_mint, quote_mint),
+        "quote_vault": provider.derive_quote_vault(base_mint, quote_mint),
+        "creator": Pubkey.new_unique(),
+    }
+    decoded_global: dict[str, object] = {
+        "curve_type": 0,
+        "quote_mint": quote_mint,
+        "trade_fee_rate": 2_500,
+    }
+    decoded_platform: dict[str, object] = {
+        "fee_rate": 5_000,
+        "creator_fee_rate": 2_500,
+    }
+    return manager, pool_state, decoded_global, decoded_platform, pool_address
+
+
+@pytest.mark.parametrize(
+    ("raw_migrate_type", "expected_type", "expected_name"),
+    [
+        (0, LaunchLabMigrateType.AMM, "amm"),
+        (1, LaunchLabMigrateType.CPSWAP, "cpswap"),
+    ],
+)
+def test_launchlab_pool_state_decodes_amm_and_cpswap_migrate_types(
+    raw_migrate_type: int,
+    expected_type: LaunchLabMigrateType,
+    expected_name: str,
+) -> None:
+    manager, pool_state, decoded_global, decoded_platform, pool_address = (
+        _raw_pool_state_fixture(raw_migrate_type)
+    )
+    parser = MagicMock()
+    parser.decode_account_data.return_value = dict(pool_state)
+    manager._idl_parser = parser
+
+    decoded_raw = manager._decode_pool_state_with_idl(b"pool")
+    enriched = manager._attach_authoritative_metadata(
+        decoded_raw,
+        decoded_global=decoded_global,
+        decoded_platform=decoded_platform,
+        pool_address=pool_address,
+        base_transfer_fee=None,
+        quote_transfer_fee=None,
+    )
+
+    assert enriched["migrate_type"] == expected_type
+    assert isinstance(enriched["migrate_type"], LaunchLabMigrateType)
+    assert enriched["migrate_type_name"] == expected_name
+
+
+def test_launchlab_pool_state_rejects_invalid_migrate_type() -> None:
+    manager, pool_state, decoded_global, decoded_platform, pool_address = (
+        _raw_pool_state_fixture(2)
+    )
+    with pytest.raises(ValueError, match="Unknown LaunchLab migrate_type 2"):
+        manager._attach_authoritative_metadata(
+            pool_state,
+            decoded_global=decoded_global,
+            decoded_platform=decoded_platform,
+            pool_address=pool_address,
+            base_transfer_fee=None,
+            quote_transfer_fee=None,
+        )
+
+    missing_migrate_type = dict(pool_state)
+    missing_migrate_type.pop("migrate_type")
+    parser = MagicMock()
+    parser.decode_account_data.return_value = missing_migrate_type
+    manager._idl_parser = parser
+    with pytest.raises(ValueError, match="migrate_type"):
+        manager._decode_pool_state_with_idl(b"pool")
+
+
+@pytest.mark.asyncio
+async def test_letsbonk_graduation_reader_resolves_cpswap_and_amm_targets() -> None:
+    reader = object.__new__(LetsBonkGraduationReader)
+    manager = object.__new__(LetsBonkCurveManager)
+    mint = str(Pubkey.new_unique())
+    manager.get_pool_state = AsyncMock(
+        return_value={"migrate_type": LaunchLabMigrateType.CPSWAP}
+    )
+    reader._manager = manager
+
+    assert await reader.migration_target(mint) == str(CPMM)
+
+    manager.get_pool_state.return_value = {"migrate_type": LaunchLabMigrateType.AMM}
+    assert await reader.migration_target(mint) == str(AMM)

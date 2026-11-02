@@ -174,7 +174,9 @@ class LetsBonkGraduationReader:
             )
         except Exception:  # noqa: BLE001 - decode failure means "not a letsbonk curve"
             return None
-        migrate_type = state.get("curve_param", {}).get("migrate_type")
+        migrate_type = state.get("migrate_type")
+        if migrate_type is None:
+            migrate_type = state.get("curve_param", {}).get("migrate_type")
         target = _MIGRATION_TARGETS.get(int(migrate_type or 0))
         return str(target) if target else None
 

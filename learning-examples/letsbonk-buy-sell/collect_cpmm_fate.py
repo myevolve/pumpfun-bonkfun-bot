@@ -30,7 +30,6 @@ import json
 import struct
 import sys
 import time
-import urllib.parse
 import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
@@ -50,8 +49,8 @@ LAUNCHLAB = LetsBonkAddresses.PROGRAM
 STATUS_MIGRATED = 2  # LaunchLabPoolStatus.MIGRATED (byte 17)
 # base58 encoding of a single 0x02 byte: the alphabet maps '2' -> 1, '3' -> 2
 STATUS_MIGRATED_B58 = "3"
-FUND_OFFSET = 77  # on-chain = IDL offset 69 + 8-byte anchor
-MINT_OFFSET = 213  # base_mint (IDL 205 + 8)
+FUND_OFFSET = 69  # total_quote_fund_raising (includes 8-byte anchor discriminator)
+MINT_OFFSET = 205  # base_mint (includes 8-byte anchor discriminator)
 BAND_MIN_SOL = 60.0
 BAND_MAX_SOL = 1000.0
 DEXSCREENER = "https://api.dexscreener.com/token-pairs/v1/solana/"

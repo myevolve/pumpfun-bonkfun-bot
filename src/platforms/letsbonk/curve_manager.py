@@ -39,6 +39,13 @@ class LaunchLabPoolStatus(IntEnum):
     MIGRATED = 2
 
 
+class LaunchLabMigrateType(IntEnum):
+    """Migration target venues encoded by LaunchLab PoolState."""
+
+    AMM = 0
+    CPSWAP = 1
+
+
 @dataclass(frozen=True, slots=True)
 class LaunchLabFees:
     """Quote-denominated LaunchLab trading fees."""
@@ -303,6 +310,7 @@ class LetsBonkCurveManager(CurveManager):
 
         required_integer_fields = (
             "status",
+            "migrate_type",
             "base_decimals",
             "quote_decimals",
             "supply",
@@ -395,6 +403,14 @@ class LetsBonkCurveManager(CurveManager):
         except ValueError as error:
             raise ValueError(f"Unknown LaunchLab pool status {status_raw}") from error
 
+        migrate_type_raw = self._require_integer(pool_state, "migrate_type")
+        try:
+            migrate_type = LaunchLabMigrateType(migrate_type_raw)
+        except ValueError as error:
+            raise ValueError(
+                f"Unknown LaunchLab migrate_type {migrate_type_raw}"
+            ) from error
+
         result = dict(pool_state)
         result.update(
             {
@@ -405,6 +421,8 @@ class LetsBonkCurveManager(CurveManager):
                 "curve_supported": curve_type == self._SUPPORTED_CURVE,
                 "status": status,
                 "status_name": status.name.lower(),
+                "migrate_type": migrate_type,
+                "migrate_type_name": migrate_type.name.lower(),
                 "fees": fees,
                 "trade_fee_rate": fees.protocol_rate,
                 "platform_fee_rate": fees.platform_rate,
