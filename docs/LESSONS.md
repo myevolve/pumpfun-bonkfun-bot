@@ -1765,3 +1765,29 @@ Venue-lane conclusion: letsbonk at retail latency joins cross-chain and
 raw-AMM minute-0 as measured-negative. The council plan's top workstream
 (wallet-intelligence + executable-net-SOL modeling on the pump tapes) is
 unaffected.
+
+## Wave A1: wallet-PnL persistence and delayed-follow falsification (2026-11-03)
+
+`analyze_wallet_pnl.py` ran the council's top-ranked lane on the 24h tape
+(1.9M curve trade events, 100,175 wallets, average-cost realized matching;
+system program and the mayhem vault excluded).
+
+(a) **Profits are real and concentrated**: top-10 wallets earn 17.0% and
+    top-100 earn 30.4% of all positive realized curve PnL.
+(b) **Persistence is real but modest**: Spearman +0.184 across day halves;
+    top-decile half-1 wallets capture 30.5% of half-2 positive PnL
+    (walk-forward, threshold from half-1 only).
+(c) **Delayed-follow does not extract it**: every (delay 1-8 slots x hold
+    10-60 slots x winner-threshold) cell is negative net; gross-of-fee EV
+    ranges -0.00004 (delay 4-8, hold 10, top-decile winners) to -0.00265
+    (delay 1, hold 60, median winners) on 0.05 SOL trades, vs the all-buys
+    baseline gross -0.00069 at (2,25). Winner-wallet buys are not followed
+    by positive drift at retail delay — their flow marks local tops, which
+    is consistent with winners selling into follower demand rather than
+    their entries signaling upside.
+(d) **Entry-side wallet-following is closed at these parameters** (single
+    tape; >=3 non-contiguous tapes rule blocks any reversal claim). The
+    wallet signal's remaining testable value is exit-side: winner SELLS as
+    dump timers (the sniper-exit baseline of A2) and funder/buyer-graph
+    clustering (argon's lane) to characterize how the top-100 extract,
+    rather than following their entries.
