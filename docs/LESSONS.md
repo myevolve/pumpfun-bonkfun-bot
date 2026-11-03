@@ -1725,3 +1725,43 @@ Closed all four queued censuses in `docs/STRATEGIES.md` against the 24,015-coin 
    Mitigation shipped: a `0.5s` fast-poll window over the first `120s`
    post-open. Honest status: thin edge, live-arm adversely selected at the
    2s cadence; forward `reclaim_marks` arbitrate at the fixed cadence.
+
+## Wave 15: LetsBonk lifecycle capture and the venue verdict (2026-11-03)
+
+`run_letsbonk_lifecycle_capture.py` ran a clean 12h mainnet soak (578 coins,
+32,736 trades, 7 graduations: 4 fund-target, 3 migrate-instruction; zero
+unbounded failures; 122 bounded slot-gap journal pairs). Findings from the
+tape, all recorded under the standard evidence rules:
+
+(a) **The B1 decoder-wiring verdict is NO.** On the 329 WSOL-quoted coins
+    (the unit-clean sample), the full 31,104-policy grid is negative
+    everywhere — best policy `~-0.0019` SOL over 6 qualifying entries, 0%
+    win rate, and no marginal knob (entry latency, stops, holds, gates)
+    moves it — before applying the measured `-8..-11%` letsbonk round-trip
+    spread. No hold horizon clears the spread; the LaunchLab decoder stays
+    unwired in the bot's listener, per the capture-first gate.
+(b) **43% of letsbonk launches are not WSOL-quoted.** Multi-asset pools
+    (`6GmAFSYs...`, `WXMRyRZhsa...`, USDC et al.) dominate the overnight
+    wave; amounts and `fund_target` live in each quote mint's raw units.
+    All 171 WSOL coins decode with `fund_target` exactly `85 SOL`, and the
+    fund-target graduation fires exactly at the crossing (verified at
+    `85.000000447 SOL`), so raw-vs-raw detection stays valid on every
+    quote asset — only SOL-denominated summaries must filter
+    `quote_mint == WSOL`.
+(c) **Creator behavior inverts vs pump.fun.** Only 10/226 traded WSOL coins
+    have a dev buy (pump: near-universal), while 97/226 creators sold
+    (median first sell at `0.83 SOL` of reserves). The pump-derived
+    dev-buy-anchored gate/policy families barely fire on this venue.
+(d) **Median coin peaks at `4.86 SOL` of reserves — 5.7% of the 85 SOL
+    graduation target** (p90 `37 SOL`, max `129 SOL`; 1 graduation in 329
+    coins, `0.3%`). Final/peak median `0.00`; launch volume is bursty
+    (456 of the 578 coins arrived inside one ~2.5h campaign window).
+(e) **Summarizer portability fixes** (found by the real tape, committed):
+    null-`mayhem` counting, `None`-tolerant `q`/`dist`, and
+    `dev_buy_sol` None-guards — pump-tape regression unchanged
+    (`mayhem=9065`).
+
+Venue-lane conclusion: letsbonk at retail latency joins cross-chain and
+raw-AMM minute-0 as measured-negative. The council plan's top workstream
+(wallet-intelligence + executable-net-SOL modeling on the pump tapes) is
+unaffected.

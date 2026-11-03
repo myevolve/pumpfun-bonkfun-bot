@@ -31,22 +31,24 @@ INITIAL_VSOL = 30 * LAMPORTS
 
 
 def q(values: list[float], p: float) -> float:
-    if not values:
+    present = [v for v in values if v is not None]
+    if not present:
         return float("nan")
-    s = sorted(values)
+    s = sorted(present)
     k = (len(s) - 1) * p
     lo, hi = int(k), min(int(k) + 1, len(s) - 1)
     return s[lo] + (s[hi] - s[lo]) * (k - lo)
 
 
 def dist(name: str, values: list[float], fmt: str = "{:.2f}") -> None:
-    if not values:
+    present = [v for v in values if v is not None]
+    if not present:
         print(f"  {name:36s} n=0")
         return
     print(
-        f"  {name:36s} n={len(values):<4d} p25={fmt.format(q(values, 0.25))} "
-        f"p50={fmt.format(q(values, 0.5))} p75={fmt.format(q(values, 0.75))} "
-        f"p90={fmt.format(q(values, 0.9))} max={fmt.format(max(values))}"
+        f"  {name:36s} n={len(present):<4d} p25={fmt.format(q(present, 0.25))} "
+        f"p50={fmt.format(q(present, 0.5))} p75={fmt.format(q(present, 0.75))} "
+        f"p90={fmt.format(q(present, 0.9))} max={fmt.format(max(present))}"
     )
 
 
@@ -64,7 +66,7 @@ def population(coins: list[dict]) -> None:
     dist("peak real SOL", [c["peak_sol"] for c in traded])
     dist(
         "peak / (dev buy)",
-        [c["peak_sol"] / c["dev_buy_sol"] for c in traded if c["dev_buy_sol"] > 0],
+        [c["peak_sol"] / c["dev_buy_sol"] for c in traded if (c["dev_buy_sol"] or 0) > 0],
     )
     dist(
         "slots to peak",
@@ -97,7 +99,7 @@ def population(coins: list[dict]) -> None:
         [
             c["creator_first_sell_sol_level"] / c["dev_buy_sol"]
             for c in cs
-            if c["dev_buy_sol"] > 0
+            if (c["dev_buy_sol"] or 0) > 0
         ],
     )
     dist("creator sold % of dev buy", [c["creator_sold_pct"] for c in cs], "{:.0f}")
@@ -105,7 +107,7 @@ def population(coins: list[dict]) -> None:
         m: sum(
             1
             for c in traded
-            if c["dev_buy_sol"] > 0 and c["peak_sol"] >= m * c["dev_buy_sol"]
+            if (c["dev_buy_sol"] or 0) > 0 and c["peak_sol"] >= m * c["dev_buy_sol"]
         )
         for m in (1.5, 2, 3, 5)
     }
@@ -171,7 +173,7 @@ def sell_value(v_sol: int, v_tok: int, tokens: int) -> float:
 def simulate(coin: dict, p: Policy, buy_lamports: int) -> float | None:
     """Return net PnL in lamports for one coin under policy p, or None if no entry."""
     trades = coin["trades"]
-    if not trades or coin["dev_buy_sol"] <= 0:
+    if not trades or (coin["dev_buy_sol"] or 0) <= 0:
         return None
     if p.gate_no_mayhem and coin["mayhem"]:
         return None
