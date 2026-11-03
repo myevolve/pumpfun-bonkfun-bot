@@ -750,6 +750,7 @@ async def run(
     drain_seconds: float = 600,
     max_reconnects: int = 20,
     stream_idle_seconds: float = 30,
+    subscription_request: geyser_pb2.SubscribeRequest | None = None,
 ) -> int:
     duration = minutes * 60
     admission_seconds = (
@@ -847,7 +848,11 @@ async def run(
                 channel = connect(credentials)
                 call = geyser_pb2_grpc.GeyserStub(channel).Subscribe()
                 await asyncio.wait_for(
-                    call.write(subscription()),
+                    call.write(
+                        subscription_request
+                        if subscription_request is not None
+                        else subscription()
+                    ),
                     timeout=min(15, max(0.001, deadline - time.monotonic())),
                 )
                 await asyncio.wait_for(

@@ -9,7 +9,8 @@ submits a transaction.
 
 | script | purpose |
 |---|---|
-| `record_lifecycles.py` | Stream pump.fun + PumpSwap over Geyser with an explicit `--env-file`; retain local receive times, a processed-slot sidecar and incomplete-coverage flags. Bounded by `--minutes`, `--idle`, `--max-age`. |
+| `record_lifecycles.py` | Stream pump.fun + PumpSwap over Geyser with an explicit `--env-file`; retain local receive times, a processed-slot sidecar and incomplete-coverage flags. Bounded by `--minutes`, `--idle`, `--max-age`. `run(..., subscription_request=...)` accepts an alternative program subscription; the LetsBonk capture uses it. |
+| `run_letsbonk_lifecycle_capture.py` | Stream Raydium LaunchLab (letsbonk.fun) over Geyser with an explicit `--env-file`; instruction-parsed creations (fund_target/supply from curve args), TradeEvent trades via the shared decoder, fund-target and migrate-instruction graduation detection. Same tape schema as `record_lifecycles.py` where semantics match; divergent fields (create_ts, mayhem, v_sol0/v_tok0, post_trades) null. `--self-check` runs the offline decoder/detector checks. |
 | `summarize_lifecycles.py` | Population stats plus a 31k-policy entry/exit backtest with a time-split holdout (rank on the earlier half, score on the later half). |
 | `summarize_graduations.py` | Post-graduation price paths, actor concentration, and entry/exit backtest on the PumpSwap tape. |
 | `replay_gate.py` | Legacy gate/flow replay; separate `--lock <LOCK.json> --out <NEW.json>` mode evaluates only a preregistered immediate-handler model with source/fee provenance and observation-coverage guards. |
