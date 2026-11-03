@@ -1825,3 +1825,35 @@ Curve-phase entry modeling joins entry-following (A1) as measured-negative.
 The live A-lanes are now exit-side: A4's sniper-exit/winner-sell timing and
 A3's post-washout delayed entry on the 4.95M-trade post-graduation tape —
 the last untested home of the direction-model idea.
+
+## Wave A4: winner-sell is a strong, creator-independent exit timer (2026-11-03)
+
+`analyze_exit_signals.py` measured forward price paths after half-2 trades,
+grouped by the trader's strictly-prior realized PnL (walk-forward, top-decile
+of positive half-1 PnL, threshold ~2 SOL). The event study found the program's
+first positive result:
+
+(a) **Winner sells time the dumps.** After a winner-wallet SELL: median
+    forward move `-13.5%` / `-21.8%` / `-36.9%` at 10/25/60 slots
+    (n=191,503, coin-clustered bootstrap CIs entirely negative:
+    `[-8.8%,-7.7%]`, `[-8.3%,-6.9%]`, `[-10.7%,-8.5%]` on the median).
+    Ordinary sells: `-0.7%` / `-1.2%` / `-2.4%`. The gap is ~12-15x at every
+    horizon.
+(b) **It survives creator exclusion.** With every creator event removed,
+    winner-sells still precede `-14.5%` / `-23.1%` / `-38.6%` medians
+    (n=182,049) vs `-0.7%` / `-1.2%` / `-2.5%` for other sells — so this is
+    NOT the bot's existing `creator_sell` flow-exit rule in disguise; it is
+    an independent and much stronger exit signal.
+(c) **Winner buys remain non-actionable at retail delay** (forward medians
+    +2.3% at 10 slots then negative), consistent with A1: winners buy early,
+    followers cannot.
+(d) **Deployable shape**: an exit overlay on held positions — "exit when a
+    top-decile-prior-PnL wallet sells into your position" — needs only a
+    running realized-PnL map over observed flow, no new infrastructure.
+    It composes with (does not replace) `creator_sell`.
+
+Honest limits: single tape (the multi-tape rule blocks live activation;
+the overlay is a config-gated paper-mode candidate until >=3 non-contiguous
+tapes confirm), marks not quotes, and the threshold is venue/day-specific.
+Next: validate on the letsbonk WSOL tape as tape #2 (same harness, data on
+disk), and spec the `winner_sell` flow-exit rule for the paper profile.
