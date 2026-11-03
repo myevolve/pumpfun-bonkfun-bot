@@ -159,6 +159,34 @@ this document authorizes execution or changes the standing risk policy.
   candidate mining with no held-out test). This inventory grows by
   census, not by mining.
 
+## 8. Post-graduation pool reclaim — dry-run instrument (Wave 13)
+
+- **Mechanism**: after graduation, wait for the post-migration shakeout, then
+  enter on a `+5%` reclaim above the pool `open_price`, riding the second-wave
+  continuation (`p120/open = 1.155x` on top-decile organic graduations) while
+  skipping instant open-and-dump migrations.
+- **Measured (OOS, exact-CPMM tape)**: the only measured-positive OOS entry —
+  **`+5.3%` TRAIN / `+1.68%..+2.15%` LOCK**.
+- **Dry-run instrument**: paper marks only (`reclaim_watch.enabled: true` in
+  `whaleride-paper.yaml`; rows land in the `reclaim_marks` table via the
+  `LessonJournal` reclaim surface). Never signs.
+- **Frozen parameters**: pullback depth `0.10–0.35` below open, reclaim `+5%`,
+  `min_quote_sol 55.0`, trail `10%`, target `15%`, `max_hold 180s`,
+  trigger window `300s`.
+- **What the first mark proves**: that a paper reclaim entry was observed,
+  priced, and recorded against a live graduated pool under the frozen rules —
+  the forward sample that arbitrates whether the OOS edge survives live
+  observation-age and spread. Until a cohort accumulates, the LOCK numbers
+  remain unconfirmed gross marks, not an authorization.
+- **letsbonk analog — prerequisites (all unmet)**:
+  - Runtime gate is PUMP_FUN-only (`_await_entry_gate`); no letsbonk path exists.
+  - No LaunchLab trade-event feed — the single largest prerequisite.
+  - No graduation-watch analog and no post-migration sell path.
+  - Curve parameters are not transplantable between bonding geometries.
+  - The documented letsbonk round-trip spread (`−8..−11%`) dominates
+    reclaim-scale edges; it must compress before any reclaim arm is measurable.
+- **Status**: DRY-RUN ONLY (instrumented). No status here moves it to ARMED.
+
 ---
 
 ## Completed hypothesis censuses (measured 2026-10-14, `lifecycles_24h.jsonl`, n=24,015 coins)

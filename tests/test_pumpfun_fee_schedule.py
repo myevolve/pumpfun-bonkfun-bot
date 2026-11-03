@@ -636,3 +636,54 @@ async def test_poll_transient_rpc_unavailable_retains_cached_snapshot_and_logs_w
     assert cached.config.digest == hashlib.sha256(account.data).hexdigest()
     assert "Pump fee schedule refresh failed (retaining cached snapshot)" in caplog.text
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+def test_set_poll_interval_accepts_positive_finite_value() -> None:
+    account = _fee_account()
+    client = _FakeFeeClient(account)
+    clock = _FakeClock()
+    schedule = _fee_schedule(client, clock)
+
+    schedule.set_poll_interval(8.0)
+
+    assert schedule._poll_interval_seconds == 8.0
+
+
+@pytest.mark.parametrize("seconds", [0.0, -1.0, True, float("nan"), float("inf")])
+def test_set_poll_interval_rejects_invalid_values(seconds: float) -> None:
+    account = _fee_account()
+    client = _FakeFeeClient(account)
+    clock = _FakeClock()
+    schedule = _fee_schedule(client, clock)
+
+    with pytest.raises(ValueError, match="finite positive"):
+        schedule.set_poll_interval(seconds)
+
+    assert schedule._poll_interval_seconds == 3_600.0
+
+
+@pytest.mark.asyncio
+async def test_started_poll_uses_updated_interval() -> None:
+    account = _fee_account()
+    client = _FakeFeeClient(account)
+    client.queue_attestation(account)
+    clock = _FakeClock()
+    schedule = PumpFeeSchedule(
+        client,
+        PumpFunAddresses.find_fee_config(),
+        PumpFunAddresses.PROGRAM,
+        clock=clock,
+        poll_interval_seconds=0.05,
+    )
+    await schedule.start()
+    await asyncio.sleep(0.12)
+    before = client.account_calls
+    assert before >= 2  # initial fetch plus at least one 0.05s poll
+
+    schedule.set_poll_interval(60.0)
+    await asyncio.sleep(0.3)
+
+    # Next poll cycle sleeps 60s; at most one in-flight 0.05s cycle may land.
+    assert client.account_calls - before <= 1
+
+    await schedule.close()

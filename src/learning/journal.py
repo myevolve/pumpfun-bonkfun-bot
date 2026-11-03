@@ -59,6 +59,19 @@ ROLLOVER_SHAKEOUT_DROP_FRACTION = 0.15
 ROLLOVER_STABILIZE_AFTER_S = 5.0
 ROLLOVER_STABILIZE_DROP_FRACTION = 0.10
 
+RECLAIM_PULLBACK_MIN = 0.10
+"""Minimum pool-price pullback from open before a reclaim entry can arm."""
+RECLAIM_PULLBACK_MAX = 0.35
+"""Deeper pullbacks mean the migration pool is draining: arm nothing."""
+RECLAIM_RECLAIM_PCT = 0.05
+"""Rise off the low, in fraction of the low, that confirms the reclaim."""
+RECLAIM_MIN_QUOTE_SOL = 55.0
+"""Minimum pool quote vault (SOL) for a reclaim entry to be sellable."""
+RECLAIM_TRAIL_PCT = 0.10
+RECLAIM_TARGET_PCT = 0.15
+RECLAIM_MAX_HOLD_S = 180.0
+RECLAIM_TRIGGER_WINDOW_S = 300.0
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS lessons (
     id INTEGER PRIMARY KEY,
@@ -126,6 +139,18 @@ CREATE TABLE IF NOT EXISTS paper_flow_marks (
     slot INTEGER,
     recorded_utc TEXT NOT NULL,
     PRIMARY KEY (entry_id)
+);
+CREATE TABLE IF NOT EXISTS reclaim_marks (
+    entry_id INTEGER PRIMARY KEY REFERENCES lessons(id),
+    trigger_utc TEXT NOT NULL,
+    trigger_elapsed_s REAL NOT NULL,
+    pullback_depth REAL NOT NULL,
+    real_quote_sol REAL,
+    reclaim_entry_price REAL NOT NULL,
+    reclaim_exit_price REAL,
+    reclaim_elapsed_s REAL,
+    reclaim_rule TEXT,
+    exit_utc TEXT
 );
 """
 
@@ -255,6 +280,95 @@ class LessonJournal:
                 " stabilized_rollover_elapsed_s=?"
                 " WHERE entry_id=? AND stabilized_rollover_price IS NULL",
                 (price, elapsed_s, entry_id),
+            )
+
+    def record_reclaim_entry(
+        self,
+        entry_id: int,
+        *,
+        trigger_elapsed_s: float,
+        pullback_depth: float,
+        entry_price: float,
+        real_quote_sol: float | None,
+    ) -> None:
+        """Record a post-graduation reclaim arm entry (one row per entry)."""
+        if (
+            isinstance(entry_price, bool)
+            or not isfinite(entry_price)
+            or entry_price <= 0
+        ):
+            raise ValueError(  # noqa: TRY003
+                "Reclaim entry price must be finite and positive"
+            )
+        if (
+            isinstance(trigger_elapsed_s, bool)
+            or not isfinite(trigger_elapsed_s)
+            or trigger_elapsed_s < 0
+        ):
+            raise ValueError(  # noqa: TRY003
+                "Reclaim trigger elapsed must be finite and nonnegative"
+            )
+        if (
+            isinstance(pullback_depth, bool)
+            or not isfinite(pullback_depth)
+            or not 0.0 < pullback_depth < 1.0
+        ):
+            raise ValueError(  # noqa: TRY003
+                "Reclaim pullback depth must be finite and in (0, 1)"
+            )
+        if real_quote_sol is not None and (
+            isinstance(real_quote_sol, bool)
+            or not isfinite(real_quote_sol)
+            or real_quote_sol < 0
+        ):
+            raise ValueError(  # noqa: TRY003
+                "Reclaim real quote must be finite and nonnegative or None"
+            )
+        with self._conn:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO reclaim_marks"
+                " (entry_id, trigger_utc, trigger_elapsed_s, pullback_depth,"
+                " real_quote_sol, reclaim_entry_price)"
+                " VALUES (?,?,?,?,?,?)",
+                (
+                    entry_id,
+                    _utc(),
+                    trigger_elapsed_s,
+                    pullback_depth,
+                    real_quote_sol,
+                    entry_price,
+                ),
+            )
+
+    def record_reclaim_exit(
+        self,
+        entry_id: int,
+        *,
+        exit_price: float | None,
+        elapsed_s: float | None,
+        rule: str,
+    ) -> None:
+        """Record the reclaim exit; exit_price=None means censored (watch end)."""
+        if not isinstance(rule, str) or not rule:
+            raise ValueError("Reclaim exit rule must be a non-empty string")  # noqa: TRY003
+        if exit_price is not None and (
+            isinstance(exit_price, bool) or not isfinite(exit_price) or exit_price <= 0
+        ):
+            raise ValueError(  # noqa: TRY003
+                "Reclaim exit price must be finite and positive or None"
+            )
+        if elapsed_s is not None and (
+            isinstance(elapsed_s, bool) or not isfinite(elapsed_s) or elapsed_s < 0
+        ):
+            raise ValueError(  # noqa: TRY003
+                "Reclaim exit elapsed must be finite and nonnegative or None"
+            )
+        with self._conn:
+            self._conn.execute(
+                "UPDATE reclaim_marks SET reclaim_exit_price=?,"
+                " reclaim_elapsed_s=?, reclaim_rule=?, exit_utc=?"
+                " WHERE entry_id=? AND reclaim_exit_price IS NULL",
+                (exit_price, elapsed_s, rule, _utc(), entry_id),
             )
 
     def record_paper_flow_mark(

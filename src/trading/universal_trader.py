@@ -63,6 +63,14 @@ from interfaces.core import Platform, TokenInfo
 from learning.journal import (
     PAPER_HORIZONS,
     PAPER_MARK_MAX_LATENESS_S,
+    RECLAIM_MAX_HOLD_S,
+    RECLAIM_MIN_QUOTE_SOL,
+    RECLAIM_PULLBACK_MAX,
+    RECLAIM_PULLBACK_MIN,
+    RECLAIM_RECLAIM_PCT,
+    RECLAIM_TARGET_PCT,
+    RECLAIM_TRAIL_PCT,
+    RECLAIM_TRIGGER_WINDOW_S,
     ROLLOVER_EXIT_DROP_FRACTION,
     ROLLOVER_SHAKEOUT_DROP_FRACTION,
     ROLLOVER_SHAKEOUT_WINDOW_S,
@@ -301,6 +309,8 @@ class UniversalTrader:
         token_queue_size: int = 128,
         position_journal_path: str | Path | None = None,
         transaction_ledger_path: str | Path | None = None,
+        reclaim_watch: bool = False,
+        fee_poll_interval_seconds: float | None = None,
     ):
         """Initialize the universal trader."""
         self.exit_strategy = _validate_exit_config(
@@ -468,6 +478,16 @@ class UniversalTrader:
         # Trading filters/modes
         self.match_string = match_string
         self.bro_address = bro_address
+        self.reclaim_watch = bool(reclaim_watch)
+        if fee_poll_interval_seconds is not None and (
+            isinstance(fee_poll_interval_seconds, bool)
+            or not isfinite(fee_poll_interval_seconds)
+            or fee_poll_interval_seconds <= 0
+        ):
+            raise ValueError(  # noqa: TRY003
+                "fee_poll_interval_seconds must be finite and positive or None"
+            )
+        self.fee_poll_interval_seconds = fee_poll_interval_seconds
         self.marry_mode = marry_mode
         self.yolo_mode = yolo_mode
         self.flow_rules = flow_rules
@@ -1849,6 +1869,19 @@ class UniversalTrader:
                         "Pump.fun execution requires fee attestation support"
                     )
                 await prepare_fee_schedule()
+            if getattr(self, "fee_poll_interval_seconds", None):
+                # Configure both fee schedules' poll cadence (best-effort:
+                # managers/schedules may be absent in test doubles).
+                implementations = getattr(self, "platform_implementations", None)
+                for manager_name in ("curve_manager", "pumpswap"):
+                    schedule = getattr(
+                        getattr(implementations, manager_name, None),
+                        "fee_schedule",
+                        None,
+                    )
+                    set_poll_interval = getattr(schedule, "set_poll_interval", None)
+                    if callable(set_poll_interval):
+                        set_poll_interval(self.fee_poll_interval_seconds)
             await self._resume_ledger_bound_submissions()
             if not resume_only:
                 await self._resume_staged_cleanups()
@@ -2907,6 +2940,7 @@ class UniversalTrader:
         price the pool (settle+retry), then sample the decay. ANY failure is
         a censored column — never fatal, never an invented price.
         """
+        reclaim: dict[str, float | None | bool] | None = None
         try:
             deadline = started + 960
             graduated = False
@@ -2958,6 +2992,13 @@ class UniversalTrader:
             peak = (open_val, 0.0)  # (price, elapsed_s)
             rollover = None
             stabilized_rollover = None
+            reclaim = {
+                "low": open_val,
+                "entry": None,
+                "peak": None,
+                "entry_at": None,
+                "done": not (getattr(self, "reclaim_watch", False) and open_val > 0),
+            }
             shakeout_window_s = getattr(
                 self,
                 "rollover_shakeout_window_s",
@@ -2978,8 +3019,9 @@ class UniversalTrader:
                 "rollover_stabilize_drop_fraction",
                 ROLLOVER_STABILIZE_DROP_FRACTION,
             )
-            while monotonic() < deadline and not (
-                rollover and stabilized_rollover and not pending
+            while monotonic() < deadline and (
+                not (rollover and stabilized_rollover and not pending)
+                or not reclaim["done"]
             ):
                 await asyncio.sleep(2.0)
                 price = await self._graduated_pool_price(
@@ -2990,6 +3032,9 @@ class UniversalTrader:
                 elapsed = monotonic() - grad_at
                 if price is None:
                     continue
+                await self._reclaim_step(
+                    token_info, entry_id, reclaim, price[0], open_val, elapsed
+                )
                 for offset, column in tuple(pending.items()):
                     if elapsed >= offset:
                         self.lesson_journal.finish_grad_mark(
@@ -3031,6 +3076,125 @@ class UniversalTrader:
             logger.warning(
                 "Graduation watch for entry %s censored", entry_id, exc_info=True
             )
+        finally:
+            # Watch ended (deadline, completion, error or cancellation) with a
+            # reclaim position still open: censor the exit. The sync write
+            # never raises CancelledError, so draining stays crash-free.
+            if (
+                reclaim is not None
+                and not reclaim["done"]
+                and reclaim["entry"] is not None
+            ):
+                reclaim["done"] = True
+                try:
+                    self.lesson_journal.record_reclaim_exit(
+                        entry_id, exit_price=None, elapsed_s=None, rule="watch_end"
+                    )
+                except Exception:  # noqa: BLE001 - optional instrumentation
+                    logger.debug(
+                        "Reclaim watch-end censor write failed for %s",
+                        entry_id,
+                        exc_info=True,
+                    )
+
+    async def _reclaim_step(
+        self,
+        token_info: TokenInfo,
+        entry_id: int,
+        st: dict,
+        p: float,
+        open_val: float,
+        elapsed: float,
+    ) -> None:
+        """Post-graduation reclaim paper arm: one poll of the pullback watch."""
+        if st["done"]:
+            return
+        if st["entry"] is None:
+            # Pre-trigger: cap the arm at the trigger window, track the low,
+            # decline pools that drain past PULLBACK_MAX, enter on the reclaim.
+            if elapsed > RECLAIM_TRIGGER_WINDOW_S:
+                st["done"] = True
+                return
+            st["low"] = min(st["low"], p)
+            pullback = (open_val - st["low"]) / open_val if open_val > 0 else 0.0
+            if pullback > RECLAIM_PULLBACK_MAX:
+                st["done"] = True
+                return
+            if pullback >= RECLAIM_PULLBACK_MIN and p >= st["low"] * (
+                1 + RECLAIM_RECLAIM_PCT
+            ):
+                quote = await self._pool_real_quote(token_info, 5.0)
+                if quote is None or quote < RECLAIM_MIN_QUOTE_SOL:
+                    return  # unreadable or unsellable pool: retry next poll
+                try:
+                    self.lesson_journal.record_reclaim_entry(
+                        entry_id,
+                        trigger_elapsed_s=elapsed,
+                        pullback_depth=pullback,
+                        entry_price=p,
+                        real_quote_sol=quote,
+                    )
+                except Exception:  # noqa: BLE001 - optional instrumentation
+                    logger.debug(
+                        "Reclaim entry write failed for %s", entry_id, exc_info=True
+                    )
+                    return
+                st["entry"] = p
+                st["peak"] = p
+                st["entry_at"] = monotonic()
+            return
+        # Position open: trail, target or max-hold exit on the first hit.
+        st["peak"] = max(st["peak"], p)
+        exit_price = None
+        rule = None
+        if p <= st["peak"] * (1 - RECLAIM_TRAIL_PCT):
+            exit_price, rule = p, "trail_10pct"
+        elif p >= st["entry"] * (1 + RECLAIM_TARGET_PCT):
+            exit_price, rule = p, "target_15pct"
+        elif monotonic() - st["entry_at"] >= RECLAIM_MAX_HOLD_S:
+            exit_price, rule = p, "hold_expired"
+        if rule is not None:
+            st["done"] = True
+            try:
+                self.lesson_journal.record_reclaim_exit(
+                    entry_id,
+                    exit_price=exit_price,
+                    elapsed_s=monotonic() - st["entry_at"],
+                    rule=rule,
+                )
+            except Exception:  # noqa: BLE001 - optional instrumentation
+                logger.debug(
+                    "Reclaim exit write failed for %s", entry_id, exc_info=True
+                )
+
+    async def _pool_real_quote(
+        self, token_info: TokenInfo, remaining: float
+    ) -> float | None:
+        """One-shot pool quote vault read in SOL; any miss is censored."""
+        if remaining <= 0 or getattr(self, "solana_client", None) is None:
+            return None
+        try:
+            import struct
+
+            from spl.token.instructions import get_associated_token_address
+
+            from platforms.pumpfun.pumpswap import PumpSwapAddresses
+
+            pool = PumpSwapAddresses.derive_canonical_pool(token_info.mint, WSOL_MINT)
+            vault = token_info.quote_vault or get_associated_token_address(
+                pool, WSOL_MINT, SystemAddresses.TOKEN_PROGRAM
+            )
+            async with asyncio.timeout(remaining):
+                accounts = await self.solana_client.get_multiple_accounts(
+                    [vault], commitment="processed"
+                )
+            value = accounts[0] if accounts else None
+            data = bytes(value.data) if value is not None else b""
+            if len(data) < 72:
+                return None
+            return struct.unpack_from("<Q", data, 64)[0] / 1e9
+        except Exception:  # noqa: BLE001 - censored read, never invented
+            return None
 
     async def _paper_flow_watch(
         self, token_info: TokenInfo, entry_id: int, started: float, entry_price: float

@@ -8,6 +8,7 @@ import asyncio
 import base64
 import binascii
 import hashlib
+import math
 import struct
 import time
 from dataclasses import dataclass
@@ -506,6 +507,14 @@ class PumpFeeSchedule:
         self._lifecycle_lock = asyncio.Lock()
         self._poll_task: asyncio.Task[None] | None = None
         self._closed = False
+
+    def set_poll_interval(self, seconds: float) -> None:
+        """Update the background refresh cadence; applied on the next poll cycle."""
+        if isinstance(seconds, bool) or not math.isfinite(seconds) or seconds <= 0:
+            raise _FeeConfigError(
+                "poll interval must be a finite positive number of seconds"
+            )
+        self._poll_interval_seconds = seconds
 
     async def start(self) -> None:
         """Fetch, attest, and begin polling the authoritative fee account."""

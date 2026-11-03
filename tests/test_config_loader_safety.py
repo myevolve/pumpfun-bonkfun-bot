@@ -71,6 +71,37 @@ def test_unknown_nested_keys_are_rejected() -> None:
         validate_config(config)
 
 
+def test_reclaim_watch_enabled_is_accepted() -> None:
+    config = minimal_config()
+    config["reclaim_watch"] = {"enabled": True}
+
+    validate_config(config)
+
+
+def test_reclaim_watch_rejects_unknown_subkeys() -> None:
+    config = minimal_config()
+    config["reclaim_watch"] = {"enabled": True, "extra": 1}
+
+    with pytest.raises(ValueError, match="reclaim_watch"):
+        validate_config(config)
+
+
+def test_fee_schedule_poll_interval_is_accepted() -> None:
+    config = minimal_config()
+    config["fee_schedule"] = {"poll_interval_seconds": 8.0}
+
+    validate_config(config)
+
+
+@pytest.mark.parametrize("seconds", [0, -1])
+def test_fee_schedule_poll_interval_must_be_positive(seconds: float) -> None:
+    config = minimal_config()
+    config["fee_schedule"] = {"poll_interval_seconds": seconds}
+
+    with pytest.raises(ValueError, match="poll_interval_seconds"):
+        validate_config(config)
+
+
 def test_non_finite_and_unsafe_slippage_are_rejected() -> None:
     config = minimal_config()
     config["trade"]["buy_slippage"] = 1.0

@@ -669,6 +669,31 @@ def _paper_evidence(conn: sqlite3.Connection) -> dict:
                 GROUP BY pf.rule ORDER BY flow_exit_n DESC"""
             )
         ]
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='reclaim_marks'"
+    ).fetchone():
+        out["reclaim_marks"] = {
+            "graduated_n": conn.execute(
+                "SELECT COUNT(*) FROM grad_marks WHERE open_price > 0"
+            ).fetchone()[0],
+            "triggered_n": conn.execute(
+                "SELECT COUNT(*) FROM reclaim_marks"
+            ).fetchone()[0],
+            "by_rule": [
+                dict(row)
+                for row in conn.execute(
+                    """SELECT r.reclaim_rule AS rule,
+                        COUNT(*) AS n,
+                        ROUND(AVG(
+                            r.reclaim_exit_price / r.reclaim_entry_price - 1.0
+                        ), 4) AS mean_gross_return,
+                        ROUND(AVG(r.reclaim_elapsed_s), 4) AS mean_elapsed_s,
+                        SUM(r.reclaim_exit_price IS NULL) AS censored_n
+                    FROM reclaim_marks r
+                    GROUP BY r.reclaim_rule ORDER BY n DESC"""
+                )
+            ],
+        }
     return out
 
 
@@ -925,6 +950,21 @@ def _print_cohort_and_fee_evidence(data: dict) -> None:
                 f" n={row['flow_exit_n']}"
                 f" mean_elapsed_s={row['mean_elapsed_s']}"
                 f" mean_return_vs_entry={row['mean_return_vs_entry']}"
+            )
+    if data.get("reclaim_marks"):
+        rm = data["reclaim_marks"]
+        print(
+            f"\n--- Post-graduation reclaim arm"
+            f" (graduated={rm['graduated_n']},"
+            f" triggered={rm['triggered_n']}) ---"
+        )
+        for row in rm["by_rule"]:
+            print(
+                f"  {row['rule']}:"
+                f" n={row['n']}"
+                f" mean_gross_return={row['mean_gross_return']}"
+                f" mean_elapsed_s={row['mean_elapsed_s']}"
+                f" censored={row['censored_n']}"
             )
     _print_grad_and_fee_evidence(data)
 

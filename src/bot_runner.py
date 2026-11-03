@@ -402,6 +402,10 @@ def _create_trader(
         yolo_mode=cfg["filters"].get("yolo_mode", False),
         compute_units=cfg.get("compute_units", {}),
         max_rps=cfg.get("node", {}).get("max_rps", 25),
+        reclaim_watch=bool((cfg.get("reclaim_watch") or {}).get("enabled", False)),
+        fee_poll_interval_seconds=(cfg.get("fee_schedule") or {}).get(
+            "poll_interval_seconds"
+        ),
         execution_policy=policy,
     )
 

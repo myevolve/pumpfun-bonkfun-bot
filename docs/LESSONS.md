@@ -1676,3 +1676,28 @@ Closed all four queued censuses in `docs/STRATEGIES.md` against the 24,015-coin 
 3. **Keeper Supervisor Startup Grace & Uptime Budget Reset (`keep_whaleride_shadow.py`)**:
    - Newly spawned children before their first row flush or long-lived keepers accumulating isolated transient restarts over multi-day runs could trip false stale kills or exhaust `MAX_RESTARTS`.
    - Stale-output detection now gates on `elapsed > STALE_SECONDS` since child spawn, and `restart_count` resets to `0` after `HEALTHY_RESET_SECONDS = 3600.0` of healthy uptime.
+
+## Wave 13: exit-counterfactual validation, cost audit, reclaim instrumentation (2026-11-03)
+
+1. **Exit-stack counterfactual replay (5.3-day `qd1946` shadow, 54 feasible signals at `L=0.4s`)**:
+   the calibrated exit stack preserves all 41 winners — 22 identical exit points,
+   3 improved, 8 censored-with-positive-floors — and is provably non-harmful on 9 of 13
+   catastrophic losers (cannot lose more than the recorded `-89%` at the 90s cap).
+   Rescue magnitude stays honestly censored: curve tapes were never persisted.
+2. **The ONE winner-cutting channel**: `max_hold_time: 90` cuts 8 of 41 graduations
+   that graduate at `92–332s` (median `+61%` ROI forfeited). Kept at 90s because the
+   broader 24h-tape grid prefers it; flagged for forward arbitration by `paper_flow_marks`.
+3. **Flash-dump entries** make `single_sell_pct: 0.25` a near-zero absolute threshold —
+   unverifiable offline, measurable forward.
+4. **Cost audit**: ~3,540 RPC/h in dry-run was 100% unconsumed fee polling
+   (0 accepts). Cut 4x to ~900/h via `fee_schedule.poll_interval_seconds: 8.0`
+   (8s stays inside the 10s `max_observation_age` freshness bound).
+   Re-attestation was observed at +60/+120s and then absent — flag to re-check.
+5. **`buy_amount` 0.01 → 0.05**: at 0.01 SOL the fixed-fee drag (200k-lamport priority
+   fee) is 4.1% round-trip vs 0.82% at 0.05. Marks are marginal-price-based, so
+   recorded ROI is unchanged; the sizing is cost-realistic.
+6. **Reclaim arm instrumented** (`reclaim_marks` table): forward-tests the only
+   measured-positive OOS strategy — post-graduation pool reclaim at
+   `+5.3%` TRAIN / `+1.68%..+2.15%` LOCK. Frozen parameters:
+   pullback `0.10–0.35` below open, reclaim `+5%`, `min_quote_sol 55`,
+   trail `10%`, target `15%`, `max_hold 180s`, trigger window `300s`.

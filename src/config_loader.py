@@ -59,6 +59,8 @@ ALLOWED_CONFIG_KEYS: dict[str, set[str] | None] = {
         "node",
         "timing",
         "execution",
+        "reclaim_watch",
+        "fee_schedule",
     },
     "geyser": {"endpoint", "api_token", "auth_type"},
     "pumpportal": {"url"},
@@ -132,6 +134,8 @@ ALLOWED_CONFIG_KEYS: dict[str, set[str] | None] = {
     },
     "node": {"max_rps"},
     "timing": {"token_wait_timeout"},
+    "reclaim_watch": {"enabled"},
+    "fee_schedule": {"poll_interval_seconds"},
     "execution": {
         "mode",
         "expected_wallet",
@@ -166,6 +170,7 @@ BOOLEAN_FIELDS = {
     "entry_gate.mayhem_only",
     "entry_gate.exclude_mayhem",
     "entry_gate.require_creator_holding",
+    "reclaim_watch.enabled",
 }
 
 STRING_FIELDS = {
@@ -241,6 +246,7 @@ NUMBER_RANGES: dict[str, tuple[float | None, float | None, bool, bool]] = {
     "entry_gate.max_single_buy_sol": (0, None, False, True),
     "entry_gate.max_buyer_share": (0, 1, False, True),
     "entry_gate.max_inflow_sol_per_slot": (0, None, False, True),
+    "fee_schedule.poll_interval_seconds": (0, None, False, True),
     "priority_fees.extra_percentage": (0, 1, True, True),
     "filters.max_token_age": (0, None, True, True),
     "retries.wait_after_creation": (0, None, True, True),

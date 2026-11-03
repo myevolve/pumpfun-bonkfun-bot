@@ -814,6 +814,176 @@ async def test_graduation_watch_reuses_open_read_and_skips_post_open_settle_slee
 
 
 @pytest.mark.asyncio
+async def test_graduation_watch_records_reclaim_marks_and_censors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = {"now": 100.0}
+
+    async def fake_sleep(seconds: float) -> None:
+        clock["now"] += seconds
+
+    monkeypatch.setattr("trading.universal_trader.monotonic", lambda: clock["now"])
+    monkeypatch.setattr("trading.universal_trader.asyncio.sleep", fake_sleep)
+
+    trader, token, _ = _gated_trader(GateRules())
+    trader.reclaim_watch = True
+    trader.platform_implementations = SimpleNamespace(
+        curve_manager=SimpleNamespace(
+            get_pool_state_and_token_program=AsyncMock(
+                side_effect=ValueError("zeroed completed curve")
+            )
+        )
+    )
+
+    async def fake_pool_real_quote(_tok: TokenInfo, _rem: float) -> float | None:
+        return 60.0
+
+    monkeypatch.setattr(trader, "_pool_real_quote", fake_pool_real_quote)
+
+    db_file = tmp_path / "lessons.sqlite3"
+    with closing(LessonJournal(db_file)) as journal:
+        trader.lesson_journal = journal
+
+        def add_entry(symbol: str) -> int:
+            entry_id = journal.record(
+                LessonObservation(
+                    kind="gate_pass",
+                    mint=MINT,
+                    symbol=symbol,
+                    decision="buyers_present",
+                    buyers=3,
+                    mayhem=False,
+                    raw={"gate": {"slots_waited": 2}},
+                )
+            )
+            assert entry_id is not None
+            journal.start_paper_marks(entry_id, 0.8)
+            return entry_id
+
+        async def run_watch(entry_id: int, seq: list, default: tuple | None) -> None:
+            prices = iter(seq)
+
+            async def fake_price(
+                _tok: TokenInfo, remaining: float, *, settle: bool = True
+            ) -> tuple[float, str] | None:
+                if settle:
+                    await fake_sleep(min(2.0, remaining / 4))
+                return next(prices, default)
+
+            monkeypatch.setattr(
+                trader,
+                "_completed_curve_pool_price",
+                lambda tok, rem: fake_price(tok, rem, settle=True),
+            )
+            monkeypatch.setattr(trader, "_graduated_pool_price", fake_price)
+            clock["now"] = 100.0
+            await trader._graduation_watch(token, entry_id, started=100.0)
+
+        def reclaim_row(entry_id: int) -> tuple | None:
+            return journal._conn.execute(
+                "SELECT trigger_elapsed_s, pullback_depth, real_quote_sol,"
+                " reclaim_entry_price, reclaim_exit_price, reclaim_elapsed_s,"
+                " reclaim_rule FROM reclaim_marks WHERE entry_id=?",
+                (entry_id,),
+            ).fetchone()
+
+        def grad_row(entry_id: int) -> tuple | None:
+            return journal._conn.execute(
+                "SELECT grad_elapsed_s, open_price, peak_price, rollover_price,"
+                " rollover_elapsed_s, stabilized_rollover_price,"
+                " stabilized_rollover_elapsed_s FROM grad_marks WHERE entry_id=?",
+                (entry_id,),
+            ).fetchone()
+
+        # Trail exit: pullback to 0.85, reclaim to 0.90, peak 1.02, trail 0.90.
+        e1 = add_entry("RM1")
+        await run_watch(
+            e1,
+            [(1.0, "ok"), (0.85, "ok"), (0.90, "ok"), (1.02, "ok"), (0.90, "ok")],
+            default=(1.02, "ok"),
+        )
+        assert reclaim_row(e1) == (
+            4.0,
+            (1.0 - 0.85) / 1.0,
+            60.0,
+            0.90,
+            0.90,
+            4.0,
+            "trail_10pct",
+        )
+        grad_enabled = grad_row(e1)
+        assert grad_enabled == (2.0, 1.0, 1.0, 0.85, 2.0, 0.85, 2.0)
+
+        # Target exit: same pullback/reclaim, then 1.05 clears entry*1.15.
+        e2 = add_entry("RM2")
+        await run_watch(
+            e2,
+            [(1.0, "ok"), (0.85, "ok"), (0.90, "ok"), (1.05, "ok")],
+            default=(1.05, "ok"),
+        )
+        assert reclaim_row(e2) == (
+            4.0,
+            (1.0 - 0.85) / 1.0,
+            60.0,
+            0.90,
+            1.05,
+            2.0,
+            "target_15pct",
+        )
+
+        # Max-hold exit: flat price past a shortened MAX_HOLD_S.
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("trading.universal_trader.RECLAIM_MAX_HOLD_S", 5.0)
+            e3 = add_entry("RM3")
+            await run_watch(
+                e3,
+                [(1.0, "ok"), (0.85, "ok"), (0.90, "ok")],
+                default=(0.90, "ok"),
+            )
+        assert reclaim_row(e3)[6] == "hold_expired"
+        assert reclaim_row(e3)[4] == 0.90
+        assert reclaim_row(e3)[5] == 6.0
+
+        # Watch-end censor: entry armed, every later price censored.
+        e4 = add_entry("RM4")
+        await run_watch(
+            e4,
+            [(1.0, "ok"), (0.85, "ok"), (0.90, "ok")],
+            default=None,
+        )
+        assert reclaim_row(e4) == (
+            4.0,
+            (1.0 - 0.85) / 1.0,
+            60.0,
+            0.90,
+            None,
+            None,
+            "watch_end",
+        )
+
+        # Disabled arm: identical price path, byte-identical grad row, no row.
+        trader.reclaim_watch = False
+        e5 = add_entry("RM5")
+        await run_watch(
+            e5,
+            [(1.0, "ok"), (0.85, "ok"), (0.90, "ok"), (1.02, "ok"), (0.90, "ok")],
+            default=(1.02, "ok"),
+        )
+        assert reclaim_row(e5) is None
+        assert grad_row(e5) == grad_enabled
+
+        report = load_report(db_path=db_file)
+        reclaim = report["reclaim_marks"]
+        assert reclaim["graduated_n"] == 5
+        assert reclaim["triggered_n"] == 4
+        by_rule = {row["rule"]: row for row in reclaim["by_rule"]}
+        assert by_rule["trail_10pct"]["n"] == 1
+        assert by_rule["trail_10pct"]["mean_gross_return"] == 0.0
+        assert by_rule["watch_end"]["censored_n"] == 1
+        assert by_rule["watch_end"]["mean_gross_return"] is None
+
+
+@pytest.mark.asyncio
 async def test_graduated_pool_price_reads_pool_and_vaults_in_one_slot_consistent_batch() -> (
     None
 ):
