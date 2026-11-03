@@ -1791,3 +1791,37 @@ system program and the mayhem vault excluded).
     dump timers (the sniper-exit baseline of A2) and funder/buyer-graph
     clustering (argon's lane) to characterize how the top-100 extract,
     rather than following their entries.
+
+## Wave A2: entry-feature harness — stage-1 verdict, three tape traps (2026-11-03)
+
+`analyze_entry_features.py` priced 1.84M warm decision points on the 24h
+tape with executable net-SOL labels (entry at next trade >= signal+2 slots,
+one position per coin, both-side pump fees, dead coins marked at their last
+observed trade). The run surfaced three method traps now handled in the
+harness, then closed the lane:
+
+(a) **"Missing exit = no-trade" is survivorship, not conservatism.** Coins
+    that die inside the horizon are mark-to-last losses; excluding them
+    inflated hold-10 means by ~+17%/trade gross.
+(b) **Means on this tape are dust-tail contaminated.** Hold-10 gross showed
+    mean +4.5% vs median -0.43% with a max single-window return of
+    +3.1e6% — dust-trade implied prices that 0.05 SOL could never fill.
+    The harness now reports medians and winsorized means; raw means are
+    not citable on this venue's marks.
+(c) **Stage-1 verdict: no entry feature beats cash on robust statistics.**
+    Every baseline (always-up, momentum, reversal) is negative at every
+    hold; every feature-decile curve is negative in every decile
+    (n_unique_buyers, buy_sol_total, max_single_buy, price_change_pct,
+    inflow_last5, n_trades). The pre-declared best cell — prior pump
+    >= 3.6x — merely loses *less* (median -0.0012 vs -0.0120 SOL on 0.05
+    SOL trades) and its coin-clustered bootstrap CI excludes zero on the
+    downside; the typical coin in the best cell loses -1.1% per trade.
+(d) **Stage 2 (gradient-boosted model) is not justified**: no single
+    feature separates toward positive EV, and a model cannot combine
+    universally negative-conditional returns into positive EV. The GBT
+    dependency is not installed.
+
+Curve-phase entry modeling joins entry-following (A1) as measured-negative.
+The live A-lanes are now exit-side: A4's sniper-exit/winner-sell timing and
+A3's post-washout delayed entry on the 4.95M-trade post-graduation tape —
+the last untested home of the direction-model idea.
