@@ -54,7 +54,8 @@ def population(coins: list[dict]) -> None:
     traded = [c for c in coins if c["n_trades"] > 1]
     print(
         f"\ncoins={len(coins)} with_non_dev_trades={len(traded)} "
-        f"mayhem={sum(c['mayhem'] for c in coins)} partial={sum(c['partial'] for c in coins)}"
+        f"mayhem={sum(bool(c.get('mayhem')) for c in coins)} "
+        f"partial={sum(c['partial'] for c in coins)}"
     )
     print("\nPopulation (coins with at least one non-dev trade):")
     dist("dev buy SOL", [c["dev_buy_sol"] for c in traded])
@@ -351,7 +352,7 @@ def _holdout(
     print(
         f"\n  {'policy (train rank)':60s} {'train':>9s} {'test n':>6s} {'test win':>8s} {'test SOL':>9s} {'per trade':>9s}"
     )
-    for total, p, n, win, _, _ in train_rank[:top]:
+    for total, p, _n, _win, _, _ in train_rank[:top]:
         pnls = [
             r for r in (simulate(c, p, buy_lamports) for c in test) if r is not None
         ]
