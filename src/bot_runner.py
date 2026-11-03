@@ -406,6 +406,12 @@ def _create_trader(
         fee_poll_interval_seconds=(cfg.get("fee_schedule") or {}).get(
             "poll_interval_seconds"
         ),
+        fee_reattest_after_seconds=(cfg.get("fee_schedule") or {}).get(
+            "reattest_after_seconds"
+        ),
+        fee_max_attestation_age_seconds=(cfg.get("fee_schedule") or {}).get(
+            "max_attestation_age_seconds"
+        ),
         execution_policy=policy,
     )
 

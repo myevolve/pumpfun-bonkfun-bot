@@ -102,6 +102,38 @@ def test_fee_schedule_poll_interval_must_be_positive(seconds: float) -> None:
         validate_config(config)
 
 
+def test_fee_schedule_reattest_pair_is_accepted() -> None:
+    config = minimal_config()
+    config["fee_schedule"] = {
+        "poll_interval_seconds": 8.0,
+        "reattest_after_seconds": 300.0,
+        "max_attestation_age_seconds": 600.0,
+    }
+
+    validate_config(config)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["poll_interval_seconds", "reattest_after_seconds", "max_attestation_age_seconds"],
+)
+@pytest.mark.parametrize("seconds", [0, -1])
+def test_fee_schedule_durations_must_be_positive(field: str, seconds: float) -> None:
+    config = minimal_config()
+    config["fee_schedule"] = {field: seconds}
+
+    with pytest.raises(ValueError, match=field):
+        validate_config(config)
+
+
+def test_fee_schedule_rejects_unknown_subkeys() -> None:
+    config = minimal_config()
+    config["fee_schedule"] = {"poll_interval_seconds": 8.0, "reattest_hz": 1.0}
+
+    with pytest.raises(ValueError, match="Unknown configuration key"):
+        validate_config(config)
+
+
 def test_non_finite_and_unsafe_slippage_are_rejected() -> None:
     config = minimal_config()
     config["trade"]["buy_slippage"] = 1.0

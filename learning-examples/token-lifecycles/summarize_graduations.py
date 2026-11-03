@@ -153,6 +153,9 @@ def is_organic_dispersed(coin: dict) -> bool:
     return (max(buyer_sol.values()) / total_buy_sol) < 0.25
 
 
+# Note: the documented +5.3% TR / +1.98% LK baseline (docs/STRATEGIES.md) came
+# from an ad-hoc no-lag config; this committed function's +1-slot-lag numbers
+# (+2.58% TR / +0.40% LK net) are the honest variant.
 def simulate_reclaim(  # noqa: C901, PLR0912
     pt: list,
     *,

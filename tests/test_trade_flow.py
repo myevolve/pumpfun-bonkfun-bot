@@ -28,6 +28,7 @@ from monitoring.trade_flow import (
     TradeEvent,
     TradeFlowHub,
     TradeFlowLossError,
+    decode_launchlab_trade_events,
     decode_trade_events,
 )
 from monitoring.universal_geyser_listener import UniversalGeyserListener
@@ -1351,3 +1352,137 @@ async def test_consume_trade_flow_recovers_from_overflowed_gate_queue() -> None:
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(task, 1)
+
+
+LAUNCHLAB_PROGRAM = "LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj"
+LAUNCHLAB_POOL = "FaUr6XEmWpbr9NfDRai6iAT4G2vGJBbS4hFZqkuvykBL"
+LAUNCHLAB_MINT = "GmiNyF6biPbrrtFz1iwo2Aw5yxm8WidY6qKzpr2B2SZz"
+
+
+def _launchlab_parser() -> IDLParser:
+    return IDLParser(
+        str(Path(__file__).resolve().parents[1] / "idl" / "raydium_launchlab_idl.json")
+    )
+
+
+def _encode_launchlab_trade_event(
+    parser: IDLParser,
+    *,
+    direction: int = 0,
+    amount_in: int = 500_000_000,
+    amount_out: int = 15_000_000,
+    pool: str = LAUNCHLAB_POOL,
+) -> str:
+    """Anchor-encoded LaunchLab TradeEvent: disc + 17 fields in IDL order."""
+    disc = parser.get_event_discriminators()["TradeEvent"]
+    body = (
+        base58.b58decode(pool)
+        + struct.pack(
+            "<" + "Q" * 13,
+            1_000_000,  # total_base_sell
+            900_000_000,  # virtual_base (token)
+            30_000_000_000,  # virtual_quote (SOL)
+            12_000_000,  # real_base_before
+            20_000_000_000,  # real_quote_before
+            30_000_000,  # real_base_after
+            40_000_000_000,  # real_quote_after
+            amount_in,
+            amount_out,
+            1,  # protocol_fee
+            2,  # platform_fee
+            3,  # creator_fee
+            4,  # share_fee
+        )
+        + struct.pack("<BB", direction, 2)
+        + struct.pack("<?", True)
+    )
+    return "Program data: " + base64.b64encode(disc + body).decode()
+
+
+def _launchlab_logs(parser: IDLParser, **kwargs) -> list[str]:
+    return [
+        f"Program {LAUNCHLAB_PROGRAM} invoke [1]",
+        _encode_launchlab_trade_event(parser, **kwargs),
+        f"Program {LAUNCHLAB_PROGRAM} success",
+    ]
+
+
+def test_decode_launchlab_trade_events_maps_buy_and_sell() -> None:
+    parser = _launchlab_parser()
+    pool_to_mint = {LAUNCHLAB_POOL: LAUNCHLAB_MINT}
+    logs = _launchlab_logs(parser, direction=0)
+    buy = decode_launchlab_trade_events(
+        logs, slot=7, signature="sb", idl_parser=parser, pool_to_mint=pool_to_mint
+    )[0]
+    assert buy.mint == LAUNCHLAB_MINT and buy.is_buy is True
+    assert buy.sol_amount == 500_000_000 and buy.token_amount == 15_000_000
+    assert buy.virtual_sol_reserves == 30_000_000_000
+    assert buy.virtual_token_reserves == 900_000_000
+    assert buy.real_sol_reserves == 40_000_000_000
+    assert buy.real_token_reserves == 30_000_000
+    assert buy.timestamp == 0 and buy.creator == "" and buy.slot == 7
+    assert buy.user == LAUNCHLAB_POOL  # placeholder provenance without account keys
+
+    logs = _launchlab_logs(
+        parser, direction=1, amount_in=2_000_000, amount_out=100_000_000
+    )
+    sell = decode_launchlab_trade_events(
+        logs,
+        slot=8,
+        signature="ss",
+        idl_parser=parser,
+        pool_to_mint=pool_to_mint,
+        account_keys=["FeePayerOnJUn1tXbvRJ2ExmnPom8RmcV3eZj"],
+    )[0]
+    assert sell.is_buy is False
+    assert sell.sol_amount == 100_000_000 and sell.token_amount == 2_000_000
+    assert sell.user == "FeePayerOnJUn1tXbvRJ2ExmnPom8RmcV3eZj"
+
+
+def test_launchlab_unknown_pool_is_skipped_never_invented() -> None:
+    parser = _launchlab_parser()
+    logs = _launchlab_logs(parser)
+    assert (
+        decode_launchlab_trade_events(logs, slot=1, signature="s", idl_parser=parser)
+        == []
+    )
+    assert (
+        decode_launchlab_trade_events(
+            logs, slot=1, signature="s", idl_parser=parser, pool_to_mint={}
+        )
+        == []
+    )
+    known = {LAUNCHLAB_POOL: LAUNCHLAB_MINT}
+    assert (
+        decode_launchlab_trade_events(
+            logs,
+            slot=1,
+            signature="s",
+            idl_parser=parser,
+            pool_to_mint=known,
+            mints={"some-other-mint"},
+        )
+        == []
+    )
+
+
+def test_launchlab_events_flow_through_subscribed_queue() -> None:
+    parser = _launchlab_parser()
+    pool_to_mint = {LAUNCHLAB_POOL: LAUNCHLAB_MINT}
+    hub = TradeFlowHub(parser, launchlab_parser=parser, pool_to_mint=pool_to_mint)
+    queue = hub.subscribe(LAUNCHLAB_MINT)
+    logs = _launchlab_logs(parser)
+    assert hub.publish_logs(logs, slot=9, signature="sig") == 1
+    event = queue.get_nowait()
+    assert event.mint == LAUNCHLAB_MINT and event.is_buy
+    # Replay of the same transaction must not double-deliver.
+    assert hub.publish_logs(logs, slot=9, signature="sig") == 0
+    # Unknown pool elsewhere: still no delivery, no invented mint.
+    other_logs = _launchlab_logs(
+        parser, pool="EEwUW4WG7HzFSaMvXKmvYiNGjT4ZgMKqncP4qPwQebzL"
+    )
+    assert hub.publish_logs(other_logs, slot=9, signature="other") == 0
+    # Default hub without a LaunchLab parser never decodes these logs.
+    plain = TradeFlowHub(parser)
+    plain.subscribe(LAUNCHLAB_MINT)
+    assert plain.publish_logs(logs, slot=9, signature="sig2") == 0

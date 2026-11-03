@@ -71,6 +71,10 @@ RECLAIM_TRAIL_PCT = 0.10
 RECLAIM_TARGET_PCT = 0.15
 RECLAIM_MAX_HOLD_S = 180.0
 RECLAIM_TRIGGER_WINDOW_S = 300.0
+RECLAIM_FAST_WINDOW_S = 120.0
+"""Post-open window during which an armed reclaim watch polls at RECLAIM_FAST_POLL_S."""
+RECLAIM_FAST_POLL_S = 0.5
+"""Fast pre-entry poll cadence inside RECLAIM_FAST_WINDOW_S (2.0s otherwise)."""
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS lessons (

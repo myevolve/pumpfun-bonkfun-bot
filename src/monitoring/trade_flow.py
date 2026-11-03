@@ -31,7 +31,7 @@ from utils.logger import get_logger
 from utils.program_logs import attribute_program_logs
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Callable, Sequence
 
     from monitoring.migration_events import MigrationHub
     from utils.idl_parser import IDLParser
@@ -39,6 +39,7 @@ logger = get_logger(__name__)
 
 _PROGRAM_DATA = "Program data: "
 _PUMP_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+LAUNCHLAB_PROGRAM = "LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj"
 # Mayhem's ["sol-vault"] PDA, not a distinct human buyer.
 MAYHEM_SOL_VAULT = "BwWK17cbHxwWBKZkUYvzxLcNQ1YVyaFezduWbtm2de6s"
 _TOKEN_DECIMALS = 6
@@ -160,6 +161,96 @@ def decode_trade_events(  # noqa: C901 - keep attribution and wire validation to
         except (KeyError, TypeError, ValueError) as exc:
             # Missing modern quantities must not silently reuse legacy values.
             logger.debug("Skipped TradeEvent in %s: %s", signature, exc)
+    return events
+
+
+def decode_launchlab_trade_events(  # noqa: PLR0913 - mirrors pump.fun provenance contract
+    logs: list[str],
+    *,
+    slot: int,
+    signature: str,
+    idl_parser: IDLParser,
+    pool_to_mint: dict[str, str] | None = None,
+    mints: set[str] | None = None,
+    account_keys: Sequence[str | Pubkey] | None = None,
+) -> list[TradeEvent]:
+    """Decode every Raydium LaunchLab ``TradeEvent`` in one transaction's logs.
+
+    Known limitations, all deliberate (FlowMonitor's creator-sell rule and
+    buyer counting still work off the resolved mint):
+    - The event carries ``pool_state`` but no mint. Mints come from the
+      ``pool_to_mint`` mapping populated by the letsbonk creation parser;
+      events for unknown pools are skipped, never assigned an invented mint.
+    - The event carries no user. ``account_keys[0]`` (the fee payer) is used
+      when transaction account keys are available; otherwise the pool_state
+      string is a placeholder user provenance marker.
+    - The event carries no creator (empty string) and no timestamp (0).
+    - Quote is WSOL only for now; all *_quote fields are read as lamports.
+    """
+    trade_disc = idl_parser.get_event_discriminators()["TradeEvent"]
+    events: list[TradeEvent] = []
+    try:
+        entries = attribute_program_logs(logs)
+    except ValueError as exc:
+        logger.debug("Rejected LaunchLab log attribution in %s: %s", signature, exc)
+        return []
+    for _, program, log, committed in entries:
+        if (
+            not committed
+            or program != LAUNCHLAB_PROGRAM
+            or not log.startswith(_PROGRAM_DATA)
+        ):
+            continue
+        try:
+            data = base64.b64decode(log[len(_PROGRAM_DATA) :], validate=True)
+        except ValueError:
+            continue
+        if data[:8] != trade_disc:
+            continue
+        decoded = idl_parser.decode_event_data(data, "TradeEvent")
+        if not decoded:
+            continue
+        f = decoded["fields"]
+        try:
+            pool_state = str(f["pool_state"])
+            mint = (pool_to_mint or {}).get(pool_state)
+            if mint is None or (mints is not None and mint not in mints):
+                continue
+            direction = f["trade_direction"]
+            is_buy = (
+                direction.get("variant") if isinstance(direction, dict) else direction
+            ) == "Buy"
+            virtual_sol_reserves = int(f["virtual_quote"])
+            virtual_token_reserves = int(f["virtual_base"])
+            if virtual_sol_reserves <= 0 or virtual_token_reserves <= 0:
+                raise ValueError("non-positive virtual reserves")
+            sol_amount = int(f["amount_in"] if is_buy else f["amount_out"])
+            token_amount = int(f["amount_out"] if is_buy else f["amount_in"])
+            user = (
+                str(account_keys[0])
+                if account_keys
+                # Placeholder provenance: the event does not carry the trader.
+                else pool_state
+            )
+            events.append(
+                TradeEvent(
+                    mint=mint,
+                    user=user,
+                    creator="",
+                    is_buy=is_buy,
+                    sol_amount=sol_amount,
+                    token_amount=token_amount,
+                    virtual_sol_reserves=virtual_sol_reserves,
+                    virtual_token_reserves=virtual_token_reserves,
+                    real_sol_reserves=int(f["real_quote_after"]),
+                    real_token_reserves=int(f["real_base_after"]),
+                    slot=slot,
+                    signature=signature,
+                    timestamp=0,
+                )
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            logger.debug("Skipped LaunchLab TradeEvent in %s: %s", signature, exc)
     return events
 
 
@@ -449,6 +540,8 @@ class TradeFlowHub:
         *,
         queue_size: int = 512,
         migration_hub: MigrationHub | None = None,
+        launchlab_parser: IDLParser | None = None,
+        pool_to_mint: dict[str, str] | None = None,
     ) -> None:
         self.idl_parser = idl_parser
         self.queue_size = queue_size
@@ -457,7 +550,11 @@ class TradeFlowHub:
         self._interrupted = False
         self.dropped = 0
         self.migration_hub = migration_hub
-        # Strong refs: the loop holds only weak refs to tasks.
+        self.launchlab_parser = launchlab_parser
+        # Shared mapping the letsbonk creation parser updates at subscribe time.
+        self.pool_to_mint: dict[str, str] = (
+            pool_to_mint if pool_to_mint is not None else {}
+        )
         self._migration_tasks: set[asyncio.Task[None]] = set()
 
     @property
@@ -510,31 +607,49 @@ class TradeFlowHub:
             )
             if events:
                 _remember_transaction(self._recent_transactions, signature)
-            for event in events:
-                # Failed subscriptions are removed without skipping healthy siblings.
-                for queue in reversed(self._subscribers.get(event.mint, ())):
-                    try:
-                        queue.put_nowait(event)
-                        delivered += 1
-                    except (asyncio.QueueFull, TradeFlowLossError) as exc:
-                        reason = (
-                            exc.reason
-                            if isinstance(exc, TradeFlowLossError)
-                            else "overflow"
-                        )
-                        discarded = queue.invalidate(reason) + 1
-                        self.dropped += discarded
-                        self.unsubscribe(event.mint, queue)
-                        logger.warning(
-                            "Trade subscription loss for %s (%s): discarded %d events",
-                            event.mint,
-                            reason,
-                            discarded,
-                        )
+            delivered += self._deliver(events)
+        if self._subscribers and self.launchlab_parser is not None:
+            launchlab_events = decode_launchlab_trade_events(
+                logs,
+                slot=slot,
+                signature=signature,
+                idl_parser=self.launchlab_parser,
+                pool_to_mint=self.pool_to_mint,
+                mints=set(self._subscribers),
+            )
+            if launchlab_events:
+                _remember_transaction(self._recent_transactions, signature)
+            delivered += self._deliver(launchlab_events)
         migrations = self._publish_migrations(logs, slot=slot, signature=signature)
         if migrations:
             _remember_transaction(self._recent_transactions, signature)
         return delivered + migrations
+
+    def _deliver(self, events: list[TradeEvent]) -> int:
+        """Fan events out to their mint's subscribers; drop lost queues."""
+        delivered = 0
+        for event in events:
+            # Failed subscriptions are removed without skipping healthy siblings.
+            for queue in reversed(self._subscribers.get(event.mint, ())):
+                try:
+                    queue.put_nowait(event)
+                    delivered += 1
+                except (asyncio.QueueFull, TradeFlowLossError) as exc:
+                    reason = (
+                        exc.reason
+                        if isinstance(exc, TradeFlowLossError)
+                        else "overflow"
+                    )
+                    discarded = queue.invalidate(reason) + 1
+                    self.dropped += discarded
+                    self.unsubscribe(event.mint, queue)
+                    logger.warning(
+                        "Trade subscription loss for %s (%s): discarded %d events",
+                        event.mint,
+                        reason,
+                        discarded,
+                    )
+        return delivered
 
     def _publish_migrations(self, logs: list[str], *, slot: int, signature: str) -> int:
         """Decode and schedule migration-event fan-out; contained, never raises."""

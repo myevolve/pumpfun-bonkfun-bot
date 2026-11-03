@@ -824,7 +824,9 @@ async def test_graduation_watch_records_reclaim_marks_and_censors(
 
     monkeypatch.setattr("trading.universal_trader.monotonic", lambda: clock["now"])
     monkeypatch.setattr("trading.universal_trader.asyncio.sleep", fake_sleep)
-
+    # This test asserts G-anchored elapsed values on the post-window 2.0s
+    # cadence (the fast-poll window is exercised in its own test below).
+    monkeypatch.setattr("trading.universal_trader.RECLAIM_FAST_WINDOW_S", 0.0)
     trader, token, _ = _gated_trader(GateRules())
     trader.reclaim_watch = True
     trader.platform_implementations = SimpleNamespace(
@@ -981,6 +983,164 @@ async def test_graduation_watch_records_reclaim_marks_and_censors(
         assert by_rule["trail_10pct"]["mean_gross_return"] == 0.0
         assert by_rule["watch_end"]["censored_n"] == 1
         assert by_rule["watch_end"]["mean_gross_return"] is None
+
+
+@pytest.mark.asyncio
+async def test_graduation_watch_fast_polls_pre_entry_then_returns_to_2s(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = {"now": 100.0}
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock["now"] += seconds
+
+    monkeypatch.setattr("trading.universal_trader.monotonic", lambda: clock["now"])
+    monkeypatch.setattr("trading.universal_trader.asyncio.sleep", fake_sleep)
+
+    trader, token, _ = _gated_trader(GateRules())
+    trader.reclaim_watch = True
+    trader.platform_implementations = SimpleNamespace(
+        curve_manager=SimpleNamespace(
+            get_pool_state_and_token_program=AsyncMock(
+                side_effect=ValueError("zeroed completed curve")
+            )
+        )
+    )
+
+    async def fake_pool_real_quote(_tok: TokenInfo, _rem: float) -> float | None:
+        return 60.0
+
+    monkeypatch.setattr(trader, "_pool_real_quote", fake_pool_real_quote)
+
+    db_file = tmp_path / "lessons.sqlite3"
+    with closing(LessonJournal(db_file)) as journal:
+        trader.lesson_journal = journal
+        entry_id = journal.record(
+            LessonObservation(
+                kind="gate_pass",
+                mint=MINT,
+                symbol="FAST1",
+                decision="buyers_present",
+                buyers=3,
+                mayhem=False,
+                raw={"gate": {"slots_waited": 2}},
+            )
+        )
+        assert entry_id is not None
+        journal.start_paper_marks(entry_id, 0.8)
+
+        # Open 1.0; pullback 0.85; reclaim 0.90 arms the entry on the second
+        # fast poll; 1.02 sets the peak; 0.79 trails out at the 2.0s cadence.
+        prices = iter(
+            [(1.0, "ok"), (0.85, "ok"), (0.90, "ok"), (1.02, "ok"), (0.79, "ok")]
+        )
+
+        async def fake_price(
+            _tok: TokenInfo, remaining: float, *, settle: bool = True
+        ) -> tuple[float, str] | None:
+            if settle:
+                await fake_sleep(min(2.0, remaining / 4))
+            return next(prices, (0.79, "ok"))
+
+        monkeypatch.setattr(
+            trader,
+            "_completed_curve_pool_price",
+            lambda tok, rem: fake_price(tok, rem, settle=True),
+        )
+        monkeypatch.setattr(trader, "_graduated_pool_price", fake_price)
+        await trader._graduation_watch(token, entry_id, started=100.0)
+
+        # Sleeps: [open settle 2.0, fast poll 0.5, fast poll 0.5, then 2.0s].
+        # The entry armed at elapsed 1.0 (two fast polls), not 4.0.
+        assert sleeps[:3] == [2.0, 0.5, 0.5]
+        assert all(s == 2.0 for s in sleeps[3:])
+        row = journal._conn.execute(
+            "SELECT trigger_elapsed_s, reclaim_entry_price, reclaim_rule"
+            " FROM reclaim_marks WHERE entry_id=?",
+            (entry_id,),
+        ).fetchone()
+        assert row == (1.0, 0.90, "trail_10pct")
+
+
+@pytest.mark.asyncio
+async def test_graduation_watch_fast_window_expires_and_disabled_stays_2s(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = {"now": 100.0}
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock["now"] += seconds
+
+    monkeypatch.setattr("trading.universal_trader.monotonic", lambda: clock["now"])
+    monkeypatch.setattr("trading.universal_trader.asyncio.sleep", fake_sleep)
+
+    trader, token, _ = _gated_trader(GateRules())
+    trader.platform_implementations = SimpleNamespace(
+        curve_manager=SimpleNamespace(
+            get_pool_state_and_token_program=AsyncMock(
+                side_effect=ValueError("zeroed completed curve")
+            )
+        )
+    )
+
+    db_file = tmp_path / "lessons.sqlite3"
+    with closing(LessonJournal(db_file)) as journal:
+        trader.lesson_journal = journal
+
+        def add_entry(symbol: str) -> int:
+            entry_id = journal.record(
+                LessonObservation(
+                    kind="gate_pass",
+                    mint=MINT,
+                    symbol=symbol,
+                    decision="buyers_present",
+                    buyers=3,
+                    mayhem=False,
+                    raw={"gate": {"slots_waited": 2}},
+                )
+            )
+            assert entry_id is not None
+            journal.start_paper_marks(entry_id, 0.8)
+            return entry_id
+
+        async def run_watch(entry_id: int) -> list[float]:
+            sleeps.clear()
+            prices = iter([(1.0, "ok")])
+
+            async def fake_price(
+                _tok: TokenInfo, remaining: float, *, settle: bool = True
+            ) -> tuple[float, str] | None:
+                if settle:
+                    await fake_sleep(min(2.0, remaining / 4))
+                return next(prices, (1.0, "ok"))
+
+            monkeypatch.setattr(
+                trader,
+                "_completed_curve_pool_price",
+                lambda tok, rem: fake_price(tok, rem, settle=True),
+            )
+            monkeypatch.setattr(trader, "_graduated_pool_price", fake_price)
+            clock["now"] = 100.0
+            await trader._graduation_watch(token, entry_id, started=100.0)
+            return list(sleeps)
+
+        # Flat price never arms the entry: the fast window expires at 120s
+        # (240 fast polls), then the cadence returns to 2.0s.
+        trader.reclaim_watch = True
+        enabled = await run_watch(add_entry("WEXP"))
+        assert enabled[0] == 2.0  # the open read's settle sleep
+        assert enabled[1:241] == [0.5] * 240
+        assert all(s == 2.0 for s in enabled[241:])
+
+        # Disabled arm: byte-identical 2.0s cadence, no fast polls at all.
+        trader.reclaim_watch = False
+        disabled = await run_watch(add_entry("WDIS"))
+        assert 0.5 not in disabled
+        assert all(s == 2.0 for s in disabled)
 
 
 @pytest.mark.asyncio

@@ -1701,3 +1701,27 @@ Closed all four queued censuses in `docs/STRATEGIES.md` against the 24,015-coin 
    `+5.3%` TRAIN / `+1.68%..+2.15%` LOCK. Frozen parameters:
    pullback `0.10–0.35` below open, reclaim `+5%`, `min_quote_sol 55`,
    trail `10%`, target `15%`, `max_hold 180s`, trigger window `300s`.
+
+## Wave 14: hold-cap resolution, true fee cost, reclaim divergence correction (2026-11-03)
+
+(a) **Hold-cap**: the old grid's slot<->second mapping was mis-calibrated
+   (tape `0.315 s/slot` vs `0.6` assumed); live `90s` sat at the worst point
+   of the LOCK curve. Late grads (`>90s`) are winner-heavy — `12/12` on the
+   24h tape, `8/8` pattern on live. `max_hold_time: 90 -> 180` recorded
+   (live `+6.8..+9.0pp/entry` vs the 24h-tape's `-4.4pp` on an n=15
+   negative-EV band; reversible knob, `paper_flow_marks` arbitrate).
+(b) **True fee cost**: the original `3,540/h` estimate counted only polls
+   (~19% of true cost); attestation sweeps (~`122 RPC` / ~`63s`) are ~81%
+   (~`13,900/h` at an 8s poll). `reattest_after_seconds` /
+   `max_attestation_age_seconds` are now a paired config
+   (`300s`/`600s` -> ~`4,500/h` steady state).
+(c) **Reclaim divergence correction**: the documented `+5.3%` TR /
+   `+1.98%` LK organic baseline came from an ad-hoc no-lag config; the
+   committed `simulate_reclaim` (+1-slot lags) produces **`+2.58%` TR /
+   `+0.40%` LK** net; the faithful 2s-poll live-arm emulation delivers
+   **`+3.30%` TR / `-5.60%` LK** (LOCK inverts) with **27%** structural
+   silent misses (dip+reclaim inside one 2s gap) that are adverse-selected
+   (missed coins' trade-cadence entries ran `+32%` mean r60).
+   Mitigation shipped: a `0.5s` fast-poll window over the first `120s`
+   post-open. Honest status: thin edge, live-arm adversely selected at the
+   2s cadence; forward `reclaim_marks` arbitrate at the fixed cadence.

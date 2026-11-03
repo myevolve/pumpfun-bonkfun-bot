@@ -516,6 +516,25 @@ class PumpFeeSchedule:
             )
         self._poll_interval_seconds = seconds
 
+    def set_reattest_after(
+        self, seconds: float, max_attestation_age_seconds: float
+    ) -> None:
+        """Update the re-attestation cadence; applied on the next validation."""
+        for name, value in (
+            ("reattest interval", seconds),
+            ("max attestation age", max_attestation_age_seconds),
+        ):
+            if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
+                raise _FeeConfigError(
+                    f"{name} must be a finite positive number of seconds"
+                )
+        if max_attestation_age_seconds <= seconds:
+            raise _FeeConfigError(
+                "max attestation age must exceed the re-attestation interval"
+            )
+        self._reattest_after_seconds = seconds
+        self._max_attestation_age_seconds = max_attestation_age_seconds
+
     async def start(self) -> None:
         """Fetch, attest, and begin polling the authoritative fee account."""
         async with self._lifecycle_lock:

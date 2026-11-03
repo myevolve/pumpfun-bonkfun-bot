@@ -687,3 +687,99 @@ async def test_started_poll_uses_updated_interval() -> None:
     assert client.account_calls - before <= 1
 
     await schedule.close()
+
+
+def test_set_reattest_after_accepts_valid_pair() -> None:
+    account = _fee_account()
+    client = _FakeFeeClient(account)
+    clock = _FakeClock()
+    schedule = _fee_schedule(client, clock)
+
+    schedule.set_reattest_after(300.0, 600.0)
+
+    assert schedule._reattest_after_seconds == 300.0
+    assert schedule._max_attestation_age_seconds == 600.0
+
+
+@pytest.mark.parametrize(
+    ("seconds", "max_age"),
+    [
+        (0.0, 600.0),
+        (-1.0, 600.0),
+        (True, 600.0),
+        (float("nan"), 600.0),
+        (float("inf"), 600.0),
+        (300.0, 0.0),
+        (300.0, -1.0),
+        (300.0, True),
+        (300.0, float("nan")),
+        (300.0, float("inf")),
+    ],
+)
+def test_set_reattest_after_rejects_invalid_values(
+    seconds: float, max_age: float
+) -> None:
+    account = _fee_account()
+    client = _FakeFeeClient(account)
+    clock = _FakeClock()
+    schedule = _fee_schedule(client, clock)
+
+    with pytest.raises(ValueError, match="finite positive"):
+        schedule.set_reattest_after(seconds, max_age)
+
+    assert schedule._reattest_after_seconds == 60.0
+    assert schedule._max_attestation_age_seconds == 120.0
+
+
+@pytest.mark.parametrize(("seconds", "max_age"), [(300.0, 300.0), (300.0, 100.0)])
+def test_set_reattest_after_requires_max_age_exceeding_reattest(
+    seconds: float, max_age: float
+) -> None:
+    account = _fee_account()
+    client = _FakeFeeClient(account)
+    clock = _FakeClock()
+    schedule = _fee_schedule(client, clock)
+
+    with pytest.raises(ValueError, match="must exceed"):
+        schedule.set_reattest_after(seconds, max_age)
+
+    assert schedule._reattest_after_seconds == 60.0
+    assert schedule._max_attestation_age_seconds == 120.0
+
+
+@pytest.mark.asyncio
+async def test_started_schedule_reattests_at_updated_cadence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = _fee_account()
+    client = _FakeFeeClient(account)
+    for _ in range(4):
+        client.queue_attestation(account)
+    clock = _FakeClock()
+    calls = 0
+    real_attest = PumpFeeSchedule._attest
+
+    async def counting_attest(self: PumpFeeSchedule, config: Any) -> None:
+        nonlocal calls
+        calls += 1
+        clock.advance(0.01)
+        await real_attest(self, config)
+
+    monkeypatch.setattr(PumpFeeSchedule, "_attest", counting_attest)
+    schedule = PumpFeeSchedule(
+        client,
+        PumpFunAddresses.find_fee_config(),
+        PumpFunAddresses.PROGRAM,
+        clock=clock,
+        poll_interval_seconds=3_600.0,
+    )
+    schedule.set_reattest_after(5.0, 10.0)
+    await schedule.start()
+    for _ in range(3):
+        clock.advance(6.0)
+        client.queue_attestation(account)
+        await schedule.accept_account(account)
+
+    assert calls == 4  # initial attestation plus one per 6s advance
+
+    await schedule.close()

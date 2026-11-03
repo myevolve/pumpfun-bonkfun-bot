@@ -63,6 +63,8 @@ from interfaces.core import Platform, TokenInfo
 from learning.journal import (
     PAPER_HORIZONS,
     PAPER_MARK_MAX_LATENESS_S,
+    RECLAIM_FAST_POLL_S,
+    RECLAIM_FAST_WINDOW_S,
     RECLAIM_MAX_HOLD_S,
     RECLAIM_MIN_QUOTE_SOL,
     RECLAIM_PULLBACK_MAX,
@@ -311,6 +313,8 @@ class UniversalTrader:
         transaction_ledger_path: str | Path | None = None,
         reclaim_watch: bool = False,
         fee_poll_interval_seconds: float | None = None,
+        fee_reattest_after_seconds: float | None = None,
+        fee_max_attestation_age_seconds: float | None = None,
     ):
         """Initialize the universal trader."""
         self.exit_strategy = _validate_exit_config(
@@ -488,6 +492,27 @@ class UniversalTrader:
                 "fee_poll_interval_seconds must be finite and positive or None"
             )
         self.fee_poll_interval_seconds = fee_poll_interval_seconds
+        if (fee_reattest_after_seconds is None) != (
+            fee_max_attestation_age_seconds is None
+        ):
+            raise ValueError(  # noqa: TRY003
+                "fee_reattest_after_seconds and fee_max_attestation_age_seconds"
+                " must both be None or both set"
+            )
+        if fee_reattest_after_seconds is not None and (
+            isinstance(fee_reattest_after_seconds, bool)
+            or isinstance(fee_max_attestation_age_seconds, bool)
+            or not isfinite(fee_reattest_after_seconds)
+            or not isfinite(fee_max_attestation_age_seconds)
+            or fee_reattest_after_seconds <= 0
+            or fee_max_attestation_age_seconds <= fee_reattest_after_seconds
+        ):
+            raise ValueError(  # noqa: TRY003
+                "fee reattest pair must be finite-positive with"
+                " max_attestation_age > reattest_after"
+            )
+        self.fee_reattest_after_seconds = fee_reattest_after_seconds
+        self.fee_max_attestation_age_seconds = fee_max_attestation_age_seconds
         self.marry_mode = marry_mode
         self.yolo_mode = yolo_mode
         self.flow_rules = flow_rules
@@ -1882,6 +1907,25 @@ class UniversalTrader:
                     set_poll_interval = getattr(schedule, "set_poll_interval", None)
                     if callable(set_poll_interval):
                         set_poll_interval(self.fee_poll_interval_seconds)
+            if (
+                getattr(self, "fee_reattest_after_seconds", None) is not None
+                and getattr(self, "fee_max_attestation_age_seconds", None) is not None
+            ):
+                # Configure both fee schedules' re-attestation cadence
+                # (best-effort: schedules may lack the setter in test doubles).
+                implementations = getattr(self, "platform_implementations", None)
+                for manager_name in ("curve_manager", "pumpswap"):
+                    schedule = getattr(
+                        getattr(implementations, manager_name, None),
+                        "fee_schedule",
+                        None,
+                    )
+                    set_reattest = getattr(schedule, "set_reattest_after", None)
+                    if callable(set_reattest):
+                        set_reattest(
+                            self.fee_reattest_after_seconds,
+                            self.fee_max_attestation_age_seconds,
+                        )
             await self._resume_ledger_bound_submissions()
             if not resume_only:
                 await self._resume_staged_cleanups()
@@ -3023,7 +3067,13 @@ class UniversalTrader:
                 not (rollover and stabilized_rollover and not pending)
                 or not reclaim["done"]
             ):
-                await asyncio.sleep(2.0)
+                fast = (
+                    getattr(self, "reclaim_watch", False)
+                    and not reclaim["done"]
+                    and reclaim["entry"] is None
+                    and (monotonic() - grad_at) < RECLAIM_FAST_WINDOW_S
+                )
+                await asyncio.sleep(RECLAIM_FAST_POLL_S if fast else 2.0)
                 price = await self._graduated_pool_price(
                     token_info,
                     remaining=max(5.0, deadline - monotonic()),

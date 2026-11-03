@@ -159,20 +159,34 @@ this document authorizes execution or changes the standing risk policy.
   candidate mining with no held-out test). This inventory grows by
   census, not by mining.
 
-## 8. Post-graduation pool reclaim — dry-run instrument (Wave 13)
+## 8. Post-graduation pool reclaim — dry-run instrument (Wave 13, corrected Wave 14)
 
 - **Mechanism**: after graduation, wait for the post-migration shakeout, then
   enter on a `+5%` reclaim above the pool `open_price`, riding the second-wave
   continuation (`p120/open = 1.155x` on top-decile organic graduations) while
   skipping instant open-and-dump migrations.
-- **Measured (OOS, exact-CPMM tape)**: the only measured-positive OOS entry —
-  **`+5.3%` TRAIN / `+1.68%..+2.15%` LOCK**.
+- **Measured (OOS, exact-CPMM tape)**: the only measured-positive OOS entry,
+  but the numbers depend on which lag model produced them (Wave 14 correction —
+  the original `+5.3%` TRAIN figure was an ad-hoc no-lag config, not the
+  committed simulation):
+
+  | variant | TRAIN | LOCK |
+  |---|---|---|
+  | doc-cfg (ad-hoc, no lag) — the previously quoted baseline | `+5.3%` | `+1.68%..+2.15%` |
+  | committed `simulate_reclaim` (+1-slot lags) — honest net | `+2.58%` | `+0.40%` |
+  | 2s-poll live-arm emulation | `+3.30%` | `−5.60%` (LOCK inverts) |
+
+  The poll emulation also suffers **27%** structural silent misses (dip+reclaim
+  inside one 2s gap) that are adverse-selected — the missed coins' trade-cadence
+  entries ran `+32%` mean r60.
 - **Dry-run instrument**: paper marks only (`reclaim_watch.enabled: true` in
   `whaleride-paper.yaml`; rows land in the `reclaim_marks` table via the
   `LessonJournal` reclaim surface). Never signs.
 - **Frozen parameters**: pullback depth `0.10–0.35` below open, reclaim `+5%`,
   `min_quote_sol 55.0`, trail `10%`, target `15%`, `max_hold 180s`,
-  trigger window `300s`.
+  trigger window `300s`; observation cadence is a `0.5s` fast-poll window over
+  the first `120s` post-open, then the standard poll cadence (Wave 14 fix for
+  the 2s-gap silent misses).
 - **What the first mark proves**: that a paper reclaim entry was observed,
   priced, and recorded against a live graduated pool under the frozen rules —
   the forward sample that arbitrates whether the OOS edge survives live
@@ -180,7 +194,10 @@ this document authorizes execution or changes the standing risk policy.
   remain unconfirmed gross marks, not an authorization.
 - **letsbonk analog — prerequisites (all unmet)**:
   - Runtime gate is PUMP_FUN-only (`_await_entry_gate`); no letsbonk path exists.
-  - No LaunchLab trade-event feed — the single largest prerequisite.
+  - No LaunchLab trade-event feed in the runtime path — the single largest
+    prerequisite. The LaunchLab TradeEvent itself carries reserves (virtual +
+    real, before/after), so a decoder is pump.fun-parity event-based; it is in
+    flight this wave.
   - No graduation-watch analog and no post-migration sell path.
   - Curve parameters are not transplantable between bonding geometries.
   - The documented letsbonk round-trip spread (`−8..−11%`) dominates
