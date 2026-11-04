@@ -1917,3 +1917,32 @@ Program note: the polymarket-alpha-bot repo carries the two experiment
 scripts (`novig_public_ohlc_study.py`, `novig_trade_longshot.py`) and the
 live-verified venue clients (Novig/ProphetX/Kalshi, cross-venue modules);
 PR #2 merged with the full continuation 2026-11-04.
+
+## Wave A4+: multi-tape confirmation and paper activation (2026-11-04)
+
+Tape #2 (fresh capture, non-contiguous with tape #1; 15,961 coins, 820k
+curve trades; slot stream lost at ~10.5h — the recorder's designed
+no-coverage exit with 15 bounded reconnects and 2,069 gap records; every
+tracked coin force-flushed, 1.4GB lifecycles intact) confirms the A4
+winner-sell signal at full strength:
+
+- winner-sell forward medians `-12.3% / -16.7% / -26.2%` at 10/25/60
+  slots (n=119,890; coin-clustered CIs `[-11.4,-10.0]`, `[-8.8,-7.6]`,
+  `[-10.2,-8.0]` — all entirely negative) vs other-sell
+  `-0.9% / -1.5% / -2.7%`. Tape #1: `-13.5% / -21.8% / -36.9%`
+  (n=191,503). Same ~10x separation on both days across volume regimes
+  and thresholds.
+- Fixed-threshold sweep (1..10 SOL, both tapes, all cells negative,
+  monotone in threshold): a quantile-free config value is satisfiable;
+  2 SOL selected for the paper profile.
+
+**Activated in paper mode** (the >=3-tape rule gates live money; paper
+mode is the forward-measurement phase): `flow_exit.winner_sell: true`,
+`flow_exit.winner_sell_min_realized_sol: 2.0` in whaleride-paper.yaml
+(config validated); collector reloaded via the keeper procedure at
+2026-11-04T11:40:27Z (kill -> 0 positions -> 0 processes -> respawn ->
+single writer). Forward expectation: when a wallet with >=2 SOL strictly-
+prior realized profit sells into a held position, the position exits
+immediately instead of riding the measured -13..-26% forward damage.
+`paper_marks`/`grad_marks` arbitrate the effect against the pre-activation
+cohorts.
