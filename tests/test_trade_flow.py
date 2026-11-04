@@ -1486,3 +1486,91 @@ def test_launchlab_events_flow_through_subscribed_queue() -> None:
     plain = TradeFlowHub(parser)
     plain.subscribe(LAUNCHLAB_MINT)
     assert plain.publish_logs(logs, slot=9, signature="sig2") == 0
+
+
+def test_winner_sell_fires_on_prior_pnl_wallet_only() -> None:
+    rules = FlowRules(
+        creator_sell=False, winner_sell=True, winner_sell_min_realized_sol=2.0
+    )
+    monitor = FlowMonitor(mint=MINT, creator=CREATOR, rules=rules)
+    assert monitor.observe(_event(user=OTHER, is_buy=True)) is None
+    below = _event(user=OTHER, is_buy=False)
+    object.__setattr__(below, "user_realized_sol", 1_900_000_000)
+    assert monitor.observe(below) is None
+    above = _event(user=OTHER, is_buy=False)
+    object.__setattr__(above, "user_realized_sol", 3_000_000_000)
+    signal = monitor.observe(above)
+    assert signal is not None
+    assert signal.rule == "winner_sell"
+
+
+def test_winner_sell_requires_threshold() -> None:
+    try:
+        FlowRules(creator_sell=False, winner_sell=True)
+    except ValueError as exc:
+        assert "winner_sell" in str(exc)
+    else:
+        raise AssertionError("winner_sell without a threshold must fail")
+
+
+def test_wallet_ledger_is_strictly_prior_across_mints() -> None:
+    parser = IDLParser(
+        str(Path(__file__).resolve().parents[1] / "idl" / "pump_fun_idl.json")
+    )
+    hub = TradeFlowHub(parser)
+    queue = hub.subscribe(MINT)
+    buy = TradeEvent(
+        mint=MINT,
+        user=OTHER,
+        creator=CREATOR,
+        is_buy=True,
+        sol_amount=1_000_000_000,
+        token_amount=1_000_000,
+        virtual_sol_reserves=35_000_000_000,
+        virtual_token_reserves=900_000_000_000_000,
+        real_sol_reserves=5_000_000_000,
+        real_token_reserves=900_000_000_000_000,
+        slot=1,
+        signature="s1",
+        timestamp=0,
+    )
+    profitable_sell = TradeEvent(
+        mint=MINT,
+        user=OTHER,
+        creator=CREATOR,
+        is_buy=False,
+        sol_amount=2_000_000_000,
+        token_amount=1_000_000,
+        virtual_sol_reserves=35_000_000_000,
+        virtual_token_reserves=900_000_000_000_000,
+        real_sol_reserves=3_000_000_000,
+        real_token_reserves=900_000_000_000_000,
+        slot=2,
+        signature="s2",
+        timestamp=0,
+    )
+    hub._deliver([buy, profitable_sell])
+    assert hub.wallet_realized_sol[OTHER] == 1_000_000_000
+    entry = queue.get_nowait()
+    exit_event = queue.get_nowait()
+    assert entry.user_realized_sol == 0
+    # The sell carries the wallet's PnL strictly before that sell (0), not
+    # the post-sell total — the Wave A4 walk-forward semantics.
+    assert exit_event.user_realized_sol == 0
+    later = TradeEvent(
+        mint=MINT,
+        user=OTHER,
+        creator=CREATOR,
+        is_buy=False,
+        sol_amount=100,
+        token_amount=1,
+        virtual_sol_reserves=35_000_000_000,
+        virtual_token_reserves=900_000_000_000_000,
+        real_sol_reserves=3_000_000_000,
+        real_token_reserves=900_000_000_000_000,
+        slot=3,
+        signature="s3",
+        timestamp=0,
+    )
+    hub._deliver([later])
+    assert queue.get_nowait().user_realized_sol == 1_000_000_000

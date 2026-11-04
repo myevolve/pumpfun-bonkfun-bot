@@ -17,7 +17,7 @@ import asyncio
 import base64
 import contextlib
 from collections import OrderedDict, deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal
 
 import base58
@@ -64,6 +64,10 @@ class TradeEvent:
     slot: int
     signature: str
     timestamp: int
+    # The selling/buying wallet's realized SOL accumulated on this hub
+    # strictly before this event (average-cost matching across all mints);
+    # set by TradeFlowHub._deliver, 0 when untracked.
+    user_realized_sol: int = 0
 
     @property
     def price(self) -> float:
@@ -265,6 +269,8 @@ class FlowRules:
     window: int = 5
     max_stall_slots: int | None = None  # slots since peak_sol without advancing
     entry_floor_pct: float | None = None  # drop below entry_sol before higher peak
+    winner_sell: bool = False  # exit when a prior-PnL winner wallet sells into the position
+    winner_sell_min_realized_sol: float | None = None  # SOL of realized profit classifying a winner
 
     def __post_init__(self) -> None:
         for name in (
@@ -292,10 +298,19 @@ class FlowRules:
             or self.max_stall_slots < 1
         ):
             raise ValueError("max_stall_slots must be a positive integer or None")  # noqa: TRY003
+        if self.winner_sell and (
+            self.winner_sell_min_realized_sol is None
+            or isinstance(self.winner_sell_min_realized_sol, bool)
+            or not isinstance(self.winner_sell_min_realized_sol, int | float)
+            or self.winner_sell_min_realized_sol <= 0
+        ):
+            raise ValueError(  # noqa: TRY003
+                "winner_sell requires winner_sell_min_realized_sol > 0"
+            )
 
     @property
     def enabled(self) -> bool:
-        return self.creator_sell or any(
+        return self.creator_sell or self.winner_sell or any(
             v is not None
             for v in (
                 self.trailing_stop,
@@ -379,6 +394,20 @@ class FlowMonitor:
             return FlowSignal(
                 "creator_sell",
                 f"creator sold {event.sol_amount / _LAMPORTS_PER_SOL:.4f} SOL",
+                price,
+                event.slot,
+            )
+        if (
+            rules.winner_sell
+            and rules.winner_sell_min_realized_sol is not None
+            and not event.is_buy
+            and event.user_realized_sol
+            >= rules.winner_sell_min_realized_sol * _LAMPORTS_PER_SOL
+        ):
+            return FlowSignal(
+                "winner_sell",
+                f"wallet with {event.user_realized_sol / _LAMPORTS_PER_SOL:.2f} SOL "
+                f"prior realized profit sold {event.sol_amount / _LAMPORTS_PER_SOL:.4f} SOL",
                 price,
                 event.slot,
             )
@@ -556,6 +585,11 @@ class TradeFlowHub:
             pool_to_mint if pool_to_mint is not None else {}
         )
         self._migration_tasks: set[asyncio.Task[None]] = set()
+        # Cross-mint wallet realized-PnL ledger (average-cost matching in
+        # lamports) for the winner_sell flow-exit rule. Bounded by unique
+        # (wallet, mint) pairs that ever traded a subscribed mint.
+        self.wallet_realized_sol: dict[str, int] = {}
+        self._wallet_basis: dict[tuple[str, str], tuple[float, float]] = {}
 
     @property
     def active(self) -> bool:
@@ -625,10 +659,38 @@ class TradeFlowHub:
             _remember_transaction(self._recent_transactions, signature)
         return delivered + migrations
 
+    def _wallet_prior_pnl(self, event: TradeEvent) -> int:
+        """Update the wallet PnL ledger with this event; return strictly-prior SOL.
+
+        Buys extend the average-cost basis; sells realize against it. The
+        returned value is the wallet's realized SOL accumulated before this
+        event, which is what the winner_sell rule compares against its
+        threshold (Wave A4: prior-PnL classification, never post-hoc).
+        """
+        prior = self.wallet_realized_sol.get(event.user, 0)
+        key = (event.user, event.mint)
+        tokens, cost = self._wallet_basis.get(key, (0.0, 0.0))
+        if event.is_buy:
+            tokens += event.token_amount
+            cost += event.sol_amount
+        elif tokens > 0:
+            average = cost / tokens
+            sold = min(event.token_amount, tokens)
+            realized = event.sol_amount - average * sold
+            self.wallet_realized_sol[event.user] = prior + int(realized)
+            tokens -= sold
+            cost -= average * sold
+        if tokens <= 0 and cost <= 0:
+            self._wallet_basis.pop(key, None)
+        else:
+            self._wallet_basis[key] = (tokens, cost)
+        return prior
+
     def _deliver(self, events: list[TradeEvent]) -> int:
         """Fan events out to their mint's subscribers; drop lost queues."""
         delivered = 0
-        for event in events:
+        for raw in events:
+            event = replace(raw, user_realized_sol=self._wallet_prior_pnl(raw))
             # Failed subscriptions are removed without skipping healthy siblings.
             for queue in reversed(self._subscribers.get(event.mint, ())):
                 try:

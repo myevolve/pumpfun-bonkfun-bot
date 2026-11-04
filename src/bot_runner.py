@@ -294,6 +294,8 @@ def _flow_rules_from_config(cfg: dict) -> FlowRules | None:
         window=section.get("window", 5),
         max_stall_slots=section.get("max_stall_slots"),
         entry_floor_pct=section.get("entry_floor_pct"),
+        winner_sell=section.get("winner_sell", False),
+        winner_sell_min_realized_sol=section.get("winner_sell_min_realized_sol"),
     )
 
 
