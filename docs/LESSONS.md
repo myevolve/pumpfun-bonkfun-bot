@@ -1857,3 +1857,35 @@ the overlay is a config-gated paper-mode candidate until >=3 non-contiguous
 tapes confirm), marks not quotes, and the threshold is venue/day-specific.
 Next: validate on the letsbonk WSOL tape as tape #2 (same harness, data on
 disk), and spec the `winner_sell` flow-exit rule for the paper profile.
+
+## Wave A3: post-washout entries — positive but censor-fragile (2026-11-03)
+
+`analyze_postgrad_washout.py` priced 30-minute-post-graduation entries on the
+4.95M-trade post-grad tape (812 pools with pool tape; 269 dead before the
+washout — entry impossible, excluded per the astra rule). One measurable
+window on this capture: 30-min washout + 60-min hold.
+
+(a) **The deployable cell is marginally positive at the median.** The
+    liquidity-retention rule (pool quote reserves >= 50% of opening at
+    entry, observable pre-entry): median `+0.0007` SOL on 0.05 SOL trades
+    (+1.4%/trade), 53% win, n=341 — with pools that go quiet marked at
+    their last trade. Winsorized mean `-0.008` (fat left tail: quiet-pool
+    marks). Bled-liquidity pools: median `-0.0014`, 9% win. The retention
+    feature splits the cohort exactly as the council predicted.
+(b) **The fully-covered subset is strong but survivor-conditioned:**
+    pools whose recording covers the whole [washout, washout+60] window
+    show `+0.0032` median (+6.5%), 67% win, n=256, with exits 100%
+    observable. Conditioning on 90-minute post-grad survival is not a
+    deployable entry condition; it is evidence that active post-washout
+    pools drift up.
+(c) **The 2h/4h horizons are unmeasurable on this tape**: per-pool
+    coverage is p50 46 min, hard-capped ~120 min (this capture's postgrad
+    bounds). Holds beyond ~90 min have no denominator.
+(d) **Recorder-bounds lesson**: the post-grad horizons a tape can price are
+    set by `--postgrad-seconds` at capture time. The running tape #2 uses
+    the 10-min default (sized for A4's curve-phase validation) and cannot
+    validate A3; a dedicated 4h-postgrad capture is the A3 follow-up.
+
+Composability note: A3's retained-liquidity entry + A4's winner-sell exit
+overlay is the coherent candidate pair this program has produced — still
+single-tape, both halves pending multi-tape confirmation.
