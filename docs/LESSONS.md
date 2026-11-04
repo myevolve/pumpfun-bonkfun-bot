@@ -1889,3 +1889,31 @@ window on this capture: 30-min washout + 60-min hold.
 Composability note: A3's retained-liquidity entry + A4's winner-sell exit
 overlay is the coherent candidate pair this program has produced — still
 single-tape, both halves pending multi-tape confirmation.
+
+## Wave N1: Novig public-data lane — structure real, edge not deployable (2026-11-04)
+
+Ten trade days (2026-10-23..11-01, pulled from the free Novig exchange-data
+CDN; 8-12k STRAIGHT markets/day) plus the 91-day markets.csv OHLC tape.
+
+(a) **The longshot-bias structure is day-invariant**: 10/10 days show
+    longshot (<30c open) day-open->day-close mean +7.2..+14.1c/contract
+    with negative medians, and favorites (>=70c) mean -15.3..-22.2c.
+    The sign asymmetry is a stable venue property, not noise.
+(b) **The apparent edge is a close-mark artifact.** Resolution truth from
+    finalized markets (68,475 STRAIGHT <30c opens, final close >= 95c as
+    the win proxy): actual win rates are 0.9-6.7% by type — NCAAF-SPREAD
+    6.7%, MLB-SPREAD 2.7%, NFL-TOUCHDOWNS 2.5% — versus the 29-44%
+    "close-hit" the same-day close-marks suggested. In-game day-closes
+    >=50c usually resolve to zero. Hold-to-resolution mean EV is
+    +0.3..+9.4c/contract pre-fee on 12-21c entries: a 93-97%-loss lottery
+    whose mean is entirely tail-carried.
+(c) **No deployable strategy from public data alone**: cohort harvesting
+    is median-negative at trade granularity; resolution-hold is a lottery
+    profile unvalidated for fills; the strongest cells (NCAAF|SPREAD,
+    MLB|SPREAD) are thin and single-tape-class. The A2 lessons (tail
+    means, mark realism) transferred and closed this lane quickly.
+
+Program note: the polymarket-alpha-bot repo carries the two experiment
+scripts (`novig_public_ohlc_study.py`, `novig_trade_longshot.py`) and the
+live-verified venue clients (Novig/ProphetX/Kalshi, cross-venue modules);
+PR #2 merged with the full continuation 2026-11-04.
