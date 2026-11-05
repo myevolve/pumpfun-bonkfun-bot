@@ -46,10 +46,27 @@ from utils.program_logs import attribute_program_logs
 PUMP_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 PUMP_AMM_PROGRAM = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"
 PROGRAM_DATA = "Program data: "
+# Anchor emit_cpi! prefix: a self-invocation whose data is prefix + event bytes.
+EVENT_CPI_PREFIX = bytes.fromhex("e445a52e51cb9a1d")
+# Event-CPI provenance indices sit above any log index, keeping in-tx order.
+EVENT_CPI_INDEX_BASE = 1_000_000
 LAMPORTS = 1_000_000_000
 REPORT_EVERY_SECONDS = 30
 MAX_SLOT_GAP_SECONDS = 1.0
 TERMINAL_RESERVE = 65536
+
+
+def event_cpi_payloads(info: object, account_keys: list[str]) -> list[tuple[str, bytes]]:
+    """``(program, event bytes)`` of pump/AMM self-CPI events, in execution order."""
+    out = []
+    for group in info.meta.inner_instructions:
+        for instruction in group.instructions:
+            index = instruction.program_id_index
+            program = account_keys[index] if index < len(account_keys) else None
+            data = bytes(instruction.data)
+            if program in (PUMP_PROGRAM, PUMP_AMM_PROGRAM) and data[:8] == EVENT_CPI_PREFIX:
+                out.append((program, data[8:]))
+    return out
 
 
 class StorageCeiling(RuntimeError):  # noqa: N818 - existing evidence-ceiling sentinel
@@ -125,6 +142,7 @@ class Recorder:
                     "decode_refusals",
                     "partial_event_decodes",
                     "attribution_refusals",
+                    "event_cpi_fallbacks",
                     "normalization_refusals",
                     "state_decode_refusals",
                     "out_of_universe_transactions",
@@ -285,49 +303,68 @@ class Recorder:
         decoded = []
         refusal = None
         decode_refused = False
+        event_source = "logs"
+        payloads: list[tuple[int, str, bytes | str, bool]] = []
         try:
-            entries = attribute_program_logs(logs)
-            for index, program, log, committed in entries:
+            for index, program, log, committed in attribute_program_logs(logs):
                 if program not in (PUMP_PROGRAM, PUMP_AMM_PROGRAM):
                     continue
                 creation_hint |= program == PUMP_PROGRAM and log.startswith(
                     "Program log: Instruction: Create"
                 )
-                if not log.startswith(PROGRAM_DATA):
-                    continue
-                encoded = log[len(PROGRAM_DATA) :]
-                try:
-                    data = base64.b64decode(encoded, validate=True)
-                    decoder = self.decoders.get((program, data[:8]))
-                    if decoder is None:
-                        continue
-                    parser, name, required = decoder
-                    creation_hint |= name == "CreateEvent"
-                    event = parser.decode_event_data(data, name)
-                    if not event or not isinstance(event.get("fields"), dict):
-                        raise ValueError("event_decode_refused")  # noqa: TRY301
-                    fields = event["fields"]
-                    if not required.issubset(fields):
-                        self.counts["partial_event_decodes"] += 1
-                        decode_refused = True
-                        if name != "CreateEvent":
-                            self.counts["decode_refusals"] += 1
-                            continue
-                    decoded.append((index, name, fields, committed))
-                    mint = (
-                        fields.get("mint")
-                        or fields.get("base_mint")
-                        or self.pools.get(fields.get("pool"))
-                    )
-                    if mint in self.coins:
-                        related.add(mint)
-                except (ValueError, TypeError, KeyError, OverflowError):
-                    decode_refused = True
-                    self.counts["decode_refusals"] += 1
-                    self.decode_errors += 1
+                if log.startswith(PROGRAM_DATA):
+                    payloads.append((index, program, log[len(PROGRAM_DATA) :], committed))
         except ValueError as exc:
             refusal = str(exc)
             self.counts["attribution_refusals"] += 1
+            if refusal == "truncated_program_stack" and not failed:
+                # Solana caps logs at 10 KB; migrate_v2 (create_pool + init_boost)
+                # overflows it and loses the CreatePoolEvent line, so no pool was
+                # ever mapped. Event-CPI copies are instruction data, never
+                # truncated; every self-CPI of a successful transaction committed,
+                # and Anchor's event-authority PDA means only the program emits them.
+                payloads = [
+                    (EVENT_CPI_INDEX_BASE + position, program, data, True)
+                    for position, (program, data) in enumerate(
+                        event_cpi_payloads(info, account_keys)
+                    )
+                ]
+                refusal, event_source = None, "event_cpi"
+                self.counts["event_cpi_fallbacks"] += 1
+        for index, program, payload, committed in payloads:
+            try:
+                data = (
+                    base64.b64decode(payload, validate=True)
+                    if isinstance(payload, str)
+                    else payload
+                )
+                decoder = self.decoders.get((program, data[:8]))
+                if decoder is None:
+                    continue
+                parser, name, required = decoder
+                creation_hint |= name == "CreateEvent"
+                event = parser.decode_event_data(data, name)
+                if not event or not isinstance(event.get("fields"), dict):
+                    raise ValueError("event_decode_refused")  # noqa: TRY301
+                fields = event["fields"]
+                if not required.issubset(fields):
+                    self.counts["partial_event_decodes"] += 1
+                    decode_refused = True
+                    if name != "CreateEvent":
+                        self.counts["decode_refusals"] += 1
+                        continue
+                decoded.append((index, name, fields, committed))
+                mint = (
+                    fields.get("mint")
+                    or fields.get("base_mint")
+                    or self.pools.get(fields.get("pool"))
+                )
+                if mint in self.coins:
+                    related.add(mint)
+            except (ValueError, TypeError, KeyError, OverflowError):
+                decode_refused = True
+                self.counts["decode_refusals"] += 1
+                self.decode_errors += 1
         if not creation_hint and not related:
             self.counts["out_of_universe_transactions"] += 1
             return
@@ -364,6 +401,7 @@ class Recorder:
                 "tracked_mints": sorted(related),
                 "attribution_refusal": refusal,
                 "event_decode_refused": decode_refused,
+                "event_source": event_source,
                 "encoding": "base64:zlib:geyser.SubscribeUpdate",
                 "raw_size": len(protobuf),
                 "raw_sha256": hashlib.sha256(protobuf).hexdigest(),
@@ -1410,6 +1448,36 @@ def self_check() -> None:  # noqa: PLR0915 - one offline evidence check
                 json.loads(line) for line in rec.paths["run"].read_text().splitlines()
             ]
             assert sum(row["kind"] == "lane_void" for row in journal_rows) == 1
+            # migrate_v2 overflows Solana's 10 KB log cap: the CreatePoolEvent
+            # must still map the pool from its event-CPI copy.
+            pool = base58.b58encode(bytes([7]) * 32).decode()
+            rec.decoders[PUMP_AMM_PROGRAM, b"poolevnt"] = (
+                SimpleNamespace(
+                    decode_event_data=lambda *_: {
+                        "fields": {"base_mint": mint, "pool": pool}
+                    }
+                ),
+                "CreatePoolEvent",
+                frozenset({"base_mint", "pool"}),
+            )
+            migrate = geyser_pb2.SubscribeUpdate()
+            tx = migrate.transaction.transaction
+            tx.signature = bytes([5]) * 64
+            tx.transaction.message.account_keys.extend(
+                [bytes([1]) * 32, base58.b58decode(PUMP_AMM_PROGRAM)]
+            )
+            top = tx.transaction.message.instructions.add()  # inner group's parent
+            top.program_id_index = 1
+            group = tx.meta.inner_instructions.add()
+            cpi = group.instructions.add()
+            cpi.program_id_index = 1
+            cpi.data = EVENT_CPI_PREFIX + b"poolevnt"
+            tx.meta.log_messages.append(f"Program {PUMP_AMM_PROGRAM} invoke [1]")
+            rec.on_transaction(migrate, time.monotonic(), time.time_ns())
+            assert rec.counts["event_cpi_fallbacks"] == 1
+            assert rec.coins[mint]["pool"] == pool
+            raw_rows = rec.paths["raw"].read_text().splitlines()
+            assert json.loads(raw_rows[-1])["event_source"] == "event_cpi"
         finally:
             rec.close()
     scheduler_self_check()
