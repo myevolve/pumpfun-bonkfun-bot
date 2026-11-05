@@ -39,6 +39,9 @@ pump_bot = "bot_runner:main"
 requires = ["setuptools>=83.0.0"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools.package-data]
+meme_studio = ["compliance/data/*.txt", "game/mechanics.js"]
+
 [tool.ruff]
 exclude = [
     ".bzr",

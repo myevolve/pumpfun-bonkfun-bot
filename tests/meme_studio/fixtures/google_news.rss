@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Google News</title>
+    <item>
+      <title>A raccoon escaped with a donut</title>
+      <link>https://example.com/raccoon</link>
+      <pubDate>Wed, 28 Oct 2026 14:30:00 GMT</pubDate>
+      <source url="https://example.com">Example News</source>
+    </item>
+    <item>
+      <title>Earthquake hits the coast</title>
+      <link>https://example.com/quake</link>
+      <pubDate>Wed, 28 Oct 2026 14:40:00 GMT</pubDate>
+      <source url="https://example.com/q">Coast Desk</source>
+    </item>
+  </channel>
+</rss>

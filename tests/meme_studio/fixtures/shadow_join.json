@@ -1,0 +1,88 @@
+{
+  "date": "2026-10-27",
+  "cohorts": [
+    {
+      "story_id": "story-pigeon",
+      "winner_share": null,
+      "random_control": {"outside_buyers_24h": 3},
+      "paper_replay": {
+        "0.07": {"pnl_sol": -0.01, "label": "PAPER", "plan_adherence": 1.0},
+        "0.1": {"pnl_sol": -0.02, "label": "PAPER", "plan_adherence": 1.0},
+        "0.25": {"pnl_sol": -0.04, "label": "PAPER", "plan_adherence": 1.0}
+      },
+      "mints": [
+        {
+          "mint": "MintPigeon",
+          "create_ts": "2026-10-27T18:00:00+00:00",
+          "creator": "CreatorWallet",
+          "name": "Bench Birds",
+          "symbol": "BENCH",
+          "uri": "https://example.invalid/bench.json",
+          "dev_buy_sol": 0.1,
+          "mayhem": false,
+          "links": {
+            "tg": "https://t.me/example",
+            "x": "https://x.com/example",
+            "site": "https://example.invalid/bench"
+          },
+          "graduation_ts": null,
+          "trades": [
+            {
+              "ts": "2026-10-27T18:00:01+00:00",
+              "user": "CreatorWallet",
+              "is_buy": true,
+              "sol_amount": 0.1,
+              "creator_fee": 0.0
+            },
+            {
+              "ts": "2026-10-27T18:01:00+00:00",
+              "user": "BuyerA",
+              "is_buy": true,
+              "sol_amount": 0.2,
+              "creator_fee": 0.001
+            },
+            {
+              "ts": "2026-10-27T18:02:00+00:00",
+              "user": "BuyerA",
+              "is_buy": false,
+              "sol_amount": 0.05,
+              "creator_fee": 0.0002
+            },
+            {
+              "ts": "2026-10-27T18:03:00+00:00",
+              "user": "BuyerB",
+              "is_buy": true,
+              "sol_amount": 0.3,
+              "creator_fee": 0.0015
+            }
+          ],
+          "coin_creator_fees": [
+            {"ts": "2026-10-27T19:00:00+00:00", "amount_sol": 0.004}
+          ]
+        },
+        {
+          "mint": "MintGrad",
+          "create_ts": "2026-10-27T12:00:00+00:00",
+          "creator": "OtherCreator",
+          "name": "Crumbs",
+          "symbol": "CRUMB",
+          "uri": "https://example.invalid/crumb.json",
+          "dev_buy_sol": 0.07,
+          "mayhem": false,
+          "links": {"tg": "", "x": "", "site": ""},
+          "graduation_ts": "2026-10-27T20:00:00+00:00",
+          "trades": [
+            {
+              "ts": "2026-10-27T12:05:00+00:00",
+              "user": "BuyerC",
+              "is_buy": true,
+              "sol_amount": 1.0,
+              "creator_fee": 0.01
+            }
+          ],
+          "coin_creator_fees": []
+        }
+      ]
+    }
+  ]
+}
