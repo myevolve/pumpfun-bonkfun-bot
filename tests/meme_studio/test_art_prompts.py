@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import pytest
+from support import FIXTURE, load_fixture_dict, write_concept
 
 from meme_studio.art.guardrails import GuardrailError, post_check_asset
 from meme_studio.art.prompts import build_image_prompt, build_video_prompt
 from meme_studio.game.concept import load_concept
-from tests.meme_studio.support import FIXTURE, load_fixture_dict, write_concept
 
 # ruff: noqa: ANN001, S101, TRY003
 

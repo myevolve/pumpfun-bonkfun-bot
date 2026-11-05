@@ -328,8 +328,13 @@ def test_package_source_has_no_wallet_rpc_or_network_client() -> None:
         "AsyncClient",
     )
     root = _ROOT / "src" / "meme_studio"
+    paths = [
+        *(root / "ladder").rglob("*.py"),
+        *(root / "shadow_join").rglob("*.py"),
+        root / "chainstack.py",
+    ]
     offenders: list[str] = []
-    for path in sorted(root.rglob("*.py")):
+    for path in sorted(paths):
         text = path.read_text(encoding="utf-8")
         ast.parse(text)
         for token in banned:

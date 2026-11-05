@@ -14,9 +14,9 @@ from meme_studio.concept.scorer import score_stories
 from meme_studio.concept.writer_contract import writer_packages
 from meme_studio.trends.collect import attach_copycats
 from meme_studio.trends.fixtures import empty_bundle, grouped_stories, load_fixtures
+from utils.paths import state_path
 
 logger = logging.getLogger(__name__)
-_DEFAULT_OUTPUT = Path("out") / "meme_studio"
 _REFUSE = "phase 0 refuses to run without --dry-run"
 _NO_NETWORK = "phase 0 does not open network sockets"
 
@@ -37,7 +37,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.allow_network:
         print(_NO_NETWORK, file=sys.stderr)
         return 2
-    output = args.output if args.output is not None else _DEFAULT_OUTPUT
+    output = args.output or state_path("meme-studio", "concept")
     now = _parse_now(args.now)
     bundle = (
         load_fixtures(args.fixtures, reddit_tos_allowed=_reddit_allowed())

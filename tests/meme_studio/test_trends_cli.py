@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from meme_studio.trends.cli import main
+from utils import paths as state_paths
 
 FIXTURES = Path(__file__).parent / "fixtures"
 NOW = "2026-10-28T15:00:00+00:00"
@@ -206,15 +207,17 @@ def test_no_sources_still_writes_a_skipped_concept(tmp_path: Path) -> None:
     assert payload["transactions"] is False
 
 
-def test_default_output_dir_is_under_the_working_directory(
+def test_default_output_dir_is_under_the_state_dir(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(state_paths, "STATE_DIR", tmp_path / "state")
     monkeypatch.delenv("REDDIT_TOS_ALLOWED", raising=False)
     code = main(["run", "--dry-run", "--fixtures", str(FIXTURES), "--now", NOW])
     assert code == 0
-    assert (tmp_path / "out" / "meme_studio" / "concept.json").is_file()
+    assert (tmp_path / "state" / "meme-studio" / "concept" / "concept.json").is_file()
+    assert not (tmp_path / "out").exists()
 
 
 def test_module_entrypoint(tmp_path: Path) -> None:

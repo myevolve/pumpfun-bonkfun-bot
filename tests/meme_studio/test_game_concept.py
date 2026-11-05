@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import pytest
+from support import FIXTURE, load_fixture_dict, write_concept
 
 from meme_studio.game.concept import ConceptError, load_concept
-from tests.meme_studio.support import FIXTURE, load_fixture_dict, write_concept
 
 # ruff: noqa: ANN001, PLR2004, S101
 

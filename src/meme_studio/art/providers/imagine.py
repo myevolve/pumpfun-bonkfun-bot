@@ -41,6 +41,7 @@ from typing import Protocol
 
 from meme_studio.art.guardrails import assert_safe_text, post_check_asset
 from meme_studio.art.providers.base import AssetRecord, meta_path_for
+from utils.paths import state_path
 
 logger = logging.getLogger(__name__)
 
@@ -133,12 +134,7 @@ def default_budget_dir() -> Path:
     override = os.environ.get("MEME_STUDIO_IMAGINE_BUDGET_DIR", "").strip()
     if override:
         return Path(override)
-    return (
-        Path(__file__).resolve().parents[3]
-        / ".state"
-        / "meme-studio"
-        / "imagine-budget"
-    )
+    return state_path("meme-studio", "imagine-budget")
 
 
 class SafeRedirect(urllib.request.HTTPRedirectHandler):

@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
+from support import CREATOR, HIDDEN, MINT
 
 from meme_studio.compliance import (
     Asset,
@@ -16,7 +17,6 @@ from meme_studio.compliance import (
     StoryCard,
     compliance_lint,
 )
-from tests.meme_studio.conftest import CREATOR, HIDDEN, MINT
 
 _HASH_HEX_LEN = 64
 _DISCLOSURE = " We created this coin. We hold a dev bag."

@@ -5,15 +5,16 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from meme_studio.game.concept import load_concept
-from meme_studio.game.page import DISCLOSURE, FULL_COIN_DISCLOSURE, render_game_page
-from tests.meme_studio.support import (
+from support import (
     MECHANICS,
     NO_INPUT,
     load_fixture_dict,
     step_mechanics,
     write_concept,
 )
+
+from meme_studio.game.concept import load_concept
+from meme_studio.game.page import DISCLOSURE, FULL_COIN_DISCLOSURE, render_game_page
 
 # ruff: noqa: ANN001, PLC0415, PLR2004, S101, S603, S607, TC003
 

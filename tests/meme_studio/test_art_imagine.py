@@ -8,6 +8,7 @@ import logging
 from datetime import UTC, datetime
 
 import pytest
+from support import FIXTURE, ROOT, tiny_png
 
 from meme_studio.art.generate import generate_art
 from meme_studio.art.guardrails import GuardrailError
@@ -23,7 +24,6 @@ from meme_studio.art.providers.imagine import (
     ImagineProvider,
 )
 from meme_studio.game.concept import load_concept
-from tests.meme_studio.support import FIXTURE, ROOT, tiny_png
 
 # ruff: noqa: ANN001, ANN202, ARG001, PLC0415, PLR2004, S101, S105, TRY003, TRY004
 
@@ -113,7 +113,7 @@ def _provider(
 
 
 def test_module_cites_current_xai_docs() -> None:
-    text = (ROOT / "meme_studio" / "art" / "providers" / "imagine.py").read_text(
+    text = (ROOT / "src" / "meme_studio" / "art" / "providers" / "imagine.py").read_text(
         encoding="utf-8"
     )
     assert "https://docs.x.ai/developers/model-capabilities/images/generation" in text

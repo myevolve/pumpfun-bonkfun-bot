@@ -1,7 +1,9 @@
-"""Fixture-backed Grok Imagine assets and sidecar metadata.
+"""Art for draft parody games and fixture-backed Grok Imagine assets.
 
-Phase 0 records the provider name and stores caller-supplied bytes. It does
-not call xAI, and it does not contain a client that can send a prompt.
+``generate`` drives Grok Imagine with procedural SVG/PNG fallbacks when
+``XAI_API_KEY`` is unset or a request fails. ``writer`` stores caller-supplied
+bytes beside a metadata sidecar after the media linter passes; it opens no
+socket.
 """
 
 from __future__ import annotations

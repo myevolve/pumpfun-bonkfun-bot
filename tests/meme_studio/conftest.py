@@ -1,24 +1,13 @@
-"""Path setup for shadow meme-studio tests. No network fixtures."""
+"""Shadow meme-studio test fixtures. No network fixtures."""
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[2]
-SRC = ROOT / "src"
-for _path in (SRC, ROOT):
-    if str(_path) not in sys.path:
-        sys.path.insert(0, str(_path))
-
-CREATOR = "Fund" + "1" * 36
-MINT = "Ca" + "2" * 38
-COLD = "Save" + "4" * 36
-HIDDEN = "Extra" + "3" * 35
-SIG = "5" * 88
-FIXTURES = Path(__file__).resolve().parent / "fixtures"
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @pytest.fixture(autouse=True)

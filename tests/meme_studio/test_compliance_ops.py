@@ -82,10 +82,18 @@ def test_phase_shadow_blocks_publish_and_allows_drafts() -> None:
 
 
 def test_package_source_has_no_network_client() -> None:
+    # The art providers and trend sources own their network clients; the
+    # shadow compliance, drafts, report, and fixture-writer code must not.
     root = Path(__file__).resolve().parents[2] / "src" / "meme_studio"
-    assert root.is_dir()
+    paths = [
+        *(path for sub in ("compliance", "drafts", "report") for path in (root / sub).rglob("*.py")),
+        root / "art" / "writer.py",
+        root / "art" / "prompts.py",
+        root / "errors.py",
+    ]
+    assert all(path.is_file() for path in paths)
     offenders: list[str] = []
-    for path in root.rglob("*.py"):
+    for path in paths:
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):

@@ -3,8 +3,9 @@
 
 from __future__ import annotations
 
+from support import COLD, CREATOR, HIDDEN
+
 from meme_studio.compliance import TxIntent, tx_guard
-from tests.meme_studio.conftest import COLD, CREATOR, HIDDEN
 
 _HASH_HEX_LEN = 64
 

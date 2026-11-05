@@ -10,9 +10,15 @@ import zlib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-FIXTURE = Path(__file__).resolve().parent / "fixtures" / "sock_drawer.concept.json"
-MECHANICS = ROOT / "meme_studio" / "game" / "mechanics.js"
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
+FIXTURE = FIXTURES / "sock_drawer.concept.json"
+MECHANICS = ROOT / "src" / "meme_studio" / "game" / "mechanics.js"
 RUNNER = Path(__file__).resolve().parent / "run_mechanics.js"
+
+CREATOR = "Fund" + "1" * 36
+MINT = "Ca" + "2" * 38
+COLD = "Save" + "4" * 36
+HIDDEN = "Extra" + "3" * 35
 
 DISCLOSURE = (
     "Parody and entertainment only. Not investment advice. "

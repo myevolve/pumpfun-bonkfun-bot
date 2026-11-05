@@ -4,18 +4,19 @@ from __future__ import annotations
 
 import json
 
+from support import (
+    FIXTURE,
+    decode_png_rgb,
+    load_fixture_dict,
+    write_concept,
+)
+
 from meme_studio.art.providers.procedural import (
     BANNER_SIZE,
     LOGO_SIZE,
     render_procedural,
 )
 from meme_studio.game.concept import load_concept
-from tests.meme_studio.support import (
-    FIXTURE,
-    decode_png_rgb,
-    load_fixture_dict,
-    write_concept,
-)
 
 # ruff: noqa: ANN001, PLC0415, PLR2004, S101, S314
 

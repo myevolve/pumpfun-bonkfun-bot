@@ -11,10 +11,10 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from support import CREATOR, MINT
 
 from meme_studio.drafts import ConceptPackage, SellEvent, write_launch_drafts
 from meme_studio.errors import NaiveTimeError
-from tests.meme_studio.conftest import CREATOR, MINT
 
 _M1_CHAR_LIMIT = 280
 

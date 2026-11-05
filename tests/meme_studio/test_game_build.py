@@ -7,14 +7,7 @@ import json
 import urllib.request
 
 import pytest
-
-from meme_studio.art.generate import generate_art
-from meme_studio.art.guardrails import GuardrailError
-from meme_studio.art.providers.imagine import HttpResponse
-from meme_studio.game.build import build
-from meme_studio.game.cli import main
-from meme_studio.game.concept import ConceptError, load_concept
-from tests.meme_studio.support import (
+from support import (
     DISCLOSURE,
     FIXTURE,
     decode_png_rgb,
@@ -22,6 +15,13 @@ from tests.meme_studio.support import (
     tiny_png,
     write_concept,
 )
+
+from meme_studio.art.generate import generate_art
+from meme_studio.art.guardrails import GuardrailError
+from meme_studio.art.providers.imagine import HttpResponse
+from meme_studio.game.build import build
+from meme_studio.game.cli import main
+from meme_studio.game.concept import ConceptError, load_concept
 
 # ruff: noqa: ANN001, ARG002, PLR2004, S101
 
