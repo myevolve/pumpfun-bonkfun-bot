@@ -102,7 +102,11 @@ Dependency layers, low to high — don't introduce an upward import:
 `interfaces` is the leaf — it imports nothing internal, and `utils/idl_manager.py`
 imports `interfaces.core`. `geyser` holds only generated stubs and likewise
 imports nothing internal; `cleanup` sits on `core`/`utils` and is pulled in by
-`trading`.
+`trading`. `meme_studio` is a separate offline content/research package (trends →
+concept → drafts/art/game, plus ladder/shadow-join replays and a daily report):
+no bot layer imports it, it never signs or submits, and its default outputs go
+under `.state/meme-studio/`. Its art provider can spend xAI credits only when
+`XAI_API_KEY` is set, within its daily budget.
 
 Platform differences are resolved through `interfaces/core.py` abstractions
 (`AddressProvider`, curve manager, event parser, instruction builder) and a
