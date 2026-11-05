@@ -2199,8 +2199,9 @@ Unanimous:
   luck. Count every lot and measure markouts before reading any per-lot edge.
 - **The one directional candidate is buying NO against rich longshot YES on
   crypto thresholds.** Its evidence (5.6-11 pp over option-implied digitals) is
-  September 2023 data, before Kalshi crypto volume grew about 90x. Re-measure
-  it against option-implied digitals before risking capital.
+  September 2023 data. Kalshi's 15-minute crypto volume alone grew about 90x
+  from January to July 2026. Re-measure it against option-implied digitals
+  before risking capital.
 - **Realistic upside at a $10k bankroll is single digits to ~$35 a day.** The
   largest risks are engineering time spent on small edges, and adverse
   selection read as edge.
