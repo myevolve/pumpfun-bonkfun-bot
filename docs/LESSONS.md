@@ -1949,6 +1949,9 @@ cohorts.
 
 ## Wave A4++: third tape confirms; AMM lane void on tapes 2-3 (2026-11-05)
 
+> CORRECTED in Wave F1 below: the post-grad void was truncated migrate_v2
+> logs in the recorder, not provider lane starvation.
+
 Tape #3 (13,365 coins flushed when the 40GB raw ceiling hit at ~7h;
 9.99M raw transactions) confirms the A4 winner-sell signal a third
 non-contiguous time: forward medians `-7.1% / -10.7% / -19.0%` at
@@ -1988,3 +1991,70 @@ Capture-sizing lessons (pump-only recording regime):
   reconnects; collector hiccup windows correlated 15:15/16:28/18:20/
   19:00/22:05). A 6h capture is the conservative ceiling under this
   regime; the lane_void assert makes longer gambles cheap to detect.
+
+## Wave F1: fidelity fixes — deployed ledger, quote mixing, truncated logs (2026-11-05)
+
+**Gate drought is not a bug.** Replaying the live `entry_gate` over tapes
+2-3: 0 passes in 24,457 verified SOL coins (the three replay "passes" were
+all non-SOL-quoted coins the bot correctly never sees); live: 0 in ~75k
+decisions since hardening. In the current regime coins reaching 60-80 SOL
+inside 75 slots arrive with 4+ buyers (32 near-misses) or overshoot with
+1-2 (171 `too_much_sol`). The paper book therefore cannot arbitrate
+winner_sell forward; offline replay through the production `FlowMonitor`
+is the arbitration path until an entry rule admits coins.
+
+**~18% of pump.fun launches now quote in PUMP (`pumpCm…`) or memecoins.**
+The bot rejects them at parse by design ("unsupported quote mint"); the tape
+analyzers did not, and treated their raw quote amounts as lamports (tape-2
+A4 winner threshold inflated 12.4 → 2.4 SOL). All pump analyzers now keep
+SOL-paired coins only. A4's ledger also walked coins in flush order (up to
+~20 min of future PnL in "prior"); it now walks global slot order. Corrected
+A4, 10/25/60-slot medians: tape 1 `-13.4/-21.6/-36.8%`, tape 2
+`-10.1/-14.1/-23.0%`, tape 3 `-7.3/-11.0/-19.4%` vs other sells
+`-0.7..-2.9%` — the signal is unchanged by both corrections.
+
+**The deployed rule implemented ~1% of the validated signal.** The hub
+ledger decoded only subscribed mints (gate windows): replayed on tapes
+2-3 it saw 1.7-2.1% of SOL trades, 16-18 wallets ever cleared 2 SOL (tape:
+~1,200), and live-winner sells were n=458/1,275 vs 137k/97k tape-winner
+sells. `TradeFlowHub(track_wallets=True)` (on when `flow_exit.winner_sell`)
+now decodes every pump.fun trade for an LRU-bounded ledger (100k wallets,
+100k positions) and still delivers only subscribed mints.
+
+**Incremental exit value, production FlowMonitor replay** (3 tapes, later
+half of coins, 10 entries/coin, fill one trade after the signal, 225-slot
+cap, net SOL per 0.05 SOL): adding winner_sell to the deployed
+`flow_exit` moves the median from `-0.00335/-0.00402/-0.00461` to
+`-0.00225/-0.00269/-0.00312` (+2.2..3.0% of the position), win-mean
++0.0012..+0.0018, and improves 71-76% of the outcomes it changes; it
+becomes the first trigger in ~60% of exits. Better exits, not an edge:
+every cell stays negative because the entries carry none.
+
+**Winner-sell as an entry veto: closed negative.** "No winner sold in the
+last 10 trades" has better medians but a 16-19% win rate (quiet coins
+bleeding fees); no hold cell is positive on any tape.
+
+**Solana truncates logs at 10 KB, and every migrate_v2 overflows it**
+(create_pool + init_boost + migration event: 155 lines, 10,010 bytes). The
+recorder refused the truncated stack and dropped the CreatePoolEvent, so no
+pool was ever mapped: tapes 2/3/4 graduated 209/120/55 coins, all with no
+pool and no post-grad trades, while tape 1 (pre-migrate_v2) mapped 794 of
+797. Wave A4++'s "provider lane starvation" was wrong: its whole-file grep
+for the AMM program id cannot match inside zlib+base64 protobuf payloads.
+Fix: on a truncated stack in a successful transaction, decode the
+program's own event-CPI copies (instruction data, never truncated; only
+the program signs its event authority). The recorder (`event_source`,
+`event_cpi_fallbacks`) and the src trade/LaunchLab/migration decoders both
+use it — in tape 4, 64 creation transactions of SOL coins (~2.7%) were
+truncated create+buy bundles whose buys the gate never saw. Tape 5 (fixed
+recorder, 10h, 4.5h post-grad windows) logged 658 pool trades after its
+first 2 graduations.
+
+Housekeeping: `read_error` paper marks are all Oct 6-7 (before the
+completed-curve fallback); `trade_stream_interrupted` rows are provider
+hiccup windows, fail-closed by design; per-event CreateEvent parse chatter
+(54% of log bytes; rotation held ~7h) moved to DEBUG. Four 2026-10-28
+Cursor PRs (#2-#5, an offline meme-studio line) reviewed: all request
+changes and collide on `pyproject.toml`/`src/meme_studio/__init__.py`/
+`conftest.py` with an incompatible package layout in #2 — left open for the
+owner's call.
