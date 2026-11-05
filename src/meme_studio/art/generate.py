@@ -21,6 +21,7 @@ from meme_studio.art.providers.imagine import (
     DEFAULT_DAILY_COST_USD,
     DEFAULT_DAILY_IMAGE_CAP,
     DEFAULT_DAILY_VIDEO_CAP,
+    PROVIDER_ID,
     ImagineConfig,
     ImagineError,
     ImagineProvider,
@@ -268,4 +269,4 @@ def _one_clip(
     except (ImagineError, GuardrailError) as exc:
         reasons.append(str(exc))
         return ClipResult("skipped", None, str(exc), "none")
-    return ClipResult("captured", record.path, "imagine", "imagine")
+    return ClipResult("captured", record.path, "imagine", PROVIDER_ID)

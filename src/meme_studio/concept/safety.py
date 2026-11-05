@@ -8,6 +8,7 @@ a heuristic, not a trained NER model.
 import re
 from dataclasses import dataclass
 
+from meme_studio.compliance.blocklists import person_blocked
 from meme_studio.concept.hooks import ANIMALS, OBJECTS, extract
 
 _DEATH = re.compile(
@@ -266,9 +267,11 @@ def contains_hate(text: str) -> bool:
 def find_persons(text: str) -> tuple[str, ...]:
     """Return heuristic person mentions.
 
-    Honorifics count, and so does any capitalized pair that is not an animal,
-    object, brand, or headline stop word. A defamation verb is not required:
-    naming an artist or other person is enough. This is not a trained NER model.
+    Honorifics count, and so does a pair of capitalized words that is not an
+    animal, object, brand, or headline stop word, or a known person from the
+    compliance people list in any case. Lowercase common phrases such as
+    "local bakery" are not persons. A defamation verb is not required: naming
+    an artist or other person is enough. This is not a trained NER model.
 
     Args:
         text: Any generated or source string.
@@ -294,7 +297,11 @@ def find_persons(text: str) -> tuple[str, ...]:
             continue
         if len(first) < _MIN_NAME_CHARS or len(second) < _MIN_NAME_CHARS:
             continue
-        found.append(f"{first} {second}")
+        pair = f"{first} {second}"
+        # ponytail: Title Case headlines ("From Local Bakery") still fail closed;
+        # a first-name list would be the upgrade.
+        if (first[0].isupper() and second[0].isupper()) or person_blocked(pair):
+            found.append(pair)
     unique: list[str] = []
     for name in found:
         if name not in unique:

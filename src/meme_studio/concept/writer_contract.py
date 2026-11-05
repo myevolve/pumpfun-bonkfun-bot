@@ -57,8 +57,8 @@ def writer_packages(document: ConceptDocument) -> list[dict[str, object]]:
     Returns:
         JSON-ready packages. Launch facts are null.
     """
-    story = _story_line(document)
-    story_id = document.selected_story_id or story_id_from(document)
+    story_id = story_id_from(document)
+    story = _story_line(document, story_id)
     return [_package(story_id, story, candidate) for candidate in document.candidates]
 
 
@@ -91,20 +91,13 @@ def _package(
     }
 
 
-def _story_line(document: ConceptDocument) -> str:
-    if document.top_stories:
-        return document.top_stories[0].title
-    if document.rejected_stories:
-        return document.rejected_stories[0].title
+def _story_line(document: ConceptDocument, story_id: str) -> str:
+    for card in (*document.top_stories, *document.rejected_stories):
+        if card.story_id == story_id:
+            return card.title
     return ""
 
 
 def story_id_from(document: ConceptDocument) -> str:
-    """Return the best story id already on the document, or an empty string."""
-    if document.selected_story_id:
-        return document.selected_story_id
-    if document.top_stories:
-        return document.top_stories[0].story_id
-    if document.rejected_stories:
-        return document.rejected_stories[0].story_id
-    return ""
+    """Return the id of the story that produced the candidates, or an empty string."""
+    return document.selected_story_id or document.candidates_story_id or ""

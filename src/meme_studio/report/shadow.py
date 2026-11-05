@@ -1,8 +1,9 @@
 """Read the phase-0 shadow tracker file described in PIPELINE.md section 5.
 
-The tracker design names ``phase0/<date>/shadow_join.parquet``. That file was
-not on disk, and this package does not add a parquet dependency. The reader
-accepts a JSON document with the same fields: mint, create_ts, creator,
+The tracker design names ``phase0/<date>/shadow_join.parquet``. The file
+``meme_studio.shadow_join`` writes there is paper ladder P&L, not tracker
+data (see ``report.contract``). The reader
+accepts a JSON document with the tracker fields: mint, create_ts, creator,
 name/symbol/uri, dev_buy_sol, mayhem, links, trades (ts, user, is_buy,
 sol_amount, creator_fee), graduation_ts, and coin_creator_fee rows.
 """

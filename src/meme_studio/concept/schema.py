@@ -109,6 +109,8 @@ _TOP_KEYS = frozenset(
         "network_writes",
     }
 )
+# Older concept.json files predate candidate provenance; a missing key is null.
+_OPTIONAL_TOP_KEYS = frozenset({"candidates_story_id"})
 _STORY_KEYS = frozenset(
     {
         "story_id",
@@ -292,6 +294,8 @@ class ConceptDocument:
     publish: bool
     transactions: bool
     network_writes: str
+    # Story whose drafts are in ``candidates``; set for skipped days too.
+    candidates_story_id: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         """Return the JSON object for the whole document."""
@@ -307,6 +311,7 @@ class ConceptDocument:
             "rejected_stories": [card.to_dict() for card in self.rejected_stories],
             "selected_story_id": self.selected_story_id,
             "candidates": [item.to_dict() for item in self.candidates],
+            "candidates_story_id": self.candidates_story_id,
             "selected_ticker": self.selected_ticker,
             "unknowns": list(self.unknowns),
             "publish": self.publish,
@@ -426,7 +431,7 @@ def concept_from_json(raw: str) -> ConceptDocument:
     if not isinstance(payload, dict):
         message = "concept json must be an object"
         raise ConceptSchemaError(message)
-    _exact_keys(payload, _TOP_KEYS)
+    _exact_keys(payload, _TOP_KEYS | (_OPTIONAL_TOP_KEYS & payload.keys()))
     return ConceptDocument(
         schema_version=_as_str(payload, "schema_version"),
         generated_at=_as_str(payload, "generated_at"),
@@ -444,6 +449,9 @@ def concept_from_json(raw: str) -> ConceptDocument:
         selected_story_id=_as_optional_str(payload, "selected_story_id"),
         candidates=tuple(
             _candidate_from(item) for item in _as_list(payload, "candidates")
+        ),
+        candidates_story_id=_as_optional_str(
+            {"candidates_story_id": None, **payload}, "candidates_story_id"
         ),
         selected_ticker=_as_optional_str(payload, "selected_ticker"),
         unknowns=tuple(_as_str_list(payload, "unknowns")),
@@ -470,8 +478,24 @@ def validate_concept(document: ConceptDocument) -> None:
         _validate_story(card, rejected=True)
     for candidate in document.candidates:
         _validate_candidate(candidate)
+    _validate_provenance(document)
     if document.status == "draft":
         _validate_selection(document)
+
+
+def _validate_provenance(document: ConceptDocument) -> None:
+    source = document.candidates_story_id
+    if source is None:
+        return
+    if not document.candidates:
+        message = "candidates_story_id needs candidates"
+        raise ConceptSchemaError(message)
+    if source not in {card.story_id for card in document.top_stories}:
+        message = "candidates story is not in top_stories"
+        raise ConceptSchemaError(message)
+    if document.selected_story_id not in (None, source):
+        message = "candidates must come from the selected story"
+        raise ConceptSchemaError(message)
 
 
 def _validate_phase(document: ConceptDocument) -> None:

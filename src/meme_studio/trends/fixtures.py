@@ -158,12 +158,13 @@ def _load_tokens(path: Path) -> list[TokenHit] | None:
         return None
     hits: list[TokenHit] = []
     for row in payload:
+        # One bad row voids the lookup: a partial list would clear collisions.
         if not isinstance(row, dict):
-            continue
+            return None
         symbol = row.get("symbol")
         name = row.get("name")
         if not isinstance(symbol, str) or not isinstance(name, str):
-            continue
+            return None
         chain = row.get("chain")
         hits.append(
             TokenHit(

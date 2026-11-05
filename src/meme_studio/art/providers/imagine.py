@@ -45,6 +45,7 @@ from utils.paths import state_path
 
 logger = logging.getLogger(__name__)
 
+PROVIDER_ID = "imagine"
 IMAGE_MODEL = "grok-imagine-image-2.0"
 VIDEO_MODEL = "grok-imagine-video-1.5"
 IMAGE_ENDPOINT = "https://api.x.ai/v1/images/generations"
@@ -639,7 +640,7 @@ class ImagineProvider:
         meta_path.write_text(json.dumps(stored, indent=2), encoding="utf-8")
         raw_cost = stored.get("cost_usd")
         cost = 0.0 if raw_cost is None else float(raw_cost)
-        return AssetRecord(dest, meta_path, "imagine", kind, cache_hit, cost)
+        return AssetRecord(dest, meta_path, PROVIDER_ID, kind, cache_hit, cost)
 
     def _redact(self, text: str) -> str:
         key = self.config.api_key
@@ -704,7 +705,7 @@ def _meta(
 ) -> dict[str, object]:
     observed = None if observed_ticks is None else observed_ticks / USD_TICKS
     return {
-        "provider": "imagine",
+        "provider": PROVIDER_ID,
         "model": model,
         "prompt": prompt,
         "creative_prompt": creative_prompt,

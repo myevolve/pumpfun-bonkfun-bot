@@ -205,7 +205,8 @@ def _trade(item: object) -> TrackerTrade | None:
     direction = item.get("is_buy")
     user = item.get("user")
     attribution_known = isinstance(user, str) and bool(user.strip())
-    direction_known = isinstance(direction, bool) and sol_raw is not None
+    # Zero SOL carries no replayable flow; censor it like an unknown amount.
+    direction_known = isinstance(direction, bool) and bool(sol_raw)
     if not ts_known:
         return TrackerTrade(
             ts=None,

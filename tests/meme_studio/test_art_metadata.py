@@ -18,6 +18,7 @@ from meme_studio.art import (
     build_wild_meme_prompt,
     write_imagine_asset,
 )
+from meme_studio.art.providers.imagine import IMAGE_MODEL, PROVIDER_ID, VIDEO_MODEL
 from meme_studio.compliance import MediaMetadata, compliance_lint
 from meme_studio.errors import UnsafeStemError
 
@@ -26,9 +27,9 @@ if TYPE_CHECKING:
 
 
 def test_constants_name_grok_imagine() -> None:
-    assert PROVIDER == "xai-grok-imagine"
-    assert MODEL_IMAGE == "grok-imagine"
-    assert MODEL_VIDEO == "grok-imagine-video"
+    assert PROVIDER == PROVIDER_ID == "imagine"
+    assert MODEL_IMAGE == IMAGE_MODEL == "grok-imagine-image-2.0"
+    assert MODEL_VIDEO == VIDEO_MODEL == "grok-imagine-video-1.5"
 
 
 def test_wild_prompt_is_compliant() -> None:
@@ -83,12 +84,12 @@ def test_fixture_image_and_video_write_sidecar_metadata(
     assert video_result.metadata_path == tmp_path / "clip.mp4.meta.json"
     meta = json.loads(image_result.metadata_path.read_text(encoding="utf-8"))
     assert meta["prompt"] == image.prompt
-    assert meta["provider"] == PROVIDER
-    assert meta["model"] == MODEL_IMAGE
+    assert meta["provider"] == PROVIDER_ID
+    assert meta["model"] == IMAGE_MODEL
     assert meta["timestamp"] == "2026-10-28T18:00:00+00:00"
     clip_meta = json.loads(video_result.metadata_path.read_text(encoding="utf-8"))
-    assert clip_meta["model"] == MODEL_VIDEO
-    assert clip_meta["provider"] == PROVIDER
+    assert clip_meta["model"] == VIDEO_MODEL
+    assert clip_meta["provider"] == PROVIDER_ID
 
 
 def test_rejected_prompt_writes_no_asset(tmp_path: Path) -> None:

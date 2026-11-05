@@ -179,7 +179,8 @@ def test_missing_metrics_stay_unknown_and_sells_reconcile(tmp_path: Path) -> Non
     assert digest in site.text
     assert "not-the-real-hash" not in page.text
     assert "not-the-real-hash" not in recap.text
-    assert "all per plan" in recap.text
+    assert "all per plan" not in recap.text
+    assert "plan adherence UNKNOWN" in recap.text
     assert "we created this coin" in recap.text.lower()
     assert "dev bag" in recap.text.lower()
     assert "dev sells 1" in recap.text

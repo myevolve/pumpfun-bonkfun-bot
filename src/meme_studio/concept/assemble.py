@@ -77,11 +77,12 @@ def assemble_concept(
     if not batch.top_stories:
         return _skipped(batch, (generated_at, date, "no_safe_story", (), unknown_tuple))
     active = lookup if lookup is not None else _ClosedLookup()
-    chosen, candidates, reason = select_concept(
+    chosen, source, candidates, reason = select_concept(
         batch.top_stories,
         lookup=active,
         history=history_tuple,
     )
+    source_id = None if source is None else source.story_id
     if chosen is None:
         skip_reason = reason or "all_candidates_collided"
         if _history_unknown(candidates):
@@ -90,6 +91,7 @@ def assemble_concept(
         return _skipped(
             batch,
             (generated_at, date, skip_reason, candidates, unknown_tuple),
+            source_id,
         )
     selected = next(item for item in candidates if item.accepted)
     return ConceptDocument(
@@ -104,6 +106,7 @@ def assemble_concept(
         rejected_stories=batch.rejected_stories,
         selected_story_id=chosen.story_id,
         candidates=candidates,
+        candidates_story_id=chosen.story_id,
         selected_ticker=selected.ticker,
         unknowns=unknown_tuple,
         publish=False,
@@ -115,6 +118,7 @@ def assemble_concept(
 def _skipped(
     batch: ScoredBatch,
     meta: tuple[str, str, str, tuple[ConceptCandidate, ...], tuple[str, ...]],
+    candidates_story_id: str | None = None,
 ) -> ConceptDocument:
     generated_at, date, reason, candidates, unknowns = meta
     return ConceptDocument(
@@ -129,6 +133,7 @@ def _skipped(
         rejected_stories=batch.rejected_stories,
         selected_story_id=None,
         candidates=candidates,
+        candidates_story_id=candidates_story_id,
         selected_ticker=None,
         unknowns=unknowns,
         publish=False,

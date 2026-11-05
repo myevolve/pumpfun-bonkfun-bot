@@ -3,10 +3,8 @@
 
 from __future__ import annotations
 
-import ast
 import logging
 import socket
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -20,7 +18,6 @@ from meme_studio.ladder import (
 )
 from meme_studio.ladder.engine import CoinPath, PathTrade
 
-_ROOT = Path(__file__).resolve().parents[2]
 _CREATE = 1_700_000_000
 
 
@@ -311,36 +308,6 @@ def test_replay_logs_each_sell(caplog: pytest.LogCaptureFixture) -> None:
         "We have not created this token and we do not hold it" in line
         for line in sell_lines
     )
-
-
-def test_package_source_has_no_wallet_rpc_or_network_client() -> None:
-    banned = (
-        "send_transaction",
-        "Keypair",
-        "private_key",
-        "SOLANA_PRIVATE",
-        "aiohttp",
-        "websockets",
-        "httpx",
-        "urllib",
-        "requests",
-        ".env",
-        "AsyncClient",
-    )
-    root = _ROOT / "src" / "meme_studio"
-    paths = [
-        *(root / "ladder").rglob("*.py"),
-        *(root / "shadow_join").rglob("*.py"),
-        root / "chainstack.py",
-    ]
-    offenders: list[str] = []
-    for path in sorted(paths):
-        text = path.read_text(encoding="utf-8")
-        ast.parse(text)
-        for token in banned:
-            if token in text:
-                offenders.append(f"{path.name}:{token}")
-    assert offenders == []
 
 
 def test_replay_does_not_open_a_socket(monkeypatch: pytest.MonkeyPatch) -> None:

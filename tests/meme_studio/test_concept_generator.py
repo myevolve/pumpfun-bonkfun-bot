@@ -123,7 +123,7 @@ def test_selection_skips_a_fully_colliding_story() -> None:
         now=NOW,
     )
     hits = [TokenHit(ticker, ticker, 1.0, 0.0, "solana") for ticker in RACCOON_TICKERS]
-    chosen, candidates, reason = select_concept(
+    chosen, _source, candidates, reason = select_concept(
         batch.top_stories,
         lookup=MemoryTokenLookup(hits),
         history=(),
@@ -148,12 +148,13 @@ def test_all_collisions_skip_the_day() -> None:
         TokenHit(ticker, ticker, 1.0, 0.0, "solana")
         for ticker in RACCOON_TICKERS + GOOSE_TICKERS
     ]
-    chosen, candidates, reason = select_concept(
+    chosen, source, candidates, reason = select_concept(
         batch.top_stories,
         lookup=MemoryTokenLookup(hits),
         history=(),
     )
     assert chosen is None
+    assert source == batch.top_stories[0]
     assert reason == "all_candidates_collided"
     assert candidates[0].ticker == "RACCDONU"
     assert all(not item.accepted for item in candidates)
@@ -169,7 +170,7 @@ def test_lookup_outage_fails_closed_on_the_first_story() -> None:
         def search(self, _query: str) -> list[TokenHit]:
             raise LookupUnavailableError("down")
 
-    chosen, candidates, reason = select_concept(
+    chosen, _source, candidates, reason = select_concept(
         batch.top_stories,
         lookup=Down(),
         history=(),

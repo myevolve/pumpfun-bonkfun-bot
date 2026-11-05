@@ -57,6 +57,9 @@ class ConceptPackage:
     time_label: str | None = None
     graduated: bool | None = None
     sells: tuple[SellEvent, ...] = ()
+    # Caller-verified result of reconciling ``sells`` against ``plan_text``.
+    # None means nobody checked; the drafts never infer adherence themselves.
+    plan_adherence_verified: bool | None = None
 
 
 @dataclass(frozen=True)

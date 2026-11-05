@@ -95,10 +95,15 @@ def _bag_left(concept: ConceptPackage) -> str:
 
 
 def _plan_claim(concept: ConceptPackage) -> str:
+    """Claim adherence only when the caller verified it; plan text alone proves nothing."""
     _body, digest = canonical_plan(concept)
     if digest is None:
         return "plan adherence UNKNOWN"
-    return f"all per plan SHA-256 {digest}"
+    if concept.plan_adherence_verified is None:
+        return f"plan adherence UNKNOWN for plan SHA-256 {digest}"
+    if concept.plan_adherence_verified:
+        return f"all per plan SHA-256 {digest}"
+    return f"NOT all per plan SHA-256 {digest}"
 
 
 def _plan_hash_line(concept: ConceptPackage) -> str:

@@ -87,7 +87,9 @@ def select_concept(
     *,
     lookup: TokenLookup,
     history: Sequence[str] | None,
-) -> tuple[StoryCard | None, tuple[ConceptCandidate, ...], str | None]:
+) -> tuple[
+    StoryCard | None, StoryCard | None, tuple[ConceptCandidate, ...], str | None
+]:
     """Pick the first safe story that still has a clean candidate.
 
     Args:
@@ -96,12 +98,13 @@ def select_concept(
         history: Tickers already used by this studio.
 
     Returns:
-        The chosen story, the reviewed candidates kept for the report, and a
-        skip reason. The skip reason is None when a candidate is accepted.
+        The chosen story, the story that produced the returned candidates, the
+        reviewed candidates kept for the report, and a skip reason. The chosen
+        story is None and the skip reason is set unless a candidate is accepted.
         A lookup failure stops the loop and fails closed. If every candidate
         collides, the first story's reviewed drafts are returned.
     """
-    first: tuple[ConceptCandidate, ...] = ()
+    first: tuple[StoryCard | None, tuple[ConceptCandidate, ...]] = (None, ())
     for story in stories:
         drafts = draft_candidates(story.title, story.summary)
         if not drafts:
@@ -110,18 +113,18 @@ def select_concept(
             check_candidate(draft, lookup=lookup, history=history) for draft in drafts
         )
         if any(item.accepted for item in reviewed):
-            return story, reviewed, None
+            return story, story, reviewed, None
         if any(
             check.name == "existing_tokens" and check.reason == "lookup_unavailable"
             for item in reviewed
             for check in item.collision_checks
         ):
-            return None, reviewed, "lookup_unavailable"
-        if not first:
-            first = reviewed
-    if first:
-        return None, first, "all_candidates_collided"
-    return None, (), "no_safe_story"
+            return None, story, reviewed, "lookup_unavailable"
+        if first[0] is None:
+            first = (story, reviewed)
+    if first[0] is not None:
+        return None, first[0], first[1], "all_candidates_collided"
+    return None, None, (), "no_safe_story"
 
 
 def _ticker(left: str, right: str) -> str:

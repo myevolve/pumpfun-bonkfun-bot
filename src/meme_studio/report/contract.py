@@ -1,10 +1,13 @@
 """JSON contract for the phase-0 shadow tracker.
 
-The design names ``phase0/<date>/shadow_join.parquet``. No producer of that
-parquet file is in this repository, so parquet compatibility is UNKNOWN.
-This module validates the JSON document the report can actually read. Missing
-measurement keys are not errors: the loader keeps them as UNKNOWN instead of
-zero. A present empty list is a measured empty observation.
+The design names ``phase0/<date>/shadow_join.parquet`` as the tracker file.
+``meme_studio.shadow_join`` writes a file at that path, but it holds paper
+ladder P&L per (mint, dev-buy size) plus a cohort-mean JSON summary, not the
+tracker's trades, fee rows, or per-story replay, so the report does not read
+it and rejects that summary. This module validates the JSON tracker document
+the report can actually read. Missing measurement keys are not errors: the
+loader keeps them as UNKNOWN instead of zero. A present empty list is a
+measured empty observation.
 """
 
 from __future__ import annotations

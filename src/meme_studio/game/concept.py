@@ -1,7 +1,9 @@
 """Validated ``concept.json`` for one parody game.
 
-The schema follows the stage-3 fields in the pipeline design. This module does
-not import a sibling ``meme_studio.concept`` package.
+Two shapes load. A flat game concept (``name``, ``template_id``, ``palette``)
+follows the stage-3 fields in the pipeline design. The trends pipeline's
+``concept.json`` (``meme_studio.concept.schema``) is a story document with
+``candidates``; the selected accepted candidate is mapped onto the game fields.
 """
 # ruff: noqa: TC003, TRY003
 
@@ -13,10 +15,19 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from meme_studio.concept.schema import (
+    ConceptSchemaError,
+    concept_from_json,
+    validate_concept,
+)
+
 _TEMPLATE_ALIASES = {
     "endless_runner": "endless_runner",
     "endless-runner": "endless_runner",
     "runner": "endless_runner",
+    # ponytail: trends "flappy" plays on the one-button runner; "quiz" has no
+    # mechanic and fails closed. Add real flappy/quiz mechanics to split them.
+    "flappy": "endless_runner",
     "tap_clicker": "tap_clicker",
     "tap-clicker": "tap_clicker",
     "clicker": "tap_clicker",
@@ -101,14 +112,60 @@ def load_concept(path: Path) -> Concept:
     """
     if not path.is_file():
         raise ConceptError(f"path: concept file not found: {path.name}")
+    text = path.read_text(encoding="utf-8")
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw = json.loads(text)
     except json.JSONDecodeError as exc:
         raise ConceptError("path: concept file is not json") from exc
     if not isinstance(raw, dict):
         raise ConceptError("path: concept file must be a json object")
     _reject_secrets(raw)
+    if "candidates" in raw:
+        return _concept_from_mapping(_game_fields_from_trends(text))
     return _concept_from_mapping(raw)
+
+
+def _game_fields_from_trends(text: str) -> dict[str, object]:
+    """Map the trends draft's selected accepted candidate onto game fields."""
+    try:
+        document = concept_from_json(text)
+        validate_concept(document)
+    except ConceptSchemaError as exc:
+        raise ConceptError(f"concept: {exc}") from exc
+    if document.status != "draft":
+        raise ConceptError(
+            f"status: trends concept was skipped ({document.skipped_reason})"
+        )
+    # validate_concept guarantees one accepted candidate has the selected ticker.
+    candidate = next(
+        item
+        for item in document.candidates
+        if item.accepted and item.ticker == document.selected_ticker
+    )
+    colors = candidate.theme_palette
+    return {
+        "name": candidate.name,
+        "ticker": candidate.ticker,
+        "character": {
+            "name": candidate.name,
+            "kind": "original cartoon character",
+            "detail": candidate.character,
+        },
+        "joke": candidate.joke,
+        "description": candidate.description,
+        "template_id": candidate.game_template_id,
+        "palette": {
+            "background": colors.background,
+            "primary": colors.primary,
+            "secondary": colors.secondary,
+            "accent": colors.accent,
+            # Trends palettes have four colors; secondary is the light one
+            # that reads on the dark background, so it doubles as text ink.
+            "ink": colors.secondary,
+        },
+        "story_id": document.selected_story_id,
+        "date": document.date,
+    }
 
 
 def _reject_secrets(value: object) -> None:

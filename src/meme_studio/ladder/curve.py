@@ -287,14 +287,13 @@ class PaperCurve:
         self._open_pool()
 
     def _apply_curve_net_sell(self, net_raw: int) -> None:
-        capped = min(net_raw, self.real_quote, self.virtual_quote - 1)
-        if capped <= 0:
-            return
-        tokens = capped * self.virtual_token // (self.virtual_quote - capped)
+        if net_raw > self.real_quote or net_raw >= self.virtual_quote:
+            raise UnappliableFlowError("outside sell exceeds curve reserves")
+        tokens = net_raw * self.virtual_token // (self.virtual_quote - net_raw)
         self.virtual_token += tokens
-        self.virtual_quote -= capped
+        self.virtual_quote -= net_raw
         self.real_token += tokens
-        self.real_quote -= capped
+        self.real_quote -= net_raw
 
     def _open_pool(self) -> None:
         quote = self.real_quote

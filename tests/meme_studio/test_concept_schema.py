@@ -133,6 +133,7 @@ def test_roundtrip_is_byte_stable() -> None:
         "rejected_stories",
         "selected_story_id",
         "candidates",
+        "candidates_story_id",
         "selected_ticker",
         "unknowns",
         "publish",

@@ -8,6 +8,7 @@ from datetime import UTC
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from meme_studio.art.providers.imagine import IMAGE_MODEL, PROVIDER_ID, VIDEO_MODEL
 from meme_studio.compliance.lint import compliance_lint
 from meme_studio.compliance.models import LintResult, MediaMetadata
 from meme_studio.errors import NaiveTimeError, UnknownMediaKindError, UnsafeStemError
@@ -15,9 +16,10 @@ from meme_studio.errors import NaiveTimeError, UnknownMediaKindError, UnsafeStem
 if TYPE_CHECKING:
     from datetime import datetime
 
-PROVIDER = "xai-grok-imagine"
-MODEL_IMAGE = "grok-imagine"
-MODEL_VIDEO = "grok-imagine-video"
+# Record the provider id and models the provider itself writes and calls.
+PROVIDER = PROVIDER_ID
+MODEL_IMAGE = IMAGE_MODEL
+MODEL_VIDEO = VIDEO_MODEL
 _SUFFIXES = {"image": ".png", "video": ".mp4"}
 _MODELS = {"image": MODEL_IMAGE, "video": MODEL_VIDEO}
 

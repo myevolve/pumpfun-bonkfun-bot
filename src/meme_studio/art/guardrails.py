@@ -17,7 +17,10 @@ if TYPE_CHECKING:
 _RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     (
         re.compile(
-            r"photoreal|\breal person\b|\blikeness\b|\bcelebrity\b|\bdeepfake\b",
+            # A negated disclaimer ("not a real person", "no real person") is
+            # not a likeness request; every other "real person" still matches.
+            r"photoreal|(?<!\bnot a )(?<!\bno )\breal person\b|\blikeness\b|"
+            r"\bcelebrity\b|\bdeepfake\b",
             re.IGNORECASE,
         ),
         "likeness",

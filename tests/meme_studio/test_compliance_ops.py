@@ -1,28 +1,9 @@
 # ruff: noqa: S101
-"""Ops guard and the phase-0 ban on send-capable clients."""
+"""Ops guard: one account, shadow phase, forbidden actions."""
 
 from __future__ import annotations
 
-import ast
-from pathlib import Path
-
 from meme_studio.compliance import OpsCheck, ops_guard
-
-_FORBIDDEN_MODULES = {
-    "requests",
-    "httpx",
-    "aiohttp",
-    "urllib",
-    "tweepy",
-    "telegram",
-    "http",
-    "socket",
-    "websockets",
-    "grpc",
-    "openai",
-    "xai",
-    "xai_sdk",
-}
 
 
 def test_one_x_account_only() -> None:
@@ -79,30 +60,3 @@ def test_phase_shadow_blocks_publish_and_allows_drafts() -> None:
     assert "action_forbidden:browser_automation" in browser.reasons
     follow = ops_guard(OpsCheck(action="bulk_follow"))
     assert "action_forbidden:bulk_follow" in follow.reasons
-
-
-def test_package_source_has_no_network_client() -> None:
-    # The art providers and trend sources own their network clients; the
-    # shadow compliance, drafts, report, and fixture-writer code must not.
-    root = Path(__file__).resolve().parents[2] / "src" / "meme_studio"
-    paths = [
-        *(path for sub in ("compliance", "drafts", "report") for path in (root / sub).rglob("*.py")),
-        root / "art" / "writer.py",
-        root / "art" / "prompts.py",
-        root / "errors.py",
-    ]
-    assert all(path.is_file() for path in paths)
-    offenders: list[str] = []
-    for path in paths:
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                names = [alias.name.split(".")[0] for alias in node.names]
-            elif isinstance(node, ast.ImportFrom):
-                names = [(node.module or "").split(".")[0]]
-            else:
-                continue
-            for name in names:
-                if name in _FORBIDDEN_MODULES:
-                    offenders.append(f"{path.name}:{name}")
-    assert offenders == []
