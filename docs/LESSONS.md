@@ -2110,3 +2110,59 @@ Infrastructure lessons:
 Next: run the pre-declared post-graduation entry test (graduation timing, X
 authors before entry, LunarCrush, liquidity retention) on tape 6 when it
 closes, and re-label tape-5 coins for an out-of-sample survival check.
+
+## Wave C2: council review of the "safe passage" radar (2026-11-05)
+
+Owner vision: detect hype before the contract address is posted, monitor
+promoters, score real-vs-bot interest and rug risk, keep influencer and
+wallet intelligence (money flow, bundles, LPs, Jito), and reverse-engineer
+manipulators to ride their pumps safely with recoup-then-ladder exits.
+Packet and all three reviews: `docs/council/2026-11-05-safe-passage/`.
+
+New evidence for the packet:
+- The first X contract-address post usually follows the on-chain move: for
+  graduates that later died, 56% after graduation and 83% after the curve's
+  price peak (alive coins 24% / 56%). 45% of 316 posting accounts posted >= 2
+  coins; 56 posted >= 5.
+- Coins' own X accounts before launch: only 6/50 alive coins link one;
+  25-27% of dead/non-graduated coins named the coin before launch.
+- Wallet radar first cut (11,315 coins, strictly-prior classes, > 50% of
+  first-minute SOL): serial snipers 0.5x survival, never-seen wallets 1.7x,
+  creation-slot bundles 0.4x (1.4x graduation); >= 10 identical-size buys
+  5.5x (terminal presets or volume bots: unresolved).
+- Wash check of the 50 alive pools: median 0% one-tx round trips, but 10/50
+  have < 10 distinct real traders; ~40/50 are genuinely alive.
+- External: Bitquery (8.2M launches) dev bundles in block 0 on 21% (median
+  10% of supply), devs sold within 1 min on 65%, manufactured graduations
+  return >= 90% to their operators; 58% of Solana DEX volume not real (mostly
+  one-tx two-signer round trips); KOL calls +1.83% day 1 then -6.53% by day 30.
+
+Council (astra, fable, argon) - unanimous:
+- Speed entries (pre-CA watchlist, ShredStream latency race, curve-stage
+  "safe passage") are not viable at 1-3 slot latency against block-0
+  bundles. Do not build: pre-launch watchlist, ShredStream, fake-follower ML,
+  "bots as our exit", breakout up-sizing.
+- Build first: an insider-inventory exit (dev + block-0 bundle + one-hop SOL
+  funders + SPL transfer recipients; exit on first distribution), which
+  generalizes the only validated signal (winner-sell).
+- Replace the survival label with simulated executable PnL: entry at decision
+  + 2-3 slots against real reserves, all fees, the real exit engine, dead
+  coins in the denominator, fixed horizons; report means with bootstrap CIs
+  and drop-top-coin checks (memecoin payoffs are tail-driven; median gates can
+  hide negative EV).
+- Treat fresh-wallet and buyer-count lifts as fakeable (manufactured
+  graduations hand tokens to fresh wallets); split identical-size buys into
+  terminal presets vs wash before using them.
+- Recoup-then-ladder is mental accounting: no passive limit orders exist on
+  the curve or PumpSwap; exits should be signal-triggered (insider
+  distribution, winner-sell), time/velocity stops, sized to pool depth.
+- Most plausible edges: slow post-graduation PumpSwap entries (graduated
+  > 10 min after launch, score >= 4, strictly-prior X breadth, wash-stripped
+  inflow) with insider exits; and the untested KOL wallet-buy -> post gap
+  (Kolscan wallets; include unposted buys; kill if gaps < 5 s or EV <= 0).
+- Probability of positive net EV within 3 months: 15%, 15-20%, 15-20%
+  (argon: < 5% on the curve or at 0.05 SOL; PumpSwap at 0.25-1 SOL).
+- Disagreements: whether >= 5 aged X authors is purchasable (fable) or
+  relatively robust (astra, argon); what to run first (fable: KOL gap study;
+  astra: fixed-horizon re-label + launch-score entry backtest; argon:
+  reserve-exact simulator + insider exit).
