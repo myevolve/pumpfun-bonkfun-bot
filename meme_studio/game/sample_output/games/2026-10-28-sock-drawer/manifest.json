@@ -1,0 +1,20 @@
+{
+  "schema": "meme_studio.game.manifest.v1",
+  "phase": "0-shadow",
+  "posted": false,
+  "deployed": false,
+  "network_used": false,
+  "game_only": false,
+  "story_id": "2026-10-28-sock-drawer",
+  "template_id": "endless_runner",
+  "disclosure": "Parody and entertainment only. Not investment advice. This is an automated account.",
+  "clip": {
+    "status": "skipped",
+    "reason": "skip_clip",
+    "provider": "none"
+  },
+  "art": {
+    "sprite_provider": "procedural",
+    "fallback_reason": "XAI_API_KEY not set"
+  }
+}

@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sock Drawer Drift</title>
+<style>
+body { margin: 0; background: #1b1f3b; color: #f4f1de;
+  font-family: system-ui, sans-serif; font-size: 1rem; }
+main { max-width: 480px; margin: 0 auto; padding: 12px; }
+button { min-height: 44px; font-size: 1rem; margin-right: 8px; }
+canvas { width: 100%; max-width: 480px; height: auto; background: #1b1f3b;
+  touch-action: manipulation; }
+#disclosure { padding: 12px 0; }
+a { color: #f2c14e; }
+</style>
+</head>
+<body>
+<!-- phase-0-shadow: draft, not posted, not deployed -->
+<main data-template="endless_runner">
+<h1>Sock Drawer Drift</h1>
+<p id="character">Nimbus</p>
+<p id="joke">The drawer filed a missing-sock report and the lint showed up.</p>
+<p id="template-name">Endless runner</p>
+<p id="description">A round dust creature sprints an endless hallway of lonely furniture, gathering unmatched socks before the vacuum arrives. This daily parody game is about a silly household mystery and is made purely for entertainment.</p>
+<p id="ticker">SOCKDRIFT</p>
+<p id="contract-address">CA_PLACEHOLDER_DO_NOT_USE</p>
+<button id="play" type="button">Play</button>
+<button id="jump" type="button">Jump</button>
+<button id="left" type="button">Left</button>
+<button id="right" type="button">Right</button>
+<canvas id="game" width="360" height="640"></canvas>
+<p id="score">Score: 0</p>
+<a id="share-score" href="https://x.com/intent/tweet?text=I%20scored%200%20in%20Sock%20Drawer%20Drift.%20We%20created%20this%20coin%2C%20hold%20a%20dev%20bag%2C%20and%20earn%20creator%20fees.%20Collectible%20meme%20only%3B%20it%20can%20go%20to%20zero.%20Parody%20and%20entertainment%20only.%20Not%20investment%20advice.%20This%20is%20an%20automated%20account.">Share score</a>
+<p id="coin-disclosure">We created this coin, hold a dev bag, and earn creator fees. Collectible meme only; it can go to zero.</p>
+<footer id="disclosure">Parody and entertainment only. Not investment advice. This is an automated account.</footer>
+</main>
+<script type="application/json" id="game-spec">{"template_id": "endless_runner", "title": "Sock Drawer Drift", "seed": 495308190, "sprite": "assets/sprite.png", "background": "assets/background.png", "palette": {"background": "#1b1f3b", "primary": "#f2c14e", "secondary": "#e07a5f", "accent": "#81b29a", "ink": "#f4f1de"}, "share_suffix": "We created this coin, hold a dev bag, and earn creator fees. Collectible meme only; it can go to zero. Parody and entertainment only. Not investment advice. This is an automated account."}</script>
+<script>
+"use strict";
+
+(function (root, factory) {
+  const api = factory();
+  if (typeof module === "object" && module.exports) {
+    module.exports = api;
+  } else {
+    root.MemeMechanics = api;
+  }
+})(typeof globalThis !== "undefined" ? globalThis : this, function () {
+  const GRAVITY = 2200;
+  const JUMP_V = 700;
+  const RUN_SPEED = 260;
+  const MOVE_SPEED = 220;
+  const COMBO_WINDOW = 0.8;
+
+  function clone(value) {
+    return JSON.parse(JSON.stringify(value));
+  }
+
+  function createState(spec) {
+    const template = spec.template_id;
+    const seed = spec.seed || 1;
+    if (template === "endless_runner") {
+      return {
+        template: template,
+        t: 0,
+        y: 0,
+        vy: 0,
+        score: 0,
+        alive: true,
+        player_x: 64,
+        player_w: 28,
+        player_h: 36,
+        obstacles: [{ x: 900, w: 28, h: 40 }],
+        rand: seed,
+      };
+    }
+    if (template === "tap_clicker") {
+      return {
+        template: template,
+        t: 0,
+        score: 0,
+        combo: 0,
+        last_tap: -10,
+        alive: true,
+        pulse: 0,
+      };
+    }
+    if (template === "dodge_catch") {
+      return {
+        template: template,
+        t: 0,
+        score: 0,
+        alive: true,
+        player_x: 160,
+        player_y: 520,
+        player_w: 48,
+        player_h: 28,
+        width: 360,
+        items: [
+          { x: 40, y: 0, w: 16, h: 16, kind: "good", vy: 140 },
+          { x: 280, y: 30, w: 16, h: 16, kind: "bad", vy: 160 },
+        ],
+        rand: seed || 1,
+        spawned: 0,
+      };
+    }
+    throw new Error("unknown template");
+  }
+
+  function shareText(score, title, suffix) {
+    return "I scored " + score + " in " + title + ". " + suffix;
+  }
+
+  function nextRand(state) {
+    let value = state.rand >>> 0;
+    value = (Math.imul(value, 1664525) + 1013904223) >>> 0;
+    state.rand = value;
+    return value / 4294967296;
+  }
+
+  function overlaps(a, b) {
+    return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+  }
+
+  function step(state, input, dt) {
+    const next = clone(state);
+    const controls = input || {};
+    const frame = Math.max(0, Number(dt) || 0);
+    if (!next.alive) {
+      return next;
+    }
+    if (next.template === "endless_runner") {
+      return stepRunner(next, controls, frame);
+    }
+    if (next.template === "tap_clicker") {
+      return stepClicker(next, controls, frame);
+    }
+    return stepDodge(next, controls, frame);
+  }
+
+  function stepRunner(state, input, dt) {
+    // gravity pulls the runner down; a jump leaves the ground
+    if (input.jump && state.y <= 0.5) {
+      state.vy = JUMP_V;
+    }
+    state.vy -= GRAVITY * dt;
+    state.y += state.vy * dt;
+    if (state.y <= 0) {
+      state.y = 0;
+      state.vy = 0;
+    }
+    const obstacles = state.obstacles || [];
+    for (let i = 0; i < obstacles.length; i += 1) {
+      obstacles[i].x -= RUN_SPEED * dt;
+      const player = { x: state.player_x, y: 0, w: state.player_w, h: state.player_h };
+      const obs = obstacles[i];
+      if (state.y < obs.h && overlaps(player, { x: obs.x, y: 0, w: obs.w, h: state.player_h })) {
+        state.alive = false;
+      }
+    }
+    state.obstacles = obstacles.filter(function (obs) {
+      return obs.x > -40;
+    });
+    const last = state.obstacles[state.obstacles.length - 1];
+    if (!last || last.x < 500) {
+      state.obstacles.push({ x: 900, w: 28, h: 40 });
+    }
+    if (state.alive) {
+      state.score += dt * 10;
+    }
+    state.t += dt;
+    return state;
+  }
+
+  function stepClicker(state, input, dt) {
+    const t = state.t + dt;
+    if (input.tap) {
+      if (t - state.last_tap > COMBO_WINDOW) {
+        state.combo = 0;
+      }
+      const points = 1 + Math.min(state.combo, 9);
+      state.score += points;
+      state.combo += 1;
+      state.last_tap = t;
+      state.pulse = 1;
+    } else if (t - state.last_tap > COMBO_WINDOW) {
+      state.combo = 0;
+      state.pulse = Math.max(0, state.pulse - dt);
+    } else {
+      state.pulse = Math.max(0, state.pulse - dt);
+    }
+    state.t = t;
+    return state;
+  }
+
+  function stepDodge(state, input, dt) {
+    // catch good items and dodge bad ones
+    if (input.left) {
+      state.player_x -= MOVE_SPEED * dt;
+    }
+    if (input.right) {
+      state.player_x += MOVE_SPEED * dt;
+    }
+    if (state.player_x < 0) {
+      state.player_x = 0;
+    }
+    const maxX = state.width - state.player_w;
+    if (state.player_x > maxX) {
+      state.player_x = maxX;
+    }
+    const kept = [];
+    const items = state.items || [];
+    for (let i = 0; i < items.length; i += 1) {
+      const moved = clone(items[i]);
+      moved.y += (moved.vy || 0) * dt;
+      const player = {
+        x: state.player_x,
+        y: state.player_y,
+        w: state.player_w,
+        h: state.player_h,
+      };
+      if (overlaps(player, moved)) {
+        if (moved.kind === "bad") {
+          state.alive = false;
+        } else {
+          state.score += 1;
+        }
+        continue;
+      }
+      if (moved.y < 700) {
+        kept.push(moved);
+      }
+    }
+    state.items = kept;
+    if (state.alive) {
+      while (state.items.length < 2) {
+        const lane = nextRand(state) < 0.5 ? 12 : state.width - 36;
+        const kind = nextRand(state) < 0.45 ? "bad" : "good";
+        state.items.push({ x: lane, y: -24, w: 16, h: 16, kind: kind, vy: 420 });
+        state.spawned = (state.spawned || 0) + 1;
+      }
+    }
+    state.t += dt;
+    return state;
+  }
+
+  function drawCreature(ctx, x, y, spec) {
+    const palette = spec.palette || {};
+    ctx.fillStyle = palette.primary || "#f2c14e";
+    ctx.beginPath();
+    ctx.arc(x + 32, y + 32, 28, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = palette.ink || "#1b1f3b";
+    ctx.fillRect(x + 18, y + 24, 6, 6);
+    ctx.fillRect(x + 36, y + 24, 6, 6);
+  }
+
+  function draw(ctx, state, spec, images) {
+    const w = ctx.canvas.width;
+    const h = ctx.canvas.height;
+    const palette = spec.palette || {};
+    ctx.fillStyle = palette.background || "#1b1f3b";
+    ctx.fillRect(0, 0, w, h);
+    if (images && images.background && images.background.complete && images.background.naturalWidth) {
+      ctx.drawImage(images.background, 0, 0, w, h);
+    }
+    let x = 48;
+    let y = h - 96;
+    if (state.template === "endless_runner") {
+      x = state.player_x;
+      y = h - 96 - state.y;
+    } else if (state.template === "dodge_catch") {
+      x = state.player_x;
+      y = Math.min(h - 64, state.player_y);
+    } else if (state.pulse) {
+      y -= 8;
+    }
+    if (images && images.sprite && images.sprite.complete && images.sprite.naturalWidth) {
+      ctx.drawImage(images.sprite, x, y, 64, 64);
+    } else {
+      drawCreature(ctx, x, y, spec);
+    }
+    ctx.fillStyle = palette.secondary || "#e07a5f";
+    if (state.template === "endless_runner") {
+      (state.obstacles || []).forEach(function (obs) {
+        ctx.fillRect(obs.x, h - obs.h - 40, obs.w, obs.h);
+      });
+    }
+    if (state.template === "dodge_catch") {
+      (state.items || []).forEach(function (item) {
+        ctx.fillStyle = item.kind === "bad" ? palette.secondary : palette.accent;
+        ctx.fillRect(item.x, item.y, item.w, item.h);
+      });
+    }
+  }
+
+  return {
+    createState: createState,
+    step: step,
+    draw: draw,
+    drawCreature: drawCreature,
+    shareText: shareText,
+  };
+});
+
+</script>
+<script>
+
+(function () {
+  const spec = JSON.parse(document.getElementById("game-spec").textContent);
+  const canvas = document.getElementById("game");
+  const ctx = canvas.getContext("2d");
+  const scoreEl = document.getElementById("score");
+  const share = document.getElementById("share-score");
+  const api = globalThis.MemeMechanics;
+  const input = { jump: false, tap: false, left: false, right: false };
+  const images = { sprite: null, background: null };
+  if (spec.sprite) {
+    const sprite = new Image();
+    sprite.src = spec.sprite;
+    images.sprite = sprite;
+  }
+  if (spec.background) {
+    const background = new Image();
+    background.src = spec.background;
+    images.background = background;
+  }
+  let state = api.createState(spec);
+  let running = false;
+  let last = 0;
+  let frameId = 0;
+  function frame(ts) {
+    if (!running) return;
+    const dt = Math.min(0.05, last ? (ts - last) / 1000 : 0.016);
+    last = ts;
+    state = api.step(state, input, dt);
+    input.jump = false;
+    input.tap = false;
+    api.draw(ctx, state, spec, images);
+    const shown = Math.floor(state.score);
+    scoreEl.textContent = "Score: " + shown;
+    share.href = "https://x.com/intent/tweet?text=" + encodeURIComponent(
+      api.shareText(shown, spec.title, spec.share_suffix)
+    );
+    if (state.alive) frameId = requestAnimationFrame(frame);
+    else running = false;
+  }
+  function startGame() {
+    if (frameId) cancelAnimationFrame(frameId);
+    state = api.createState(spec);
+    running = true;
+    last = 0;
+    frameId = requestAnimationFrame(frame);
+  }
+  document.getElementById("play").addEventListener("click", startGame);
+  function hold(id, key) {
+    const el = document.getElementById(id);
+    el.addEventListener("pointerdown", function (event) {
+      input[key] = true;
+      if (key === "jump") input.tap = true;
+      event.preventDefault();
+    });
+    function release() { input[key] = false; }
+    el.addEventListener("pointerup", release);
+    el.addEventListener("pointerleave", release);
+  }
+  hold("jump", "jump");
+  hold("left", "left");
+  hold("right", "right");
+  canvas.addEventListener("pointerdown", function () {
+    input.jump = true;
+    input.tap = true;
+  });
+  window.addEventListener("keydown", function (event) {
+    if (event.key === " ") {
+      event.preventDefault();
+      input.jump = true;
+      input.tap = true;
+    } else if (event.key === "ArrowUp") {
+      input.jump = true;
+      input.tap = true;
+    }
+    if (event.key === "ArrowLeft") input.left = true;
+    if (event.key === "ArrowRight") input.right = true;
+  });
+  window.addEventListener("keyup", function (event) {
+    if (event.key === "ArrowLeft") input.left = false;
+    if (event.key === "ArrowRight") input.right = false;
+  });
+  api.draw(ctx, state, spec, images);
+})();
+
+</script>
+</body>
+</html>
