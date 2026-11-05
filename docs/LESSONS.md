@@ -2166,3 +2166,71 @@ Council (astra, fable, argon) - unanimous:
   relatively robust (astra, argon); what to run first (fable: KOL gap study;
   astra: fixed-horizon re-label + launch-score entry backtest; argon:
   reserve-exact simulator + insider exit).
+
+## Wave C3: council round 2, prediction markets and crypto candles (2026-11-05)
+
+The owner's challenge: somebody is making money, so where is it, and can we
+take a piece? The packet (`docs/council/2026-11-05-prediction-markets-candles/`)
+contains:
+
+- the cross-venue desk's live record;
+- the Novig resolution study;
+- a 38-test negative study of Kalshi 15-minute crypto;
+- a vendor census of 2,500 Polymarket BTC bots;
+- a reverse-engineering of the gabagool22 wallet;
+- two option-implied pricing-gap studies;
+- the candle/seasonality/carry literature.
+
+All three reviews are archived beside it.
+
+Unanimous:
+
+- **Where the money goes.** Passive two-sided liquidity on wide, rebated
+  venues: taker fees are transferred to makers through rebates. Sellers of
+  speculative longshot YES. Carry. Not prediction. Buying both outcomes below
+  $1 is ordinary two-sided market making, not arbitrage (argon).
+- **No latency play** at our ~1.3 s order turnaround: the 53% streak reversal,
+  cross-coin lead-lag (t = 0.56), Kalshi-leads-Binance and Kalshi 15-minute
+  pair-locking are all dead.
+- **Candlestick patterns carry no edge after costs.** Only the underlying
+  effects survive (carry, order flow), never the pattern itself.
+- **The desk's +$1.98 on 10 hedged lots is selection.** Over all 18 lots it is
+  +$3.14, mostly unhedged coin flips, and the n = 4 maker fills at +$2-2.9 are
+  luck. Count every lot and measure markouts before reading any per-lot edge.
+- **The one directional candidate is buying NO against rich longshot YES on
+  crypto thresholds.** Its evidence (5.6-11 pp over option-implied digitals) is
+  September 2023 data, before Kalshi crypto volume grew about 90x. Re-measure
+  it against option-implied digitals before risking capital.
+- **Realistic upside at a $10k bankroll is single digits to ~$35 a day.** The
+  largest risks are engineering time spent on small edges, and adverse
+  selection read as edge.
+
+Probability of positive net EV within 3 months for each reviewer's top
+candidate: astra 25-30%, fable 35-40%, argon 35%.
+
+Disagreements:
+
+- **Which maker variant to run first.** fable: two-sided pair-locking on
+  Polymarket US crypto brackets. astra: options-priced fair-value quotes on
+  those brackets. argon: pre-game cross-venue maker-taker.
+- **How to hedge a NO book.** astra: unhedged, with per-expiry caps. fable: a
+  static spot overlay, never a delta-hedged digital. argon: delta-hedge with
+  CME micro futures or Coinbase perps, exiting more than 24 h before expiry.
+- **NO price band.** astra 90-97c, fable 85-95c, argon 75-90c.
+- **Odds that carry beats cash.** 15-40%.
+
+Checked after the reviews: argon's latency fixes are already in place. The
+desk VM runs in `us-east4` (Ashburn; 62 ms to Polymarket, 21 ms to Kalshi REST)
+and takes fills from the private stream. The remaining ~1.3 s is Polymarket
+US's own order handling.
+
+Agreed next measurements, each free or under $100:
+
+1. Markout audit (+60 s, +10 min, settlement) with all-lots P&L on the desk's
+   existing fills.
+2. A 10-day logger comparing Kalshi and Polymarket US crypto strike prices with
+   option-implied digitals, adjusted for settlement time and index.
+3. One small live maker test with markouts, on Polymarket US crypto brackets or
+   pre-game lines.
+
+Kill criteria are in each review.
