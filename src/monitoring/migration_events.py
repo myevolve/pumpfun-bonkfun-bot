@@ -15,10 +15,10 @@ from __future__ import annotations
 import base64
 import contextlib
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from utils.logger import get_logger
-from utils.program_logs import attribute_program_logs
+from utils.program_logs import attribute_events
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -81,6 +81,7 @@ def decode_migration_events(  # noqa: C901, PLR0912 - validate both protocols at
     signature: str,
     pump_parser: IDLParser,
     pamm_parser: IDLParser,
+    instructions: Sequence[Any] = (),
 ) -> list[MigrationEvent]:
     """Decode ``CompleteEvent`` and ``CreatePoolEvent`` from one transaction's logs.
 
@@ -118,7 +119,7 @@ def decode_migration_events(  # noqa: C901, PLR0912 - validate both protocols at
     sol_quote = "So11111111111111111111111111111111111111112"
     events: list[MigrationEvent] = []
     try:
-        entries = attribute_program_logs(logs)
+        entries = attribute_events(logs, instructions)
     except ValueError as exc:
         logger.debug("Rejected migration log attribution in %s: %s", signature, exc)
         return []

@@ -18,7 +18,7 @@ import base64
 import contextlib
 from collections import OrderedDict, deque
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import base58
 import grpc
@@ -28,7 +28,7 @@ from core.pubkeys import is_sol_paired
 from geyser.generated import geyser_pb2, geyser_pb2_grpc
 from monitoring.migration_events import decode_migration_events
 from utils.logger import get_logger
-from utils.program_logs import attribute_program_logs
+from utils.program_logs import attribute_events
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Sequence
@@ -88,6 +88,7 @@ def decode_trade_events(  # noqa: C901 - keep attribution and wire validation to
     idl_parser: IDLParser,
     mint: str | None = None,
     mints: set[str] | None = None,
+    instructions: Sequence[Any] = (),
 ) -> list[TradeEvent]:
     """Decode every ``TradeEvent`` in one transaction's logs, optionally for one mint.
 
@@ -95,12 +96,14 @@ def decode_trade_events(  # noqa: C901 - keep attribution and wire validation to
     SOL quote and complete canonical quantities; zero is never a legacy fallback.
     Events predating quote fields retain their legacy SOL-only interpretation.
     Payloads must belong to a successful pump.fun invocation, including all
-    ancestors. Missing or ambiguous runtime frames reject the whole log batch.
+    ancestors. Missing or ambiguous runtime frames reject the whole log batch;
+    a log-truncated stack is recovered from the transaction's event-CPI
+    ``instructions`` when the caller supplies them.
     """
     trade_disc = idl_parser.get_event_discriminators()["TradeEvent"]
     events: list[TradeEvent] = []
     try:
-        entries = attribute_program_logs(logs)
+        entries = attribute_events(logs, instructions)
     except ValueError as exc:
         logger.debug("Rejected TradeEvent log attribution in %s: %s", signature, exc)
         return []
@@ -180,6 +183,7 @@ def decode_launchlab_trade_events(  # noqa: PLR0913 - mirrors pump.fun provenanc
     pool_to_mint: dict[str, str] | None = None,
     mints: set[str] | None = None,
     account_keys: Sequence[str | Pubkey] | None = None,
+    instructions: Sequence[Any] = (),
 ) -> list[TradeEvent]:
     """Decode every Raydium LaunchLab ``TradeEvent`` in one transaction's logs.
 
@@ -197,7 +201,7 @@ def decode_launchlab_trade_events(  # noqa: PLR0913 - mirrors pump.fun provenanc
     trade_disc = idl_parser.get_event_discriminators()["TradeEvent"]
     events: list[TradeEvent] = []
     try:
-        entries = attribute_program_logs(logs)
+        entries = attribute_events(logs, instructions)
     except ValueError as exc:
         logger.debug("Rejected LaunchLab log attribution in %s: %s", signature, exc)
         return []
@@ -645,8 +649,19 @@ class TradeFlowHub:
         """Allow new subscriptions after acknowledgement; never revive old queues."""
         self._interrupted = False
 
-    def publish_logs(self, logs: list[str], *, slot: int, signature: str) -> int:
-        """Deliver each recent transaction once, preserving all of its events."""
+    def publish_logs(
+        self,
+        logs: list[str],
+        *,
+        slot: int,
+        signature: str,
+        instructions: Sequence[Any] = (),
+    ) -> int:
+        """Deliver each recent transaction once, preserving all of its events.
+
+        ``instructions`` (normalized, successful transaction) let decoders
+        recover events from event-CPI when Solana truncated the logs.
+        """
         if self._interrupted or not signature or signature in self._recent_transactions:
             return 0
         delivered = 0
@@ -657,6 +672,7 @@ class TradeFlowHub:
                 signature=signature,
                 idl_parser=self.idl_parser,
                 mints=None if self.track_wallets else set(self._subscribers),
+                instructions=instructions,
             )
             if events:
                 _remember_transaction(self._recent_transactions, signature)
@@ -669,11 +685,14 @@ class TradeFlowHub:
                 idl_parser=self.launchlab_parser,
                 pool_to_mint=self.pool_to_mint,
                 mints=set(self._subscribers),
+                instructions=instructions,
             )
             if launchlab_events:
                 _remember_transaction(self._recent_transactions, signature)
             delivered += self._deliver(launchlab_events)
-        migrations = self._publish_migrations(logs, slot=slot, signature=signature)
+        migrations = self._publish_migrations(
+            logs, slot=slot, signature=signature, instructions=instructions
+        )
         if migrations:
             _remember_transaction(self._recent_transactions, signature)
         return delivered + migrations
@@ -740,7 +759,14 @@ class TradeFlowHub:
                     )
         return delivered
 
-    def _publish_migrations(self, logs: list[str], *, slot: int, signature: str) -> int:
+    def _publish_migrations(
+        self,
+        logs: list[str],
+        *,
+        slot: int,
+        signature: str,
+        instructions: Sequence[Any] = (),
+    ) -> int:
         """Decode and schedule migration-event fan-out; contained, never raises."""
         hub = self.migration_hub
         if hub is None or not hub.active:
@@ -752,6 +778,7 @@ class TradeFlowHub:
                 signature=signature,
                 pump_parser=hub.pump_parser,
                 pamm_parser=hub.pamm_parser,
+                instructions=instructions,
             )
             if not events:
                 return 0

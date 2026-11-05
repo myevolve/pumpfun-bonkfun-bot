@@ -211,7 +211,10 @@ class UniversalGeyserListener(BaseTokenListener):
             hub = self.trade_hub
             if hub is not None and hub.active and event.slot is not None:
                 hub.publish_logs(
-                    list(event.logs), slot=event.slot, signature=event.signature
+                    list(event.logs),
+                    slot=event.slot,
+                    signature=event.signature,
+                    instructions=event.instructions,
                 )
             return tokens
         except NormalizationError as exc:

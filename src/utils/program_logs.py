@@ -2,8 +2,17 @@
 
 from __future__ import annotations
 
+import base64
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
 # Invocation arity and one explicit stack machine follow the runtime wire grammar.
 # ruff: noqa: PLR2004
+
+# Anchor ``emit_cpi!``: a program invokes itself with this prefix + event bytes.
+EVENT_CPI_PREFIX = bytes.fromhex("e445a52e51cb9a1d")
 
 
 def attribute_program_logs(  # noqa: C901, PLR0912 - validate the whole invocation stack
@@ -48,3 +57,38 @@ def attribute_program_logs(  # noqa: C901, PLR0912 - validate the whole invocati
     if transaction_failed:
         return [(i, program, message, False) for i, program, message, _ in entries]
     return entries
+
+
+def attribute_events(
+    logs: list[str], instructions: Sequence[Any] = ()
+) -> list[tuple[int, str, str, bool]]:
+    """``attribute_program_logs``, recovering a truncated stack from event-CPI.
+
+    Solana caps a transaction's logs at 10 KB; big bundles and pump.fun's
+    migrate_v2 overflow it and lose their trailing ``Program data:`` lines.
+    Anchor repeats each event as a self-invocation whose instruction data is
+    never truncated. Pass only a successful transaction's normalized
+    instructions: a failed CPI fails the whole transaction, so every recovered
+    event committed, and only the program itself can sign its event authority.
+    Returned indices are instruction positions, not log indices.
+    """
+    try:
+        return attribute_program_logs(logs)
+    except ValueError as exc:
+        if str(exc) != "truncated_program_stack":
+            raise
+        recovered = [
+            (
+                position,
+                instruction.program_id,
+                "Program data: " + base64.b64encode(instruction.data[8:]).decode(),
+                True,
+            )
+            for position, instruction in enumerate(instructions)
+            if instruction.inner_index is not None
+            and instruction.data is not None
+            and instruction.data[:8] == EVENT_CPI_PREFIX
+        ]
+        if not recovered:
+            raise
+        return recovered

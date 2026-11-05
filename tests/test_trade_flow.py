@@ -1619,3 +1619,44 @@ def test_wallet_ledger_evicts_least_recently_active(
         round_trip(user)
     assert list(hub.wallet_realized_sol) == ["a", "c"]
     assert hub.wallet_realized_sol["a"] == 2_000_000_000
+
+
+@pytest.mark.parametrize(
+    ("emitter", "expected"), [(None, 0), (PUMP_PROGRAM, 1), (OTHER, 0)]
+)
+def test_truncated_logs_recover_trades_from_event_cpi(
+    emitter: str | None, expected: int
+) -> None:
+    """Solana caps logs at 10 KB; the program's own event-CPI copy must still count."""
+    from monitoring.event_normalization import NormalizedInstruction  # noqa: PLC0415
+    from utils.program_logs import EVENT_CPI_PREFIX  # noqa: PLC0415
+
+    parser = IDLParser(
+        str(Path(__file__).resolve().parents[1] / "idl" / "pump_fun_idl.json")
+    )
+    hub = TradeFlowHub(parser)
+    queue = hub.subscribe(MINT)
+    payload = base64.b64decode(
+        _encode_trade_event(parser).removeprefix("Program data: ")
+    )
+    instructions = (
+        ()
+        if emitter is None
+        else (
+            NormalizedInstruction(
+                program_id=emitter,
+                accounts=(),
+                data=EVENT_CPI_PREFIX + payload,
+                encoding="raw",
+                instruction_index=0,
+                inner_index=0,
+            ),
+        )
+    )
+    truncated = [f"Program {PUMP_PROGRAM} invoke [1]", "Log truncated"]
+    assert (
+        hub.publish_logs(truncated, slot=1, signature="big", instructions=instructions)
+        == expected
+    )
+    if expected:
+        assert queue.get_nowait().mint == MINT
