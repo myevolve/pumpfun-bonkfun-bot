@@ -1574,3 +1574,48 @@ def test_wallet_ledger_is_strictly_prior_across_mints() -> None:
     )
     hub._deliver([later])
     assert queue.get_nowait().user_realized_sol == 1_000_000_000
+
+
+@pytest.mark.parametrize("track_wallets", [False, True])
+def test_wallet_ledger_scope_follows_track_wallets(track_wallets: bool) -> None:
+    """winner_sell needs program-wide PnL: profit on an unwatched coin must count."""
+    parser = IDLParser(
+        str(Path(__file__).resolve().parents[1] / "idl" / "pump_fun_idl.json")
+    )
+    hub = TradeFlowHub(parser, track_wallets=track_wallets)
+    assert hub.active == track_wallets
+    queue = hub.subscribe(MINT)
+
+    def publish(signature: str, **fields: object) -> int:
+        logs = [
+            f"Program {PUMP_PROGRAM} invoke [1]",
+            _encode_trade_event(parser, **fields),
+            f"Program {PUMP_PROGRAM} success",
+        ]
+        return hub.publish_logs(logs, slot=1, signature=signature)
+
+    # 1 SOL realized on an unsubscribed coin, then a sell into the watched one.
+    lot = {"mint": OTHER, "user": CREATOR, "token_amount": 1_000_000}
+    assert publish("buy", **lot, is_buy=True, sol_amount=1_000_000_000) == 0
+    assert publish("sell", **lot, is_buy=False, sol_amount=2_000_000_000) == 0
+    assert publish("watched", mint=MINT, user=CREATOR, is_buy=False) == 1
+    expected = 1_000_000_000 if track_wallets else 0
+    assert queue.get_nowait().user_realized_sol == expected
+
+
+def test_wallet_ledger_evicts_least_recently_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from monitoring import trade_flow  # noqa: PLC0415
+
+    monkeypatch.setattr(trade_flow, "_MAX_LEDGER_WALLETS", 2)
+    hub = TradeFlowHub(MagicMock())
+
+    def round_trip(user: str) -> None:
+        buy = replace(_event(user=user, sol=1_000_000_000), signature=f"{user}-b")
+        hub._deliver([buy, replace(buy, is_buy=False, sol_amount=2_000_000_000)])
+
+    for user in ("a", "b", "a", "c"):  # "a" is touched again before "c" arrives
+        round_trip(user)
+    assert list(hub.wallet_realized_sol) == ["a", "c"]
+    assert hub.wallet_realized_sol["a"] == 2_000_000_000

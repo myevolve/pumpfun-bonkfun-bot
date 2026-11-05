@@ -25,6 +25,12 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 LAMPORTS = 1e9
+# Quote amounts are lamports only on SOL-paired curves (default pubkey or WSOL).
+SOL_QUOTES = {
+    None,
+    "11111111111111111111111111111111",
+    "So11111111111111111111111111111111111111112",
+}
 PUMP_FEE = 0.0125  # 1% protocol + 0.25% creator, each side (SOL-paired, pre-graduation)
 TX_FEES_LAMPORTS = 33_000 + 27_000 + 5_000  # buy + sell + cleanup at 140k/110k CU
 INITIAL_VSOL = 30 * LAMPORTS
@@ -375,9 +381,11 @@ def main() -> None:
     ap.add_argument("--top", type=int, default=15)
     ap.add_argument("--no-backtest", action="store_true")
     args = ap.parse_args()
-    coins = [
+    loaded = [
         json.loads(line) for line in args.path.read_text().splitlines() if line.strip()
     ]
+    coins = [c for c in loaded if c.get("quote_mint") in SOL_QUOTES]
+    print(f"excluded {len(loaded) - len(coins)} non-SOL-quoted coins")
     if not coins:
         sys.exit("no coins recorded")
     population(coins)

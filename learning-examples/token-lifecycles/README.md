@@ -13,7 +13,7 @@ submits a transaction.
 | `run_letsbonk_lifecycle_capture.py` | Stream Raydium LaunchLab (letsbonk.fun) over Geyser with an explicit `--env-file`; instruction-parsed creations (fund_target/supply from curve args), TradeEvent trades via the shared decoder, fund-target and migrate-instruction graduation detection. Same tape schema as `record_lifecycles.py` where semantics match; divergent fields (create_ts, mayhem, v_sol0/v_tok0, post_trades) null. `--self-check` runs the offline decoder/detector checks. |
 | `analyze_wallet_pnl.py` | Per-wallet average-cost realized PnL over a tape, split-half persistence, profit concentration, and a walk-forward delayed-follow entry simulation on winner wallets vs the all-buys baseline. |
 | `analyze_entry_features.py` | Executable-return feature harness at every warm decision point on a tape: stream features strictly before the decision, net-SOL labels with dead-coin mark-to-last, median + winsorized statistics, feature-decile curves with walk-forward confirmation and a coin-clustered bootstrap. |
-| `analyze_exit_signals.py` | Forward price paths after trades, grouped by the trader's strictly-prior realized PnL (walk-forward winner threshold): the winner-sell exit-timer event study with coin-clustered bootstrap CIs, vs ordinary-sell and buy baselines. |
+| `analyze_exit_signals.py` | Forward price paths after trades, grouped by the trader's strictly-prior realized PnL (walk-forward winner threshold, ledger walked in global slot order like the live hub): the winner-sell exit-timer event study with coin-clustered bootstrap CIs, vs ordinary-sell and buy baselines. `--self-check` pins the no-look-ahead ledger. |
 | `analyze_postgrad_washout.py` | Delayed post-graduation entries at a fixed washout with per-hold coverage-honest denominators: liquidity-retention vs bled split, mark-to-last for quiet pools, robust stats; reports per-pool coverage limits so unmeasurable holds print as no-data. |
 | `summarize_lifecycles.py` | Population stats plus a 31k-policy entry/exit backtest with a time-split holdout (rank on the earlier half, score on the later half). |
 | `summarize_graduations.py` | Post-graduation price paths, actor concentration, and entry/exit backtest on the PumpSwap tape. |
@@ -52,6 +52,11 @@ pool_quote, virtual_quote, ts]`. PumpSwap pool reserves are **pre-trade**,
 not post-trade. Wallet `BwWK17cb...` is Mayhem's `["sol-vault"]` PDA under
 `MAyhSmzXzV1pTf7LsNkrNwkWKTo4ougAJ1PPg47MD4e`, **not** the System Program.
 Its trades remain in the tape, but it must not count as an independent buyer.
+
+The pump tape analyzers (`analyze_*.py`, `summarize_lifecycles.py`) keep only
+SOL-paired coins (`quote_mint` default pubkey or WSOL): since late 2026 ~18% of
+pump.fun launches quote in PUMP or other tokens, whose raw quote amounts are not
+lamports.
 
 New recordings include `trade_received_ms`, aligned
 `trade_real_token_reserves`, `observed_duration_ms`, and a `.slots.jsonl`

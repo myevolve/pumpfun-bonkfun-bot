@@ -441,7 +441,8 @@ class UniversalTrader:
             self.token_listener, "trade_hub"
         ):
             self.trade_hub = TradeFlowHub(
-                self.platform_implementations.event_parser._idl_parser  # noqa: SLF001
+                self.platform_implementations.event_parser._idl_parser,  # noqa: SLF001
+                track_wallets=bool(flow_rules and flow_rules.winner_sell),
             )
             self.token_listener.trade_hub = self.trade_hub
         self._gate_queues: dict[str, TradeQueue] = {}

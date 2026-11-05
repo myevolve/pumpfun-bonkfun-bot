@@ -37,6 +37,12 @@ import statistics
 from pathlib import Path
 
 LAMPORTS = 1e9
+# Quote amounts are lamports only on SOL-paired curves (default pubkey or WSOL).
+SOL_QUOTES = {
+    None,
+    "11111111111111111111111111111111",
+    "So11111111111111111111111111111111111111112",
+}
 WASHOUT_MIN = 30
 HOLDS_MIN = (60, 120, 240)
 WINSOR_NET = 0.045  # cap net return at +90% on 0.05 SOL
@@ -136,7 +142,11 @@ def main() -> None:
     ap.add_argument("--washout-min", type=int, default=WASHOUT_MIN)
     args = ap.parse_args()
 
-    coins = [json.loads(line) for line in args.path.read_text().splitlines() if line.strip()]
+    loaded = [
+        json.loads(line) for line in args.path.read_text().splitlines() if line.strip()
+    ]
+    coins = [c for c in loaded if c.get("quote_mint") in SOL_QUOTES]
+    print(f"excluded {len(loaded) - len(coins)} non-SOL-quoted coins")
     grads = [c for c in coins if c.get("post_trades")]
     print(
         f"coins: {len(coins)} | graduated with pool tape: {len(grads)} | "

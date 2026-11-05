@@ -45,6 +45,9 @@ MAYHEM_SOL_VAULT = "BwWK17cbHxwWBKZkUYvzxLcNQ1YVyaFezduWbtm2de6s"
 _TOKEN_DECIMALS = 6
 _LAMPORTS_PER_SOL = 1_000_000_000
 _MAX_RECENT_TRANSACTIONS = 4096
+# winner_sell ledger bounds (LRU): roughly 15-30 minutes of program-wide flow.
+_MAX_LEDGER_WALLETS = 100_000
+_MAX_LEDGER_POSITIONS = 100_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -488,6 +491,14 @@ def _remember_transaction(recent: OrderedDict[str, None], signature: str) -> Non
         recent.popitem(last=False)
 
 
+def _lru_put(store: OrderedDict, key: object, value: object, limit: int) -> None:
+    """Insert as most recent; evict the least recently touched beyond ``limit``."""
+    store[key] = value
+    store.move_to_end(key)
+    if len(store) > limit:
+        store.popitem(last=False)
+
+
 _LossReason = Literal["overflow", "interrupted", "out_of_order"]
 
 
@@ -571,6 +582,7 @@ class TradeFlowHub:
         migration_hub: MigrationHub | None = None,
         launchlab_parser: IDLParser | None = None,
         pool_to_mint: dict[str, str] | None = None,
+        track_wallets: bool = False,
     ) -> None:
         self.idl_parser = idl_parser
         self.queue_size = queue_size
@@ -586,15 +598,22 @@ class TradeFlowHub:
         )
         self._migration_tasks: set[asyncio.Task[None]] = set()
         # Cross-mint wallet realized-PnL ledger (average-cost matching in
-        # lamports) for the winner_sell flow-exit rule. Bounded by unique
-        # (wallet, mint) pairs that ever traded a subscribed mint.
-        self.wallet_realized_sol: dict[str, int] = {}
-        self._wallet_basis: dict[tuple[str, str], tuple[float, float]] = {}
+        # lamports) for the winner_sell flow-exit rule. With track_wallets the
+        # hub decodes every pump.fun trade, not only subscribed mints: a
+        # gate-window-only ledger saw ~2% of trades and caught ~1% of the
+        # winner sells the A4 tape study validated. LRU-bounded for long runs.
+        self.track_wallets = track_wallets
+        self.wallet_realized_sol: OrderedDict[str, int] = OrderedDict()
+        self._wallet_basis: OrderedDict[tuple[str, str], tuple[float, float]] = (
+            OrderedDict()
+        )
 
     @property
     def active(self) -> bool:
-        return bool(self._subscribers) or (
-            self.migration_hub is not None and self.migration_hub.active
+        return (
+            bool(self._subscribers)
+            or self.track_wallets
+            or (self.migration_hub is not None and self.migration_hub.active)
         )
 
     def subscribe(self, mint: str) -> TradeQueue:
@@ -631,13 +650,13 @@ class TradeFlowHub:
         if self._interrupted or not signature or signature in self._recent_transactions:
             return 0
         delivered = 0
-        if self._subscribers:
+        if self._subscribers or self.track_wallets:
             events = decode_trade_events(
                 logs,
                 slot=slot,
                 signature=signature,
                 idl_parser=self.idl_parser,
-                mints=set(self._subscribers),
+                mints=None if self.track_wallets else set(self._subscribers),
             )
             if events:
                 _remember_transaction(self._recent_transactions, signature)
@@ -677,20 +696,28 @@ class TradeFlowHub:
             average = cost / tokens
             sold = min(event.token_amount, tokens)
             realized = event.sol_amount - average * sold
-            self.wallet_realized_sol[event.user] = prior + int(realized)
+            _lru_put(
+                self.wallet_realized_sol,
+                event.user,
+                prior + int(realized),
+                _MAX_LEDGER_WALLETS,
+            )
             tokens -= sold
             cost -= average * sold
         if tokens <= 0 and cost <= 0:
             self._wallet_basis.pop(key, None)
         else:
-            self._wallet_basis[key] = (tokens, cost)
+            _lru_put(self._wallet_basis, key, (tokens, cost), _MAX_LEDGER_POSITIONS)
         return prior
 
     def _deliver(self, events: list[TradeEvent]) -> int:
         """Fan events out to their mint's subscribers; drop lost queues."""
         delivered = 0
         for raw in events:
-            event = replace(raw, user_realized_sol=self._wallet_prior_pnl(raw))
+            prior = self._wallet_prior_pnl(raw)
+            if raw.mint not in self._subscribers:
+                continue  # ledger-only event (track_wallets)
+            event = replace(raw, user_realized_sol=prior)
             # Failed subscriptions are removed without skipping healthy siblings.
             for queue in reversed(self._subscribers.get(event.mint, ())):
                 try:

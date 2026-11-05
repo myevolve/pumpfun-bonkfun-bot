@@ -27,6 +27,7 @@ Run: uv run learning-examples/token-lifecycles/analyze_exit_signals.py \
         learning-examples/token-lifecycles/lifecycles_24h.jsonl
 """
 
+# ruff: noqa: S101
 from __future__ import annotations
 
 import argparse
@@ -37,6 +38,12 @@ from collections import defaultdict
 from pathlib import Path
 
 LAMPORTS = 1e9
+# Quote amounts are lamports only on SOL-paired curves (default pubkey or WSOL).
+SOL_QUOTES = {
+    None,
+    "11111111111111111111111111111111",
+    "So11111111111111111111111111111111111111112",
+}
 HOLDS = (10, 25, 60)
 WINSOR_GROSS = 9.0  # cap single-window gross return at +900%
 MIN_POINTS = 500
@@ -99,47 +106,82 @@ def bootstrap_ci(vals: list[float], coin_of: list[str]) -> tuple[float, float]:
     return boots[25], boots[975]
 
 
-def main() -> None:  # noqa: C901, PLR0912, PLR0915
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("path", type=Path)
-    args = ap.parse_args()
+def build_events(coins: list[dict]) -> list[dict]:
+    """Trade events carrying each wallet's strictly-prior realized SOL.
 
-    coins = [json.loads(line) for line in args.path.read_text().splitlines() if line.strip()]
-    paths = coin_paths(coins)
-    all_slots = [s for marks in paths.values() for s, _ in marks]
-    midpoint = statistics.median(all_slots)
-    print(f"coins: {len(coins)} | slot midpoint: {midpoint:.0f}")
-
-    # Average-cost realized PnL with strictly-prior running totals per trade.
-    basis: dict[tuple, dict] = {}
-    running: dict[str, float] = defaultdict(float)
-    events: list[dict] = []
+    Average-cost matching, walked in GLOBAL slot order like the live hub.
+    File order is flush order: a long-lived coin lands after shorter coins
+    that traded later, so a per-coin walk would leak future PnL into "prior".
+    """
+    trades: list[tuple] = []
     for coin in coins:
         create = coin.get("create_slot") or 0
         creator = coin.get("creator") or ""
         mint = coin.get("mint")
         for t in coin.get("trades", []):
-            user, is_buy = t[1], t[2]
-            sol, tok = t[3] / LAMPORTS, t[4] / 1e6
-            slot = create + t[0]
-            price = implied_price(t)
-            if not price:
-                continue
-            prior = running[user]
-            events.append(
-                {"user": user, "mint": mint, "slot": slot, "is_buy": is_buy,
-                 "prior": prior, "creator": user == creator}
-            )
-            st = basis.setdefault((user, mint), {"tok": 0.0, "cost": 0.0})
-            if is_buy:
-                st["tok"] += tok
-                st["cost"] += sol
-            elif st["tok"] > 0:
-                avg = st["cost"] / st["tok"]
-                sold = min(tok, st["tok"])
-                running[user] += sol - avg * sold
-                st["tok"] -= sold
-                st["cost"] -= avg * sold
+            if implied_price(t):
+                sol, tok = t[3] / LAMPORTS, t[4] / 1e6
+                trades.append((create + t[0], t[1], mint, t[2], sol, tok, t[1] == creator))
+    trades.sort(key=lambda row: row[0])  # stable: same-slot coin order kept
+    basis: dict[tuple, dict] = {}
+    running: dict[str, float] = defaultdict(float)
+    events: list[dict] = []
+    for slot, user, mint, is_buy, sol, tok, is_creator in trades:
+        prior = running[user]
+        events.append(
+            {"user": user, "mint": mint, "slot": slot, "is_buy": is_buy,
+             "prior": prior, "creator": is_creator}
+        )
+        st = basis.setdefault((user, mint), {"tok": 0.0, "cost": 0.0})
+        if is_buy:
+            st["tok"] += tok
+            st["cost"] += sol
+        elif st["tok"] > 0:
+            avg = st["cost"] / st["tok"]
+            sold = min(tok, st["tok"])
+            running[user] += sol - avg * sold
+            st["tok"] -= sold
+            st["cost"] -= avg * sold
+    return events
+
+
+def self_check() -> None:
+    """A coin flushed first but trading later must not leak into earlier priors."""
+    # trade rows: [dslot, user, is_buy, quote_lamports, token_raw, ...]
+    late = {"mint": "B", "create_slot": 110, "creator": "c", "trades": [
+        [0, "w", True, 10**9, 10**6], [5, "w", False, 3 * 10**9, 10**6]]}
+    early = {"mint": "A", "create_slot": 100, "creator": "c", "trades": [
+        [0, "w", True, 10**9, 10**6], [50, "w", False, 10**9, 10**6]]}
+    events = {(e["mint"], e["slot"]): e["prior"] for e in build_events([late, early])}
+    assert events[("A", 100)] == 0.0, "future PnL leaked into an earlier prior"
+    assert events[("B", 115)] == 0.0
+    assert events[("A", 150)] == 2.0
+    print("self-check passed")
+
+
+def main() -> None:  # noqa: C901, PLR0912, PLR0915
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("path", type=Path, nargs="?")
+    ap.add_argument("--self-check", action="store_true")
+    args = ap.parse_args()
+    if args.self_check:
+        self_check()
+        return
+    if args.path is None:
+        ap.error("path is required")
+
+    loaded = [
+        json.loads(line) for line in args.path.read_text().splitlines() if line.strip()
+    ]
+    coins = [c for c in loaded if c.get("quote_mint") in SOL_QUOTES]
+    print(f"excluded {len(loaded) - len(coins)} non-SOL-quoted coins")
+    paths = coin_paths(coins)
+    all_slots = [s for marks in paths.values() for s, _ in marks]
+    midpoint = statistics.median(all_slots)
+    print(f"coins: {len(coins)} | slot midpoint: {midpoint:.0f}")
+
+
+    events = build_events(coins)
 
     # Walk-forward: winner threshold from half-1 PnL at half-1's end.
     h1_events = [e for e in events if e["slot"] < midpoint]

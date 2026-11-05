@@ -39,6 +39,12 @@ from collections import defaultdict
 from pathlib import Path
 
 LAMPORTS = 1e9
+# Quote amounts are lamports only on SOL-paired curves (default pubkey or WSOL).
+SOL_QUOTES = {
+    None,
+    "11111111111111111111111111111111",
+    "So11111111111111111111111111111111111111112",
+}
 SYSTEM_PROGRAM = "BwWK17cbnccyENbbsPvFrVUn8oqNBsQ"  # noqa: S105
 MAYHEM_VAULT = "MAYHEM_SOL_VAULT"  # placeholder label; matched by exclusion set
 FEE_LAMPORTS = 33_000 + 27_000 + 5_000
@@ -204,7 +210,11 @@ def main() -> None:
     ap.add_argument("path", type=Path)
     args = ap.parse_args()
 
-    coins = [json.loads(line) for line in args.path.read_text().splitlines() if line.strip()]
+    loaded = [
+        json.loads(line) for line in args.path.read_text().splitlines() if line.strip()
+    ]
+    coins = [c for c in loaded if c.get("quote_mint") in SOL_QUOTES]
+    print(f"excluded {len(loaded) - len(coins)} non-SOL-quoted coins")
     coins_by_mint = {c.get("mint"): c for c in coins}
     print(f"coins: {len(coins)}")
 

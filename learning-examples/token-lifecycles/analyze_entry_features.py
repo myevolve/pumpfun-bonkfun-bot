@@ -44,6 +44,12 @@ from collections import defaultdict
 from pathlib import Path
 
 LAMPORTS = 1e9
+# Quote amounts are lamports only on SOL-paired curves (default pubkey or WSOL).
+SOL_QUOTES = {
+    None,
+    "11111111111111111111111111111111",
+    "So11111111111111111111111111111111111111112",
+}
 FEE_LAMPORTS = 33_000 + 27_000 + 5_000
 PUMP_FEE = 0.0125
 BUY_SOL = 0.05
@@ -139,7 +145,11 @@ def main() -> None:  # noqa: C901, PLR0915
     ap.add_argument("path", type=Path)
     args = ap.parse_args()
 
-    coins = [json.loads(line) for line in args.path.read_text().splitlines() if line.strip()]
+    loaded = [
+        json.loads(line) for line in args.path.read_text().splitlines() if line.strip()
+    ]
+    coins = [c for c in loaded if c.get("quote_mint") in SOL_QUOTES]
+    print(f"excluded {len(loaded) - len(coins)} non-SOL-quoted coins")
     midpoint = statistics.median(
         (c.get("create_slot") or 0) + (c["trades"][-1][0] if c.get("trades") else 0)
         for c in coins if c.get("trades")

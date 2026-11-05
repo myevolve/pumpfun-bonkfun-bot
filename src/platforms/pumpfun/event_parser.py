@@ -282,7 +282,7 @@ class PumpFunEventParser(EventParser):
         if not any(log in _CREATE_INSTRUCTION_LOGS for log in logs):
             return None
 
-        logger.info(f"🔍 Parsing token creation from logs for signature: {signature}")
+        logger.debug(f"🔍 Parsing token creation from logs for signature: {signature}")
 
         # Program data is trusted only while the runtime invocation stack says
         # pump.fun owns the active frame. A discriminator alone is forgeable.
@@ -309,14 +309,14 @@ class PumpFunEventParser(EventParser):
                 and log.startswith("Program data: ")
             ]
             if not create_instruction_found:
-                logger.info("❌ No Create or Create_v2 instruction found in logs")
+                logger.debug("❌ No Create or Create_v2 instruction found in logs")
                 return None
 
             if not program_data_entries:
-                logger.info("❌ No Program data entries found in logs")
+                logger.debug("❌ No Program data entries found in logs")
                 return None
 
-            logger.info(
+            logger.debug(
                 f"🔍 Found {len(program_data_entries)} Program data entries to check"
             )
 
@@ -340,14 +340,14 @@ class PumpFunEventParser(EventParser):
             # Every entry was observed in an active pump.fun invocation frame.
             for entry_idx, (log_idx, encoded_data) in enumerate(program_data_entries):
                 try:
-                    logger.info(
+                    logger.debug(
                         f"🧪 Trying Program data entry {entry_idx + 1}/{len(program_data_entries)} (log index {log_idx})"
                     )
 
                     decoded_data = base64.b64decode(encoded_data, validate=True)
 
                     if len(decoded_data) < 8:
-                        logger.info(
+                        logger.debug(
                             f"⚠️ Program data too short: {len(decoded_data)} bytes"
                         )
                         continue
@@ -356,10 +356,10 @@ class PumpFunEventParser(EventParser):
                     discriminator = decoded_data[:8]
                     discriminator_int = struct.unpack("<Q", discriminator)[0]
 
-                    logger.info(
+                    logger.debug(
                         f"🔍 Program data discriminator: {discriminator.hex()} (int: {discriminator_int})"
                     )
-                    logger.info(
+                    logger.debug(
                         f"🎯 Expected CreateEvent discriminator: {self._create_event_discriminator_bytes.hex()} (int: {self._create_event_discriminator})"
                     )
 
@@ -372,25 +372,25 @@ class PumpFunEventParser(EventParser):
                     )
 
                     if not decoded_event:
-                        logger.info("❌ IDL parser returned None for CreateEvent")
+                        logger.debug("❌ IDL parser returned None for CreateEvent")
                         continue
 
                     if decoded_event.get("event_name") != "CreateEvent":
-                        logger.info(
+                        logger.debug(
                             f"❌ Wrong event type: {decoded_event.get('event_name', 'None')}"
                         )
                         continue
 
-                    logger.info(
+                    logger.debug(
                         f"✅ Successfully decoded event: {decoded_event.get('event_name', 'Unknown')}"
                     )
-                    logger.info(
+                    logger.debug(
                         f"🔍 Event fields: {list(decoded_event.get('fields', {}).keys())}"
                     )
 
                     fields = decoded_event.get("fields", {})
                     if not fields:
-                        logger.info("❌ No fields found in decoded event")
+                        logger.debug("❌ No fields found in decoded event")
                         continue
 
                     # Validate required fields exist
@@ -407,7 +407,7 @@ class PumpFunEventParser(EventParser):
                         field for field in required_fields if field not in fields
                     ]
                     if missing_fields:
-                        logger.info(f"❌ Missing required fields: {missing_fields}")
+                        logger.debug(f"❌ Missing required fields: {missing_fields}")
                         continue
 
                     if not isinstance(fields["uri"], str) or any(
@@ -424,7 +424,7 @@ class PumpFunEventParser(EventParser):
                             "retaining it for an authoritative pre-buy refresh"
                         )
 
-                    logger.info(
+                    logger.debug(
                         f"🎯 Token found: {fields.get('symbol', 'Unknown')} ({fields.get('name', 'Unknown')})"
                     )
 
@@ -455,7 +455,7 @@ class PumpFunEventParser(EventParser):
                     else:
                         quote_metadata = _resolve_quote_metadata(fields["quote_mint"])
                         if quote_metadata is None:
-                            logger.info(
+                            logger.debug(
                                 "❌ CreateEvent uses an unsupported or invalid quote mint"
                             )
                             continue
@@ -470,7 +470,7 @@ class PumpFunEventParser(EventParser):
                     )
                     creator_vault = _ADDRESS_PROVIDER.derive_creator_vault(creator)
 
-                    logger.info(
+                    logger.debug(
                         f"✅ Successfully parsed CreateEvent for token: {fields.get('symbol', 'Unknown')}"
                     )
 
@@ -520,12 +520,12 @@ class PumpFunEventParser(EventParser):
                     )
 
                 except Exception as e:
-                    logger.info(
+                    logger.debug(
                         f"❌ Failed to decode Program data entry {entry_idx + 1}: {e}"
                     )
                     continue
 
-            logger.info("❌ No valid CreateEvent found in any Program data entries")
+            logger.debug("❌ No valid CreateEvent found in any Program data entries")
             return None
 
         except Exception:
