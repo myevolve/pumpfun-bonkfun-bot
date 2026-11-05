@@ -2054,7 +2054,59 @@ Housekeeping: `read_error` paper marks are all Oct 6-7 (before the
 completed-curve fallback); `trade_stream_interrupted` rows are provider
 hiccup windows, fail-closed by design; per-event CreateEvent parse chatter
 (54% of log bytes; rotation held ~7h) moved to DEBUG. Four 2026-10-28
-Cursor PRs (#2-#5, an offline meme-studio line) reviewed: all request
-changes and collide on `pyproject.toml`/`src/meme_studio/__init__.py`/
-`conftest.py` with an incompatible package layout in #2 — left open for the
-owner's call.
+Cursor PRs (#2-#5, an offline meme-studio line) were consolidated and fixed
+as PR #6 (merged).
+
+## Wave C1: what long-lived community coins look like (2026-11-05)
+
+Outcome, read from our node per SOL-paired coin of tapes 2-4 (27,553 coins,
+3-33 h old): **alive** = graduated, pool traded in the last hour, pool still
+>= 10 SOL. Only 0.18% of launches (50 coins) and 8.5% of graduates qualify.
+Survival odds, not trade returns.
+
+- **Launch score** (all known within ~60 s): first launch by this creator;
+  creator did not sell in the first minute; dev buy > 2 SOL; > 25 first-minute
+  buyers with no wallet above 50% of that buying; not mayhem. Score >= 4 is
+  ~6% of launches but holds 72-84% of alive coins on each tape (alive 2.2-2.4%
+  vs 0.18%); tape 4 was held out. Score 0-2 (two thirds of launches): 1 alive
+  in 18,053.
+- Serial creators: 2 alive in 14,891. Creator sold within 60 s: 0 in 9,482.
+  Mayhem: 0 in 10,351.
+- **Graduation timing** (known at graduation): same-slot bundled graduation
+  12.7% alive (n=118), 1-10 min after launch **2.6%** (n=191), > 10 min 13.6%
+  (n=59). Fast frenzy graduations almost never last.
+- **X, posts carrying the contract address** (APInex search, 400-coin
+  stratified sample, weighted back to all 603 graduates; base 8.3% alive):
+  >= 5 distinct authors in the first 2 h -> 24.9% alive (3.0x, 15% of
+  graduates); a 10k+ follower account posted -> 26.6% (3.2x); no posts ->
+  4.7% (0.6x). Strictly before an entry 30 min after graduation, >= 3
+  authors -> ~21% (small n). Cashtag/name searches collide with other assets;
+  link searches add nothing. Posting accounts are a median 3.5 years old
+  (< 1% under 30 days), so account age does not separate.
+- **LunarCrush**: contract addresses are not indexed; cashtags are, but 76%
+  of tickers were active before launch. Excess distinct creators in the 6 h
+  after launch over the ticker's own 72 h baseline: alive median 6.8 (61% >=
+  5) vs graduated-then-died 0.7 (24%). Hourly data: an hours-scale signal.
+  X >= 5 authors AND LunarCrush >= 5 -> 30% alive (3.6x, 10.5% of graduates).
+- Metadata (59% fetched; public gateways throttle): linking someone else's
+  tweet (76% of coins) does worst; an X account shared by 2-20 coins beats a
+  unique one; descriptions > 120 chars 2.8x. Suggestive only (48 alive).
+
+Infrastructure lessons:
+- The recorder checked `max_age` before the post-graduation branch, so every
+  graduated coin was flushed 20 min after launch: tape 5 asked for 4.5 h of
+  pool trades and got a median of 14 min. Fixed (graduated coins follow only
+  the post-graduation limits); tape 6 is the first capture that can price
+  multi-hour post-graduation entries.
+- `.state/configs/capital-research-rpc.env` holds the PUBLIC Solana RPC, not
+  our node; research reads should use the Chainstack URL from Secret Manager.
+- APInex's subscription tokens are a model allowance: Twitter tools bill only
+  the USD balance (`402` otherwise). Search costs $0.0006 per tweet; the
+  400-coin study cost $1.39.
+- Provider secrets live in GCP Secret Manager (`ultimate-model-ai`, label
+  `app=pumpfun-bonkfun-bot`); local `.state/configs` projections remain for
+  running services. The root `.env` family and wallet secrets stay local.
+
+Next: run the pre-declared post-graduation entry test (graduation timing, X
+authors before entry, LunarCrush, liquidity retention) on tape 6 when it
+closes, and re-label tape-5 coins for an out-of-sample survival check.
