@@ -653,13 +653,15 @@ class Recorder:
             idle = now - coin["last_trade_at"]
             why = reason if force else None
             if not force:
-                if now - coin["seen_at"] >= self.max_age:
-                    why = "max_age"
-                elif coin["graduated_at"] is not None:
+                # A graduated coin is governed by the post-graduation window, never by
+                # max_age: checking max_age first cut every pool tape at 20 min.
+                if coin["graduated_at"] is not None:
                     if now - coin["graduated_at"] >= self.postgrad_seconds:
                         why = "postgraduation_age"
                     elif idle >= self.postgrad_idle_seconds:
                         why = "postgraduation_idle"
+                elif now - coin["seen_at"] >= self.max_age:
+                    why = "max_age"
                 elif idle >= self.idle_seconds:
                     why = "idle"
             if why is not None:
@@ -1478,6 +1480,16 @@ def self_check() -> None:  # noqa: PLR0915 - one offline evidence check
             assert rec.coins[mint]["pool"] == pool
             raw_rows = rec.paths["raw"].read_text().splitlines()
             assert json.loads(raw_rows[-1])["event_source"] == "event_cpi"
+            # A graduated coin outlives max_age until its post-graduation window ends.
+            rec._on_complete({"mint": mint}, 2, time.monotonic())  # noqa: SLF001
+            rec.coins[mint]["seen_at"] -= 10 * rec.max_age
+            rec.coins[mint]["last_trade_at"] = time.monotonic()
+            rec.flush_finished()
+            assert mint in rec.coins, "max_age cut a graduated coin's pool tape"
+            rec.coins[mint]["graduated_at"] -= rec.postgrad_seconds
+            rec.flush_finished()
+            assert mint not in rec.coins
+            assert rec.flush_reasons["postgraduation_age"] == 1
         finally:
             rec.close()
     scheduler_self_check()
