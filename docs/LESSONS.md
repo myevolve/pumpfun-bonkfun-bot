@@ -1946,3 +1946,45 @@ prior realized profit sells into a held position, the position exits
 immediately instead of riding the measured -13..-26% forward damage.
 `paper_marks`/`grad_marks` arbitrate the effect against the pre-activation
 cohorts.
+
+## Wave A4++: third tape confirms; AMM lane void on tapes 2-3 (2026-11-05)
+
+Tape #3 (13,365 coins flushed when the 40GB raw ceiling hit at ~7h;
+9.99M raw transactions) confirms the A4 winner-sell signal a third
+non-contiguous time: forward medians `-7.1% / -10.7% / -19.0%` at
+10/25/60 slots (n=100,538; coin-clustered CIs `[-6.6,-5.5]`, `[-7.1,-5.9]`,
+`[-9.5,-7.6]` — all negative) vs other-sell
+`-1.1% / -1.8% / -2.9%`. **The >=3-tape requirement for the winner-sell
+signal is satisfied**; the remaining live gate is the forward paper effect.
+
+**The AMM lane was silently void on BOTH monster tapes.** Tape #3's raw
+stream contains zero pump-amm transactions (whole-file grep; the lane was
+dead from minute zero, not degraded late), and tape #2 has zero
+pool_trade/graduated records for the same reason. This is a capture
+defect, NOT an on-chain graduation collapse: pump-amm runs ~28k tx/h
+on-chain, and a live probe with the identical two-entry subscription
+delivers ~20.5k amm txs in 90s while the collector streams. Recorder code
+is unchanged across all three tapes (subscription() byte-identical
+since the original research commit). Verdict: provider-side silent lane
+starvation during the two high-strain capture windows (correlated slot
+gaps/reconnect storms; the probe on the same endpoint works fine now).
+Consequence: **A3's 2h post-washout horizon remains unmeasured** —
+tapes 2/3 have no post-grad data; tape #1's ~46min coverage p50 stands
+as the only post-grad measurement.
+
+Recorder fix (`record_lifecycles.py`): `amm_transactions` counter on
+every deduped transaction + `lane_void` journal record (once, when
+>10min elapsed, >1000 transactions, zero AMM deliveries) + `amm=` in
+the console heartbeat; offline self-check covers both. A dead AMM lane
+now announces itself at minute 10 instead of silently voiding 7h of
+post-grad data.
+
+Capture-sizing lessons (pump-only recording regime):
+- raw retention ~5.7GB/h pump-only; with the AMM lane alive expect
+  ~2.5GB/h more. Tape #3 hit BOTH ceilings nearly simultaneously
+  (9.99M events ~= 10M cap; 37GB raw ~= 40GB cap).
+- Provider strain pattern: two consecutive 7-12h captures degraded
+  (slot silence at 10.5h; disk ceiling at 7h with 1,209 gaps/8
+  reconnects; collector hiccup windows correlated 15:15/16:28/18:20/
+  19:00/22:05). A 6h capture is the conservative ceiling under this
+  regime; the lane_void assert makes longer gambles cheap to detect.

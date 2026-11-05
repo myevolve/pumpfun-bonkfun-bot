@@ -116,6 +116,7 @@ class Recorder:
                 (
                     "updates",
                     "transactions",
+                    "amm_transactions",
                     "failed_transactions",
                     "attributable_failed_transactions",
                     "duplicate_events",
@@ -151,6 +152,7 @@ class Recorder:
         self.written = self.trades_seen = self.graduations = self.post_trades_seen = 0
         self.decode_errors = 0
         self.started = time.monotonic()
+        self.lane_void_emitted = False
         self.run_id = str(uuid.uuid4()) if run_id is None else run_id
         self.admission_cutoff = None
         self.first_head_slot = None
@@ -258,6 +260,7 @@ class Recorder:
             )
         ]
         accounts = set(account_keys)
+        self.counts["amm_transactions"] += int(PUMP_AMM_PROGRAM in accounts)
         related = accounts.intersection(self.coins)
         related.update(self.pools[pool] for pool in accounts.intersection(self.pools))
         logs = list(info.meta.log_messages)
@@ -691,6 +694,20 @@ class Recorder:
         self.flush_reasons[reason] += 1
 
     def progress(self) -> None:
+        # ponytail: sampled liveness assert; full per-program accounting lives in counts
+        if (
+            not self.lane_void_emitted
+            and time.monotonic() - self.started > 600
+            and self.counts["transactions"] > 1000
+            and self.counts["amm_transactions"] == 0
+        ):
+            self.lane_void_emitted = True
+            self.journal(
+                "lane_void",
+                lane="amm",
+                transactions=self.counts["transactions"],
+                note="postgrad data void: amm lane delivered nothing while pump flowed",
+            )
         self.journal(
             "heartbeat",
             counts=dict(self.counts),
@@ -704,7 +721,8 @@ class Recorder:
         )
         print(
             f"tracking={len(self.coins)} written={self.written} trades={self.trades_seen} "
-            f"post_trades={self.post_trades_seen} bytes={self.counts['bytes_written']}",
+            f"post_trades={self.post_trades_seen} amm={self.counts['amm_transactions']} "
+            f"bytes={self.counts['bytes_written']}",
             flush=True,
         )
 
@@ -1377,6 +1395,21 @@ def self_check() -> None:  # noqa: PLR0915 - one offline evidence check
             assert restored == update.SerializeToString()
             assert len(restored) == retained["raw_size"]
             assert hashlib.sha256(restored).hexdigest() == retained["raw_sha256"]
+            info.signature = bytes([4]) * 64
+            info.transaction.message.account_keys.append(
+                base58.b58decode(PUMP_AMM_PROGRAM)
+            )
+            rec.on_transaction(update, time.monotonic(), time.time_ns())
+            assert rec.counts["amm_transactions"] == 1
+            rec.counts["transactions"] = 1500
+            rec.counts["amm_transactions"] = 0
+            rec.started = time.monotonic() - 700
+            rec.progress()
+            rec.progress()
+            journal_rows = [
+                json.loads(line) for line in rec.paths["run"].read_text().splitlines()
+            ]
+            assert sum(row["kind"] == "lane_void" for row in journal_rows) == 1
         finally:
             rec.close()
     scheduler_self_check()
