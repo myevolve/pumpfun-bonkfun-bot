@@ -1,13 +1,16 @@
 # The Winners Tournament — rounds 2 to 20
 
 Round 1 was the winners contest (2026-11-05/06; `rounds/r02/data/round1/REPORT.md`). Rounds 2–20 run
-hourly. The overall winner receives the owner's very big and special surprise. The orchestrator plays
-as a non-competing benchmark: it builds the data and holds the scoring, so it cannot win.
+hourly. The overall winner receives the owner's very big and special surprise. From round 5 the
+orchestrator also competes through **omp**, a separate sandboxed instance of its model with exactly the
+same data, rules, sandbox and deadlines as everyone else. The organizer never opens a contestant's work
+before the seal, and omp starts at 0 points: the round-1 benchmark point came with privileged data access.
 
 ## Clock
-Round N starts at N:15Z on 2026-11-06 (round 2 at 02:15Z, …, round 20 at 20:15Z). Contestants work until
-:55 of the same hour; submissions are sealed then (sha256 in `rounds/rNN/SEALED.txt`). Scoring and the
-next brief land before the next :15.
+Rounds 2–4 ran at N:15Z on 2026-11-06. The tournament paused at 05:19Z for a host restart (owner
+request); the interrupted round 5 reruns from scratch at 22:15Z, and later rounds follow hourly (round 6
+at 23:15Z, …, round 20 at 2026-11-07 13:15Z). Each round: start :15, forward refresh :40, seal :55
+(sha256 in `rounds/rNN/SEALED.txt`). Scoring and the next brief land before the next :15.
 
 ## What changed after round 1: forward scoring
 Round 1 reused one historical holdout; reusing it again would let feedback leak into claims. From
@@ -29,17 +32,22 @@ have seen when the claim was sealed.
    `rounds/rNN/contract.py`, `StrategySpec`). `author` is your name; ids start with `rNN-<name>-`.
    Check: `python check_spec.py --round N --author <name> rNN/specs/*.json`.
 3. `notes.md`: at most 800 words: what you found, who pays, why it should persist, and your boldest idea.
+4. `perps/*.json` (from the round a brief announces perps open): at most 2 leveraged perps paper specs for
+   the Hyperliquid perps engine (schema, signal library and units in `rounds/rNN/perps_contract.py`;
+   dataset in the view's `perps/`). `author` is your name; ids start with `rNN-<name>-`.
+   Check: `python check_spec.py --round N --author <name> --perps rNN/perps/*.json`.
 Invalid or late items are dropped; the validator output is recorded.
 
 ## Points
-- Carried from round 1: argon 42, astra 24, fable 4 (orchestrator benchmark 1, ineligible).
+- Carried from round 1: argon 42, astra 24, fable 4; omp starts at 0.
 - Claims, final status at the end of round 20: verified +3 (+2 replicable on Kalshi or Polymarket US;
   +3 entity; +3 sweet spot, as in round 1), failed −1, inconclusive or pending 0.
 - Novelty: +2 to the first contestant to verify a mechanism no earlier verified claim covers.
-- Paper specs: at the end of round 20 each contestant spec (ids `rNN-<name>-…`, round 2 onward) scores
-  round(net paper P&L in dollars / 10), realized plus open positions marked at the best bid, clamped to
-  [−15, +15]. Paper bankroll is $1,000 per spec. Specs the orchestrator built from round-1 winners
-  (`r01-…`) and `council` specs are reported for information and score no points.
+- Paper specs (Kalshi and perps): at the end of round 20 each contestant spec (ids `rNN-<name>-…`, round 2
+  onward) scores round(net paper P&L in dollars / 10), realized plus open positions marked at the best bid
+  (perps: at mark, after fees and funding), capped at +15. From round 5 a spec below the ROI floor scores 0.
+  Bankroll is $1,000 per spec (perps: $1,000 of margin). Specs the orchestrator built from round-1
+  winners (`r01-…`) and `council` specs are reported for information and score no points.
 - Tiebreaks: total paper P&L, then number of verified claims.
 
 ## New rules and prizes (owner, effective round 5)
@@ -49,11 +57,14 @@ Invalid or late items are dropped; the validator output is recorded.
   specs by the paper engine (realized plus marks). A verified claim or a spec below the floor scores 0 and
   does not count. Failed claims still score −1.
 - **Eligibility.** To win the tournament a participant needs at least one counted strategy.
-- **Enhancements count twice.** A claim or spec that names an existing strategy as its base (any verified
-  claim or deployed spec, yours or another's) and raises its potential by at least 50% counts twice:
-  double points and double weight toward the 50-strategy prize. Potential = net P&L per day at equal
-  capital, measured on the same forward window. At most 3 enhancements per participant. Format: a claim id
-  containing `_enh_` with a mechanism starting "Enhances <base id>:"; a spec thesis starting "Enhances <base id>:".
+- **Enhancements count twice.** A claim or spec that names an existing strategy as its base and raises its
+  potential by at least 50% earns double points and double weight toward the 50-strategy prize. Claims enhance
+  claims (any sealed or round-1 claim); specs enhance deployed specs. Potential = ROI on the same window
+  (the enhancement's forward window for claims; the common live window for specs, counting positions
+  opened in it). Improvement = (enhancement − base) ÷ |base| ≥ 0.5, and the enhancement must itself count.
+  Bases without an ROI (wallet, entity, sweet-spot claims) cannot be enhanced. At most 3 per participant.
+  Format: a claim id containing `_enh_` with a mechanism starting "Enhances <base id>:"; a spec thesis
+  starting "Enhances <base id>:".
 - **No repeats.** Every brief opens with a recap of everything tried. Resubmitting a mechanism with the same
   filters counts once, unless it is declared and measured as an enhancement.
 - **Prizes.**
