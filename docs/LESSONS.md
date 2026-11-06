@@ -2235,3 +2235,118 @@ Agreed next measurements, each free or under $100:
    pre-game lines.
 
 Kill criteria are in each review.
+
+## Wave C4: tape-6 entry test, desk audit and option-gap first look (2026-11-05)
+
+**Tape 6 (post-graduation entry, pre-declared): negative, lane closed.**
+
+Tape 6 ran with the flush-order fix and stopped cleanly on its 55 GB storage
+ceiling after about 5.5 h. With post-graduation windows live, the raw stream
+grows about 9.7 GB/h. The tape holds 10,591 coins, about 93 graduates with
+post-graduation windows, and 876k pool trades.
+
+The pre-declared test (entry 30 min after graduation, 0.05 SOL, 1.25%/side +
+tx fees, mark-to-last) covered 90 SOL graduates with pool trades:
+
+- 43 pools died before the entry, so 47 entries were possible.
+- Every filter lost money at 60/120/240 min, with win rates of 0-13%.
+- The A3 retained-liquidity rule was the worst: median -0.0497 SOL on 0.05 at
+  every hold (n=15). Pools still liquid at 30 min were the ones drained next.
+- Base median -0.0028; graduation timing, X authors and LunarCrush filters
+  were all negative.
+
+This closes post-graduation entries. The winner-sell exit remains the program's
+only validated signal.
+
+**Cross-venue desk audit** (read-only ledger copy; `polymarket-alpha-bot/data/research/desk-audit/`):
+
+- **The ledger reproduces every documented figure to the cent.** Over the
+  full sample since 10-30, the desk lost $50.87 on 83 lots (mean -$0.61, CI
+  upper bound -$0.25). 57 unwound lots from the build-out week cost $56.16.
+  Since 11-02: +$3.13 on 19 lots, CI [-$1.14, +$1.28], which is
+  inconclusive.
+- **Fill rates.** 1,771 attempts covered 1,322 unique opportunities. Maker
+  rests filled 1.1% of orders and taker fill-or-kill 6.8%.
+- **Markouts.** Polymarket taker opens are favorable (+3.6 c/share at 60 s,
+  +8.4 c at 10 min). Unwinds are the loss: -11.9 c at 60 s and -19.5 c at
+  10 min.
+- **No rebate at our size.** Polymarket US pays maker rebates only from
+  $10M of maker volume, so the 25% maker rebate assumed in round 2 does not
+  apply.
+- **Ledger defect.** Seven lots from 10-30/31 were overstated by $0.38 in
+  total (a fee credited as proceeds); the code is fixed but the rows were
+  never restated.
+
+**Option-implied gap logger** (10-day run started 2026-11-05T19:15Z):
+
+- First snapshots priced 1,462 Kalshi and 963 Polymarket US BTC/ETH strikes
+  against SVI-fit Deribit digitals.
+- Low-probability YES is rich by about 1-2 pp, not the 5.6-11 pp of the 2023
+  study.
+- After fees, taker edges are almost all negative.
+
+## Wave C5: winners contest (2026-11-05/06)
+
+The owner's challenge: reverse-engineer Polymarket and Kalshi winners, find
+the hidden edges, the consistent "sweet spot" and multi-account entities.
+Full record: `docs/council/2026-11-05-winners-contest/` (REPORT.md, sealed
+pre-registrations, rules, findings, verifier results).
+
+Setup:
+
+- **Data.** Public Polymarket Data API v2 (v1 was retired 2026-11-02):
+  71,524 board wallets with full daily P&L series, 9.2M trades and 853k
+  markets, plus on-chain linkage for 1,872 wallets on our Polygon node.
+  Kalshi's unauthenticated `v1/social` API gives 6,418 traders, but per-trade
+  history only where public: 14 of the top 250. Polymarket US exposes nothing
+  per account.
+- **Scoring.** Discovery data before 2026-10-06; holdout 10-06 to 11-05.
+  The universe of 1,332 wallets was chosen from pre-cutoff P&L only.
+- **Leak control.** Contestants saw an as-of-cutoff view in sandboxes;
+  scoring used a deterministic event-clustered verifier.
+- **Leaks found and fixed before launch:**
+  - today's board P&L, which minus discovery P&L reveals holdout P&L;
+  - wallets collected only via short-window boards;
+  - outcome and position features built with post-cutoff resolutions;
+  - markouts crossing the cutoff;
+  - a newest-first trade cap whose truncation revealed October volume.
+
+Result: **argon won, 42 pts (9/18 verified)**. astra 24 (best blind round:
+24 vs argon 22), fable 4, orchestrator benchmark 1 (non-competing).
+
+Verified holdout edges:
+
+- **15-minute crypto maker fills:** found by all four, +$0.57-0.75/trade.
+- **Pre-end "already decided" 96-99.9c carry** outside sports and crypto:
+  +$3.16/trade, 33k trades, 116 wallets.
+- **Multi-outcome slate NO at 85-96c** on events with 3+ markets:
+  +$18.24/trade, 20k trades.
+- **Smart-wallet shadowing:** +$3.94/trade, 92k trades.
+- **Weather:** +$1.44/trade, 11k trades.
+- **After-end carry:** +$0.77/trade; the CI lower bound is only $0.02.
+- **Near-certainty "bonds"** in crypto 4h/1d, mentions and tech: small n.
+- **Two linked 6-wallet fleets** with 100% positive holdout weeks.
+
+Outside the contest universe, SybilHunter found the owner's hypothesis
+verbatim: a 32-wallet sports farm (27 wallets created within 20 minutes, $110
+clips at 0.99, markets split between wallets, 100% positive weeks, +$200k in
+the holdout).
+
+Failed in the holdout:
+
+- pre-game sports, for every entrant;
+- in-play sports and broad politics/geopolitics books (event-clustered CIs
+  crossed zero);
+- every sweet-spot and wallet-persistence claim: no excess over controls
+  matched on P&L decile and market type.
+
+The last failure is the main lesson. Most consistent wallets selected before
+the cutoff went dormant (the U_disc median holdout P&L is $0). Persistence
+exists only among wallets that keep trading, and that cannot be selected in
+advance.
+
+Why copying winners fails: the data shows the mechanism but not the signal;
+followers pay the spread the winners earned as makers (72% of winners' fills
+are maker fills); exits, hedges and sharding are invisible; leaderboards
+select on outcomes. What transfers is a process signature: price band ×
+timing to end × category × maker share, inside capacity limits.

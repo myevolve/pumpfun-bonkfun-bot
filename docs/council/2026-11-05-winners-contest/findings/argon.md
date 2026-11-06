@@ -1,0 +1,49 @@
+# Reverse-Engineering Prediction Market Alpha: Verified Edges, Fleets, and Copy-Trading Limits
+
+To separate structural alpha from discovery luck before the `2026-10-06` holdout, we split discovery data at **`2026-09-08T00:00Z`**. Every wallet feature (`_tr`) was recomputed strictly from pre-`2026-09-08` fills, resolutions, and P&L (`<=2026-W36`), then tested out-of-sample on **`2026-09-08` to `2026-10-05`** (`10,000` event-clustered bootstrap resamples for `trade` claims; matched `(decile, dominant_type)` control bootstraps on lookahead-purged `U_disc` for `wallet`/`sweet_spot` claims). Only **18 mutually distinct claims** (`13` trade, `1` sweet spot, `4` entities; max trade overlap `9.1%`, wallet overlap `0.0%`) that passed pseudo-holdout are submitted in `claims.json`.
+
+## 1. Verified Out-of-Sample Edges (`trade` Claims)
+
+Winning trades cluster into five mechanisms where identifiable counterparties pay for immediacy, entertainment, or capital release:
+
+- **Sports Live-State & Sharp-Line Calibration (`trd_01`, `trd_02`, `trd_03`):**
+  - `trd_01` (`#11`, **In-Play Favorite Taker `50–85c`**): Directional sharps lift stale asks left by stream-delayed fans (`n=12,900`, `101` independent wallets, `2,257` events; **`+$134.62/fill`, CI `[+$29.52, +$264.97]`, `+11.8%` ROI, `+$1.74M`**). *1s replication:* Poll official play-by-play and devigged Pinnacle live lines during clock stoppages on Kalshi/PM-US.
+  - `trd_02` (**In-Play Passive Favorite Maker `60–85c`, `<=$5k`**): Resting bids capture wide live spreads from impatient fans (`n=56,435`, `122` wallets; **`+$8.31/fill`, CI `[+$1.45, +$14.93]`, `+5.3%` ROI, `+$469k`**). *1s replication:* Quote 2–3c below live devigged fair value during timeouts; pull before live play.
+  - `trd_03` (`#10`, **Pre-Game Sharp Pinning `50–88c`**): Calibrated specialists fade fan underdog/loyalty bias against vig-free Pinnacle/Circa lines (`n=2,403`, `28` wallets; **`+$57.56/fill`, CI `[+$3.51, +$114.34]`, `+19.9%` ROI, `+$138k`**). *1s replication:* 1s sharp-odds API poller taking `>=1.5%` post-fee edges.
+- **Resolution & Capital-Release Carry (`trd_04`, `trd_05`):**
+  - `trd_04` (`#2`, **Post-End Bonding `after_end==True`, `93–99.9c`**): Winning holders sell during oracle liveness to recycle margin (`n=46,329`, `141` wallets; **`+$4.85/fill`, CI `[+$2.36, +$7.46]`, `+0.5%` ROI, `+$225k`**). *1s replication:* Confirm official AP/NWS/BLS/boxscore outcomes at 1s post-end; buy discounted winners.
+  - `trd_05` (`#2`, **Pre-End Decided Carry `96–99.9c`, `<=$5k` non-jump**): Factually decided non-crypto/non-sports markets sold before calendar expiration (`n=8,639`, `79` wallets; **`+$4.97/fill`, CI `[+$3.43, +$6.55]`, `+1.3%` ROI, `+$43k`**). *1s replication:* 1s primary-source finality scanner bidding `<=$5k` clips.
+- **Cross-Contract & Tail-Overround Arbitrage (`trd_06`, `trd_07`, `trd_08`):**
+  - `trd_06` (`#6`, **Multi-Market Sibling/Ladder Arb `n_markets_event>=3`, `10–85c`**): Arbitrageurs with `>=25%` 120s sibling-trade share correct single-strike retail sweeps (`n=8,502`, `23` wallets; **`+$30.82/fill`, CI `[+$6.42, +$60.19]`, `+20.8%` ROI, `+$262k`**). *1s replication:* 1s strike-monotonicity and slate-sum scanner executing paired Kalshi/PM-US legs.
+  - `trd_07` (`#3`, **Crypto Moonshot-NO Harvesting `88–96c`**): Retail overpays for 4–12c far-OTM BTC/ETH/SOL lottery calls vs Deribit digital probabilities (`n=6,666`, `34` wallets; **`+$25.94/fill`, CI `[+$12.46, +$36.87]`, `+5.0%` ROI, `+$173k`**). *1s replication:* 1s Deribit vol-surface digital pricer buying Kalshi strike NO at `>=2c` edge.
+  - `trd_08` (`#1`, **Multi-Outcome Slate Overround NO `n_markets_event>=3`, `85–96c`**): Fringe candidate YES bids push political/macro/tech/awards sums `>100c` (`n=2,848`, `52` wallets; **`+$34.59/fill`, CI `[+$3.12, +$55.99]`, `+9.6%` ROI, `+$99k`**). *1s replication:* Buy tail NO on Kalshi/PM-US slates whenever sibling YES sum `>100c`.
+- **Short-Horizon Crypto Maker Spread & Rebates (`trd_10`, `trd_11`):**
+  - `trd_10` (**15m Crypto Passive Maker**): Captures retail momentum spread on 15m binaries (`n=99,141`, `28` wallets; **`+$0.44/fill`, CI `[+$0.23, +$0.66]`, `+2.7%` ROI, `+$44k`**). *1s replication:* Quote Kalshi 15m crypto brackets off spot/Deribit microprice; pull in final 90s.
+  - `trd_11` (`#7`, **5m Crypto HFT Maker**): Captures spread plus maker rebates (`n=508,907`, `50` wallets; **`+$0.15/fill`, CI `[+$0.07, +$0.23]`, `+$76k`**). **Not replicable** at 1s (requires `<50ms` CEX cancel latency; unlisted on US venues).
+- **Flow Lead-Lag & Niche Domain Priors (`trd_09`, `trd_12`, `trd_13`):**
+  - `trd_09` (`#18`, **Smart-Wallet Polygon Shadowing `<=$5k`**): Takers with `>=15%` 60s alpha-follow share lift stale books lagging ~2s Polygon fills (`n=22,114`, `7` entities; **`+$8.30/fill`, CI `[+$2.29, +$14.35]`, `+4.9%` ROI, `+$184k`**). *1s replication:* Subscribe to vetted directional Polygon fills; hit lagging Kalshi/PM-US quotes.
+  - `trd_12` (`#17`, **Awards/Culture Calibration `35–85c`**): Beats fan name-recognition using critic/guild tallies (`n=2,355`, `27` wallets; **`+$5.35/fill`, CI `[+$0.63, +$10.44]`, `+11.9%` ROI**). *1s replication:* 1s Rotten Tomatoes/GoldDerby Bayesian updater on Kalshi.
+  - `trd_13` (`#13`, **Ensemble Weather & METAR Rounding `10–96c`**): Exploits NWP spreads and ASOS C-to-F rounding knots (`n=266`, `9` specialists; **`+$16.18/fill`, CI `[+$0.32, +$32.78]`, `+22.2%` ROI**). *1s replication:* 1s HRRR/ECMWF + METAR bot on Kalshi temperature ladders.
+
+## 2. The Modest Consistent Sweet Spot and Hidden Multi-Wallet Fleets
+
+**Sweet Spot (`ss_01_near_certainty_harvesters`):** Most `$1k–$100k` filters fail matched-control tests because multi-year accounts compound slower than active decile peers. The true sweet spot is **recent-cohort (`<=24` active weeks) near-par harvesters** (`$1.05k–$99.5k` P&L, `px_ge99_disc>=10%`, `>=85%` pos weeks, `>=75%` pos days, `share_repeat_size_disc<0.95`). On lookahead-purged `U_disc` (`21` wallets, `19` entities), they earned **`+$2,153` mean pseudo-holdout P&L (`CI [+$825, +$3,958]`)**, beating `(decile, dom_type)` controls by **`+$1,398` (`CI [+$201, +$3,157]`)** with **`1.00` median pos weeks** and **`0.96` pos days**. Kalshi confirms this: visible `$1k–$100k` traders with `>=80%` pos weeks (`n=24`) persisted at **`83.3%` (`mean +$3,617`)**, vs **`56.0%`** for top-100 whales (`mean $90,962 -> median $940`).
+
+**Four Verified Multi-Wallet Entities (`25` `U_disc` wallets, `0%` overlap with `ss_01`):**
+1. **`E0000` (`ent_01`, 10 `D2` wallets, `fingerprint+partition+pnl_corr`):** Partitions finished sports games (where Polymarket `endDate = kickoff + 7d` keeps `after_end==False` post-whistle) across 10 accounts using identical **`$108.90`** (`98.9–99.0c`) maker clips (`98.6–99.8%` repeat-size share, `$35` max drawdown). Pseudo-holdout: **`+$155,783` (`100%` pos weeks, `96.4%` pos days)**.
+2. **`E0004` (`ent_02`, 6 wallets, `cofill_simultaneous+fingerprint`):** Slices live tennis/LoL esports orders within 5s (`38%` simultaneous co-fill rate, symmetric lead, `89.5%` positive weeks over 38 lifetime weeks). Pseudo-holdout: **`+$172,361` (`100%` pos ISO weeks, `71.4%` pos days)**.
+3. **`E0005` (`ent_03`, 6 `D2` wallets, `fingerprint+pnl_corr`):** Shards `~$900` pre-game soccer/tennis clips, round-tripping `54.9%` pre-kickoff. Pseudo-holdout: **`+$113,694` (`100%` pos weeks, `75.0%` pos days)**.
+4. **`E0010` (`ent_04`, 3 `D2` wallets, `cofill_simultaneous+fingerprint`):** Co-fills `after_end` live soccer side-markets within 5s (`45%` co-fill rate, `0.91` daily P&L correlation). Pseudo-holdout: **`+$14,403` (`100%` pos weeks, `96.3%` pos days)**.
+
+## 3. What Failed Out-of-Sample
+
+Pseudo-holdout testing rejected seven plausible ideas: (1) **New-market sniping (`60–3600s`, `#5`)** lost **`-29.8%` ROI** on rule ambiguity and wide spreads; (2) **Sub-10c crypto threshold calls** flipped from **`+308%` August ROI** to **`-20.2%` September ROI (`-$40.9k`)**; (3) **Sub-5c NegRisk maker bids** lost **`-88.3%` ROI (`CI [-$5.36, -$0.97]`)** on toxic dumps; (4) **Unfiltered `sports_inplay` `98.5–99.9c` makers** lost **`-$0.53/fill` (`CI [-$1.03, -$0.11]`)** from late comebacks during unfinished games; (5) **In-play underdog takers (`10–35c`)** lost **`-7.6%` ROI (`-$291k`)**; (6) **Mid-price politics/geopolitics/macro/dip-fade slices (`#4, #9, #14, #16`)** and generic `wallet` claims failed clustered or control-excess CIs; and (7) **Nine other clusters (`E0001–E0003, E0006–E0009, E0011–E0012`)** missed `>=80%` positive weeks or went dormant.
+
+## 4. Why Can't We Just Copy the Winners?
+
+1. **Dormancy & hidden boards:** **`51.0%` (`679/1,332`)** of `U_disc` winners made zero trades after Aug 1 (`median $0.00` pseudo-holdout P&L), while **`80.7%` (`5,181/6,418`)** of Kalshi leaderboard traders hide trades completely.
+2. **Winner's Curse:** Top-quartile historical ROI wallets (`htr_roi>=10.2%`) **underperformed** matched `(decile, dom_type)` controls out-of-sample by **`-$19,766` (`t = -2.38`)**.
+3. **Maker-to-taker inversion:** **`72.2%`** of discovery fills are passive maker fills earning spread, rebates, and LP rewards; post-block copy-bots pay taker spread and flip positive expectancy negative.
+4. **Dynamic exits:** `E0005` earned **`+$119.8k`** realized market P&L via `54.9%` pre-kickoff round-trips, whereas holding all its BUYs to resolution loses `-$16.2k`.
+5. **Hidden external state:** Copying `E0000`'s `98.9c` sports bids without its external final-whistle feed turns `+$156k` post-match carry into `-$0.53/fill` live-comeback losses.
+6. **Sharding & multi-leg hedges:** Operators split orders across 3–10 wallets, pair 120s sibling legs (`trd_06`), or hedge on Deribit/Pinnacle. Copying works only when restricted to vetted *directional* non-MM takers on lagging books with `<=$5k` caps (`trd_09`).

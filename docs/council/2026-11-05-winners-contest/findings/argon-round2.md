@@ -1,0 +1,14 @@
+# Round 2 Revision Notes (`argon`)
+
+We revised **4 of 12** failed claims and left **8** unrevised where multi-window discovery splits or holdout diagnostics falsified the specification.
+
+## What We Revised and Why
+
+1. **`trd_04_after_end_resolution_carry-r2`:** Round 1 (`+$38.3k`, CI `[-$3.19, +$4.19]`) included 93–96.9c fills, uncapped whale sizes, and trades immediately past scheduled end (`secs_to_end > -3600`), catching sports overtime/stoppage play and 1h crypto close reversals (also negative pre-September in discovery). Requiring `secs_to_end <= -3600`, `price` in `[0.97, 0.999]`, `usdc_size <= 10000`, and excluding `crypto_updown_1h` isolates true oracle-settlement carry (`12/12` positive discovery weeks; CI `[+$1.02, +$1.87]` pre-Sep 8 and `[+$0.67, +$1.84]` Sep 8–Oct 5).
+2. **`trd_06_sibling_ladder_arb-r2`:** Round 1 earned `+$902k` (`+17.6%` ROI; `+$3.84M` across all collected wallets) but missed event-clustered CI (`[-$9.80, +$66.28]`) because `$5k` directional taker sweeps across correlated strikes caused single-event drawdowns (also negative pre-Sep 8). Requiring `maker_flag == True`, `price` in `[0.15, 0.8499]`, `usdc_size <= 1000`, and `pnl_total_disc > 0` isolates passive sibling quoting and passes discovery CI (`[+$2.13, +$19.85]` full discovery; `[+$5.43, +$47.73]` Sep 8–Oct 5).
+3. **`trd_13_weather_ensemble-r2`:** Holdout weather trades passed CI across all collected wallets (`+$23.1k`, CI `[+$0.22, +$0.80]`, `100%` positive weeks), whereas Round 1 `U_disc` (`+$5.1k`, `+11.1%` ROI) selected only 11 wallets because `679/1,332` `U_disc` wallets had zero pre-cutoff trade rows under API feed caps, zeroing `mix_type_weather_disc` and `pnl_market_disc`. Using `pnl_total_disc > 0` and `usdc_size <= 2500` recovers capped weather specialists (`+$9.25/trade`, CI `[+$1.00, +$20.60]` in discovery).
+4. **`ent_01_e0000_postmatch_fleet-r2`:** All 10 `E0000` wallets earned `+$52.7k` (`100%` positive weeks and days), failing only `linked=False` because `0x30bfb3...` linked solely via `partition` (`fingerprint=False`) and three periphery accounts had weaker correlation or size cosine. Restricting to the 6-wallet core connected by both `fingerprint` and `daily_pnl_corr >= 0.76` strictly dominates verified entity `E0005` on every linkage metric.
+
+## What Verification Taught Us
+
+Structural, settlement, and microstructure edges persist out of sample: Round 1 verified slate overround (`trd_08`), decided carry (`trd_05`), passive short-horizon market making (`trd_10`, `trd_11`), on-chain lead-lag (`trd_09`), and coordinated scalping (`ent_03`). Conversely, directional/live sports (`trd_01`–`trd_03`), unhedged crypto tail-selling (`trd_07`), cultural precursors (`trd_12`), capped-upside bonders vs right-skewed controls (`ss_01`), and 2-wallet clusters (`ent_02`, `ent_04`) failed from adverse selection, tail variance, or weak linkage, so we omit them.
