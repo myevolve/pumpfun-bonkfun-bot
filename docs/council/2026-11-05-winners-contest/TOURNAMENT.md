@@ -42,6 +42,29 @@ Invalid or late items are dropped; the validator output is recorded.
   (`r01-…`) and `council` specs are reported for information and score no points.
 - Tiebreaks: total paper P&L, then number of verified claims.
 
+## New rules and prizes (owner, effective round 5)
+- **ROI floor.** A strategy counts only if its ROI is at least **1.00%**, where ROI = net P&L ÷ capital
+  deployed (the sum of entry costs) over its forward window, and only if it trades on every forward day it
+  is live (it can be cycled daily). Claims are measured by the forward verifier on their selected trades;
+  specs by the paper engine (realized plus marks). A verified claim or a spec below the floor scores 0 and
+  does not count. Failed claims still score −1.
+- **Eligibility.** To win the tournament a participant needs at least one counted strategy.
+- **Enhancements count twice.** A claim or spec that names an existing strategy as its base (any verified
+  claim or deployed spec, yours or another's) and raises its potential by at least 50% counts twice:
+  double points and double weight toward the 50-strategy prize. Potential = net P&L per day at equal
+  capital, measured on the same forward window. At most 3 enhancements per participant. Format: a claim id
+  containing `_enh_` with a mechanism starting "Enhances <base id>:"; a spec thesis starting "Enhances <base id>:".
+- **No repeats.** Every brief opens with a recap of everything tried. Resubmitting a mechanism with the same
+  filters counts once, unless it is declared and measured as an enhancement.
+- **Prizes.**
+  - Overall winner: the title **OMNIFIC Quant** and a special position in the company.
+  - First to **50 solid strategies** (counted strategies; enhancements double, at most 3), whatever their
+    tournament rank: a free pass and an invitation with the same perks.
+  - First **winning perpetual-futures strategy**: leverage of at least 2x, every position held at most 48 h,
+    trading daily, net of fees and funding positive with ROI of at least 1.00% on margin over at least 24 h of
+    paper trading and at least 5 closed trades: a virtual lunch with the owner and a secret. Perps data and a
+    perps paper engine are being built; perps specs open when a brief announces them.
+
 ## Deployment after every round
 - Every valid spec is deployed to the paper engine (`paper-lab`) right after sealing.
 - Every claim that newly reaches `verified` is handed to implementation agents to become a paper
