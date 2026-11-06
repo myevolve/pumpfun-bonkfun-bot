@@ -2350,3 +2350,68 @@ followers pay the spread the winners earned as makers (72% of winners' fills
 are maker fills); exits, hedges and sharding are invisible; leaderboards
 select on outcomes. What transfers is a process signature: price band ×
 timing to end × category × maker share, inside capacity limits.
+
+## Wave C6: tournament rounds 2–4, Kalshi paper and the restart (2026-11-06)
+
+Rules and scripts: `docs/council/2026-11-05-winners-contest/` (TOURNAMENT.md,
+PLAN.md).
+
+**Forward scoring replaced the reused holdout.** Reusing round 1's October
+holdout would have let feedback leak into later claims. From round 2, each
+claim is scored only on Polymarket activity after its round's data snapshot.
+
+**What 21 hours of forward data showed** (629k fills, 78% of buys
+resolved, scored 21:35Z):
+
+- **Verified:** 29 claims (argon 14, astra 9, fable 6).
+- **Counted:** 15 clear the owner's ROI floor of 1.00% on capital deployed
+  (argon 11, astra 3, fable 1).
+- **The carry family holds up but rarely clears the floor.** Near-certainty
+  carry verifies across crypto final minutes, decided outcomes, post-end
+  sports and finance favorites. Buying at 99c caps ROI near 1%, so most
+  variants verify and still score 0.
+- **The round-1 headline edge failed forward.** 15-minute crypto maker
+  claims failed for all three contestants in November (352–593 events each);
+  5-minute maker is inconclusive and 5-minute taker failed.
+- **Pre-game sharp taker failed** again, as in round 1.
+- **Early verdicts move.** fable's 5-minute expiry carry was verified at
+  2.6 hours and inconclusive at 21 hours (905 events), so deployment now
+  waits for two consecutive counted scorings with at least 30 events.
+
+**Kalshi paper, first day.**
+
+- **Wide books are a trap.** "Favorite = the side with the higher ask"
+  bought 0.95–0.99 asks against 0.09–0.38 bids. The first versions were
+  retired within an hour; `entry.max_spread` now requires a bid and a
+  narrow spread.
+- **Models must beat the market first.** The calibrated NWS weather model
+  loses to the Kalshi mid at every horizon (day-ahead Brier 0.123 vs 0.091).
+  The crypto spot model beats it only on 15-minute BTC, by about 1%.
+- **Marks need care.** Closed-but-unsettled markets and books that turned
+  into empty shells (both sides ≤ 1¢) were marked at 0 or 1¢, causing false
+  daily-loss halts. Marks now carry the last real bid until settlement.
+- **Results so far:**
+  - smart-shadow: −9.5% ROI on 55 settled positions.
+  - Council carry deployed from argon's claim: 17 of 17 positions won, ROI
+    about 1%. A single loss at 0.98 would erase about six windows of gains.
+  - astra's FX tail bids: +$195 from 3 tickets, a sample too small to read.
+
+**Perps.** A leveraged Hyperliquid paper engine (`perps-lab`) went live at
+21:47Z: book-walk taker fills, queue-last maker fills, hourly funding,
+isolated-margin liquidation and a 48-hour hold cap. Pitfalls found while
+building it:
+
+- Hyperliquid serves only the latest ~5,000 candles per interval, so deeper
+  history comes from Binance's public archive.
+- 89 of 179 perps cap leverage at 3x. A spec over any coin's cap is rejected
+  whole, so the tournament checks caps offline before sealing.
+
+**The restart.** The host restarted for 16 hours (05:19Z–21:23Z). Recovery
+took about 12 minutes, using:
+
+- every service's exact start command recorded beforehand;
+- each agent's handoff note;
+- a resumable forward refresh, which backfilled 506k fills in 11 minutes.
+
+The tournament now runs as a persistent service on a re-anchored clock,
+with a per-round status file the orchestrator watches.
