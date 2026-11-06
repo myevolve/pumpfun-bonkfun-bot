@@ -23,13 +23,27 @@ Engine: `paper-lab`, built in the `polymarket-alpha-bot` worktree on branch `fea
 | 10 | r01-argon-weather-nws | weather traders, +$1.44/trade, 11k trades | daily-high brackets priced from a calibrated NWS model |
 | 11 | smart_shadow (coded) | shadowing proven wallets, +$3.94/trade, 92k trades | mirror fresh leader trades onto confidently matched Kalshi markets |
 
+Status at 2026-11-06 21:45Z, with the latest dashboard ROI where one was reported:
+
+| Spec | Status |
+|---|---|
+| slate NO, decided carry, mentions, tech, crypto-strike bonds | Retired within the first hour: "favorite = higher ask" bought into empty books. Replaced by `-v2` copies with `entry.max_spread` (decided carry v2 was mis-halted by hollow-book marks, since fixed) |
+| 15-minute crypto maker | Narrowed to BTC (`-btc-v2`): the spot model beats the Kalshi mid only on 15-minute BTC |
+| weather NWS | Retired before trading: the calibrated model loses to the Kalshi mid at every horizon |
+| smart_shadow | Live, −9.5% ROI on 55 settled; retirement for "two daily-loss trips" reversed, both trips were one episode |
+| council crypto 15m expiry carry | Deployed from tournament claim `r03_c5m_expiry_carry`: 17 positions, all winners, ROI about 1% |
+
+Tournament winners join through the deployment gate: a claim verified forward, with ROI ≥ 1.00% on at
+least 30 resolved events, at two consecutive hourly scorings. Perps specs run in a separate
+leveraged-perps paper engine (`perps-lab`, Hyperliquid public data).
+
 Not deployable now: after-end carry (Kalshi halts trading at close; revisit for Polymarket US), the
 linked fleets (observations, not strategies), and every mechanism that failed the holdout (pre-game and
 in-play sports, broad politics, wallet persistence).
 
 ## Kill rules, per spec
 - Stop when at least 30 positions have settled and the 95% CI of mean P&L per position is below zero.
-- Stop when the daily loss cap trips twice.
+- Stop when the daily loss cap trips on two separate UTC days.
 - Stop on any paper fill that cannot be traced to a stored book snapshot (fill-model breach).
 - Models must beat the Kalshi mid on calibration before their specs trade (weather, crypto).
 

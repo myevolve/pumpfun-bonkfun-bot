@@ -73,11 +73,12 @@ Invalid or late items are dropped; the validator output is recorded.
     tournament rank: a free pass and an invitation with the same perks.
   - First **winning perpetual-futures strategy**: leverage of at least 2x, every position held at most 48 h,
     trading daily, net of fees and funding positive with ROI of at least 1.00% on margin over at least 24 h of
-    paper trading and at least 5 closed trades: a virtual lunch with the owner and a secret. Perps data and a
-    perps paper engine are being built; perps specs open when a brief announces them.
+    paper trading and at least 5 closed trades: a virtual lunch with the owner and a secret. Perps entries
+    open from round 6 (dataset in the view's `perps/`, engine `perps-lab`); the engine records the first
+    spec to meet every criterion.
 
 ## Deployment after every round
-- Every valid spec is deployed to the paper engine (`paper-lab`) right after sealing.
+- Every valid spec is deployed right after sealing: Kalshi specs to `paper-lab`, perps specs to `perps-lab`.
 - Every claim that newly reaches `verified` is handed to implementation agents to become a paper
   spec authored `council` (credited in its thesis; no paper points, to avoid double counting).
 - The paper dashboard (per spec P&L, fills, positions) is published in each round's brief.
