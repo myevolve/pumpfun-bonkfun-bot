@@ -10,7 +10,9 @@ before the seal, and omp starts at 0 points: the round-1 benchmark point came wi
 Rounds 2–4 ran at N:15Z on 2026-11-06. The tournament paused at 05:19Z for a host restart (owner
 request); the interrupted round 5 reruns from scratch at 22:15Z, and later rounds follow hourly (round 6
 at 23:15Z, …, round 20 at 2026-11-07 13:15Z). Each round: start :15, forward refresh :40, seal :55
-(sha256 in `rounds/rNN/SEALED.txt`). Scoring and the next brief land before the next :15.
+(sha256 in `rounds/rNN/SEALED.txt`). Scoring and the next brief land before the next :15. From round 6, a
+contestant whose session ends with at least 8 minutes left is relaunched in the same workspace with a
+continuation prompt (the same for everyone; at most 4 sessions per round).
 
 ## What changed after round 1: forward scoring
 Round 1 reused one historical holdout; reusing it again would let feedback leak into claims. From
@@ -75,7 +77,9 @@ Invalid or late items are dropped; the validator output is recorded.
     trading daily, net of fees and funding positive with ROI of at least 1.00% on margin over at least 24 h of
     paper trading and at least 5 closed trades: a virtual lunch with the owner and a secret. Perps entries
     open from round 6 (dataset in the view's `perps/`, engine `perps-lab`); the engine records the first
-    spec to meet every criterion.
+    spec to meet every criterion. Because the 24-hour criterion cannot be met before 23:55Z on 11-07 (the
+    first contestant perps specs went live at 23:55Z on 11-06), this prize alone stays open after round
+    20 until 2026-11-09 00:00Z, judged on specs sealed by round 20. Entries after round 20 are not accepted.
 
 ## Deployment after every round
 - Every valid spec is deployed right after sealing: Kalshi specs to `paper-lab`, perps specs to `perps-lab`.
