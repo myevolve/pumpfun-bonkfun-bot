@@ -2415,3 +2415,74 @@ took about 12 minutes, using:
 
 The tournament now runs as a persistent service on a re-anchored clock,
 with a per-round status file the orchestrator watches.
+
+## Wave C7: winners tournament, final results (rounds 5–20, 2026-11-06/07)
+
+Full record: `docs/council/2026-11-05-winners-contest/tournament/` (FINAL.md,
+LEADERBOARD.md, INCIDENTS.md, DEPLOYMENTS.md).
+
+**Final standings, scored after round 20:**
+
+| Contestant | Total | Counted strategies |
+|---|---|---|
+| argon | 159 | 26 |
+| fable | 85 | 18 |
+| astra | 42 | 4 |
+| omp | 39 | 10 |
+
+omp, the orchestrator's sandboxed instance, joined in round 5 at 0 points.
+No contestant reached 50 counted strategies. The perps prize stays open
+until 11-09 00:00Z: its 24-hour criterion could not be met before 23:55Z
+on 11-07.
+
+**What the numbers say:**
+
+- **Paper P&L is negative in aggregate.** After about a day on Kalshi
+  paper the whole book is −$1,797 across 154 specs, and perps are −$43
+  across 117 specs.
+- **A few contestant specs clear the floor.** 16 specs clear ROI ≥ 1.00%
+  with daily trading and at least 10 settled positions, mostly
+  near-expiry carry on 15-minute crypto and hourly strike ladders
+  (+1.3% to +8%). The exception is astra's hourly digital value spec
+  (+29% on small size). One day of data proves none of them.
+- **Polymarket-verified edges rarely transfer to Kalshi.** 24 claims
+  cleared the deployment gate (verified, ROI ≥ 1%, at least 30 events at
+  two consecutive scorings). Only 6 became council specs. The rest failed
+  in Kalshi replays (−1% to −3.3%), depended on Polymarket wallet
+  selection that cannot be reproduced on Kalshi, or duplicated live specs.
+- **Deployed winners decay too.** The first council spec, 15-minute expiry
+  carry, went from +1.15% to +0.64% ROI over 250 settled positions as
+  losses arrived. Carry at 96–99c needs hundreds of settlements before its
+  sign is clear.
+- **Verdicts move with data.** Claims flip between verified,
+  inconclusive and failed as hours of forward data accumulate. Only the
+  status at the end of round 20 scored.
+
+**Infrastructure lessons:**
+
+- **Agent CLIs carry user plugins.** A Claude CLI memory plugin
+  (claude-mem) keyed sessions by git root and injected one contestant's
+  session summaries into another's for rounds 5–9. Run contestant CLIs
+  with `--setting-sources project,local --strict-mcp-config`, and isolate
+  workspaces from parent repositories (`GIT_CEILING_DIRECTORIES`). The
+  owner rules on rounds 5–9; the ranks are the same either way.
+- **Kalshi game markets are not what their metadata suggests.** The
+  scheduled close is the expected end plus 45 h (CS2 44 h, tennis 333 h),
+  and the market actually closes at the final whistle. Windows of a few
+  hours before close never select a game.
+- **Shared rate limits are a commons.** Three parallel read-only replays
+  pushed the paper engine's Kalshi scan from about 2–8 minutes to 22
+  minutes. Run replays one at a time at about 1.7 requests/s.
+- **Hyperliquid's REST candle weight caps perps capacity.** Bursts at the
+  top of the hour skipped bars. A verified public websocket feed (bars must
+  match REST on two consecutive closes before use) cut 15-minute and 1-hour
+  signal delay from 200–580 s to 8–10 s.
+- **Kill rules need flap handling.** Thin books trip daily-loss stops for
+  seconds. Count a trip only if it lasts 15 minutes or has a realized
+  loss; otherwise real specs get retired on noise.
+
+**Real money remains unjustified** by the plan's bar: 100 or more settled
+positions with the confidence interval above zero after fees, in two
+independent windows. The paper engines, the logger and the whaleride
+keeper keep running; the perps prize is read from `perps_prize.first_met_at`
+on the perps dashboard.
