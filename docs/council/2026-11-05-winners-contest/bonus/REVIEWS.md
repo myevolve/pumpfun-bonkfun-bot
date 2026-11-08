@@ -188,7 +188,8 @@ The judge decides acceptance mechanically. The organizer reviews every accepted 
 | b07-omnific-bracket-synth-parity | +16.6% (1,564) | +11.4% (1,164) | partly artifact; still above 10% |
 | b08-omnific-gasday-cross | +20.5% (52) | +13.9% (6) | mostly artifact; 86.5% stale, 71% crossed |
 
-- **Status:** owner decision pending on whether b01/b08 keep their points. Paper trading uses live books, so it is unaffected. So far b07 shows 242 live pairs and b08 17, with 0 fills.
+- **Owner ruling (11-08, option B):** b01-omnific and b08-omnific are re-scored to 0 points (rejected; not a penalty or sudden death). On fillable prices they keep 14 and 6 trades, under the 30-trade minimum. Both stay in paper trading.
+- **Final standings:** OMNIFIC 140, SWARM 120. Both teams were told (OMNIFIC #276, SWARM #492).
 
 ## b10-omnific-one-touch-no (Polymarket US), accepted, 10 points (re-run +4.86%, 51 trades, 47W/4L)
 - **Mechanism:** PM US crypto one-touch barrier markets (weekly/monthly/yearly). Buy NO at its displayed price the first time it sits in 75–95¢ with spread ≤ 3¢, taker, hold to settlement. The YES side is a touch lottery that is overpaid.

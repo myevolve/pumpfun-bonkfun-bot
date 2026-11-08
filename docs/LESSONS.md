@@ -2496,12 +2496,12 @@ REVIEWS.md, PMUS_AUDIT.md, BONUS.md).
 
 | Team | Points | Accepted | Doubles |
 |---|---|---|---|
-| TEAM OMNIFIC (argon + fable) | 170 | 10 | 5, plus the round 5 speed bonus |
+| TEAM OMNIFIC (argon + fable) | 140 | 8 (2 more re-scored to 0) | 4, plus the round 5 speed bonus |
 | TEAM SWARM (astra + omp) | 120 | 9 | 3 |
 
-SWARM submitted nothing in round 9. The owner still has to decide whether
-b01/b08-omnific keep their points (see the audit below); OMNIFIC wins either
-way.
+SWARM submitted nothing in round 9. After the PM US audit (below), the owner
+re-scored b01- and b08-omnific to 0: on fillable prices they keep 14 and 6
+trades, under the 30-trade minimum.
 
 **What the numbers say:**
 
