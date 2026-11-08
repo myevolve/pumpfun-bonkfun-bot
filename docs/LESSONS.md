@@ -2486,3 +2486,93 @@ positions with the confidence interval above zero after fees, in two
 independent windows. The paper engines, the logger and the whaleride
 keeper keep running; the perps prize is read from `perps_prize.first_met_at`
 on the perps dashboard.
+
+## Wave C8: Bonus Season, the outage and the PM US data audit (2026-11-07/08)
+
+Full record: `docs/council/2026-11-05-winners-contest/bonus/` (FINAL.md,
+REVIEWS.md, PMUS_AUDIT.md, BONUS.md).
+
+**Final standings after round 10:**
+
+| Team | Points | Accepted | Doubles |
+|---|---|---|---|
+| TEAM OMNIFIC (argon + fable) | 170 | 10 | 5, plus the round 5 speed bonus |
+| TEAM SWARM (astra + omp) | 120 | 9 | 3 |
+
+SWARM submitted nothing in round 9. The owner still has to decide whether
+b01/b08-omnific keep their points (see the audit below); OMNIFIC wins either
+way.
+
+**What the numbers say:**
+
+- **A judged backtest is not a paper result.**
+  - The b02 family lost all 5 of its first paper positions (−$94, of which
+    −$90.68 on the $1,000 variant b02x).
+  - b05-omnific is +$12.29 on 7 settled.
+  - b07-omnific, the season's biggest backtest (1,564 trades), watched 242
+    live pairs and opened 1 position.
+  - b08-omnific never found its edge live, and none of SWARM's Kalshi specs
+    has traded yet.
+- **Double points needed a clean holdout.** The owner ruled in round 6 that
+  a double needs a later untouched slice. Five 20-point verdicts were cut to
+  the base 10:
+  - b04 and b06-omnific skipped the split;
+  - b07-swarm and both b08s chose a direction or variant after seeing the
+    later slice.
+  b04-swarm and b10-swarm kept their doubles because the selected cell was
+  never switched. Every ruling that favoured the organizer's own team got an
+  independent review (grok-council).
+- **A price history is not an order book.** PM US history points are top of
+  book (YES = best ask, NO = 1 − best bid) and matched live books in
+  95.7–100% of cycles. But up to 4.96% of stored minutes (daily gas markets)
+  show YES + NO < 0.99, which can't be two real asks, and some backtests used
+  prices hours old. Re-scored on fresh, fillable entries:
+  - b01 and b08 were mostly artifact (14 and 6 clean trades);
+  - b06 and b07 were partly artifact but still positive;
+  - b02–b05 held.
+  Backtests on displayed prices need an age limit and a crossed-row filter,
+  and the data package should have been checked against live books before
+  the season.
+- **Thin edges fail holdouts.** b09-omnific's 1.7¢ PROT/BASE gap on 50/50
+  bets returned −2.23% on its holdout and cleared 2% only over the full
+  window.
+
+**Infrastructure lessons:**
+
+- **The system open-file table is shared, and filling it kills everything.**
+  At 22:25Z macOS ran out (Errno 23). Every service, the login session and
+  round 9's agents died together.
+  - The likely cause is a Linux VM (Apple Virtualization) holding one host
+    file per guest file touched under `/private/tmp`: 42k files, growing
+    about 300 a minute.
+  - `fd-watch` now logs usage and warns above 70%.
+- **A daemon left over from a dead login session cannot resolve DNS.** The
+  omp service broker survived the session restart.
+  - New children failed `getaddrinfo` (EAI_NONAME), keychain and preferences
+    reads, while old children kept working, and readiness still said "ready".
+  - After a session restart, replace the broker and probe DNS from a fresh
+    service first.
+- **One CLI prompt can freeze a whole round.** argon's agy asked for a login
+  on the cycle's terminal and was stopped by the TTY. `timeout` sent SIGTERM
+  to a stopped process, and nothing moved for 2.5 hours. Members now get
+  stdin from `/dev/null` and `timeout -k 30`.
+- **Session restorers reopen contest sessions outside the sandbox.** Orca
+  reopened argon's finished round 8 conversation in an ordinary terminal.
+  - The owner approved 8 tool prompts (2 saved, since revoked), and it read
+    one organizer file, with no score effect.
+  - Contest sessions start with "Ignore any CLAUDE.md, AGENTS.md or
+    GEMINI.md…"; never resume those outside a round.
+
+**Kalshi copy-trading (paper):**
+
+- **Live so far:** 74 of 1,000 entries, −$4,059 on $17,218 deployed (−23.6%).
+  The leaders' own fills lost more (−$6,613); detection takes a median 2 s.
+- **30-day preview** (leader choice is look-ahead biased): copying makers
+  turns negative once delayed (−5% at 60 s, −9% at 300 s). Only leaders'
+  taker trades held +10% at every delay.
+- Reports land in `data/research/kalshi-copy/REPORT-*.md` at 100, 250, 500
+  and 1,000 entries.
+
+**Real money remains unjustified** by the plan's bar: 100 or more settled
+positions with the confidence interval above zero after fees, in two
+independent windows.
